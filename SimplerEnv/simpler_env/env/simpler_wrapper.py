@@ -129,3 +129,41 @@ class SimlerWrapper:
                 info["episode"][k] = v
 
         return obs_image, reward, truncated, info
+
+    def get_language_instruction(self) -> list[str]:
+        """
+        Get task instructions in all envs.
+        """
+        return self.env.unwrapped.get_language_instruction()
+
+    def get_task_pool(self) -> list[list[str]]:
+        """
+        Get task pool in all env.
+        """
+        return self.env.unwrapped.task_pool()
+    
+    def get_object_names(self) -> list[list[str]]:
+        """
+        Get object names in all envs.
+        """
+        return self.env.unwrapped.object_name()
+    
+    def get_receptacle_names(self) -> list[list[str]]:
+        """
+        Get receptacle names in all envs.
+        """
+        return self.env.unwrapped.receptacle_name()
+
+    def set_task(self, object: list[str], receptacle: list[str]) -> bool:
+        """
+        Set task in all envs.
+
+        Input: object names, receptacle names
+        """
+        try:
+            self.env.unwrapped.set_current_task(object, receptacle)
+        except Exception as e:
+            print(f"Failed to set task: {e}")
+            return False
+        
+        return True
