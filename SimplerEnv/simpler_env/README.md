@@ -46,6 +46,7 @@ print(runner.env.get_receptacle_names())
 ## Change task
 Evaluation will also change.
 ```bash
+# Input [env1_carrot, env2_carrot, ...], [env1_plate, env2_plate, ...]
 runner.env.set_task(['ketchup bottle', 'ketchup bottle'], ['envelope', 'envelope'])
 print(runner.env.get_language_instruction())
 
