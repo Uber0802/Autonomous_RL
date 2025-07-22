@@ -3,6 +3,12 @@
 2. `TwoObjectOneReceptacle-v1`
 3. `TwoObjectTwoReceptacle-v1`
 
+# train_ms3_ppo.py
+- Switch task every 80 steps.
+- Iterate through tasks in runner.env.get_task_pool().
+    - e.g. 'put watering can on yellow_plate','put watering can on envelope', 'put ketchup bottle on yellow_plate', 'put ketchup bottle on envelope'
+- Evaluate all tasks in runner.env.get_task_pool().
+
 # Environment Functions
 - All function are in `SimplerEnv/simpler_env/env/simpler_wrapper.py`
 - All examples using `TwoObjectTwoReceptacle-v1`, seed=0, num_envs=2

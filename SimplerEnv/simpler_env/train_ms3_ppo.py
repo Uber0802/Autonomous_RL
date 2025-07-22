@@ -1,4 +1,5 @@
 import os
+import re
 import pprint
 import random
 import gc
@@ -40,7 +41,7 @@ class Args:
     name: str = "PPO-test"
 
     # env
-    num_envs: int = 64
+    num_envs: int = 1
     episode_len: int = 80 # 80
     training_len: int = 1600
     use_same_init: bool = True
@@ -130,6 +131,21 @@ class Runner:
         minibatch_count = self.buffer.get_minibatch_count()
         print(f"Buffer minibatch count: {minibatch_count}")
 
+        # Task Switch
+        self.task_id = 0
+        self.task_list = self.env.get_task_pool()[0]
+
+    def extract_obj_recep(self, text_string):
+        pattern = r"put (.*?) on (.*)"
+        match = re.search(pattern, text_string)
+
+        if match:
+            obj = match.group(1)
+            recep = match.group(2)
+            return obj, recep
+        else:
+            return None, None
+
     @torch.no_grad()
     def _get_action(self, obs, deterministic=False):
         total_batch = obs["image"].shape[0]
@@ -202,11 +218,12 @@ class Runner:
         return info
 
     @torch.no_grad()
-    def eval(self, obj_set: str) -> dict:
+    def eval(self, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
         self.policy.prep_rollout()
         env_infos = defaultdict(lambda: [])
 
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init)
+        self.env.set_task(object, receptacle)
 
         for _ in range(self.args.episode_len):
             obs = dict(image=obs_img, task_description=instruction)
@@ -365,7 +382,11 @@ class Runner:
                     wandb.log(infos, step=step_idx + episode * self.args.training_len)
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
-                    instruction = self.env.env.get_language_instruction()
+                    #Switch Instruction
+                    self.task_id = (self.task_id + 1) % len(self.task_list)
+                    obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+                    self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
+                    instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction)
                     self.buffer.update_instruction(instruction)
 
@@ -408,13 +429,11 @@ class Runner:
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
-                sval_stats = self.eval(obj_set="train")
-                sval_stats = {f"eval/{k}": v for k, v in sval_stats.items()}
-                wandb.log(sval_stats, step=steps)
-
-                sval_stats = self.eval(obj_set="test")
-                sval_stats = {f"eval/{k}_ood": v for k, v in sval_stats.items()}
-                wandb.log(sval_stats, step=steps)
+                for object in self.env.get_object_names():
+                    for receptacle in self.env.get_receptacle_names():
+                        sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                        sval_stats = {f"eval_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                        wandb.log(sval_stats, step=steps)
 
             # save
             if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:
