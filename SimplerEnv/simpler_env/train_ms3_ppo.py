@@ -429,8 +429,8 @@ class Runner:
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
-                for object in self.env.get_object_names():
-                    for receptacle in self.env.get_receptacle_names():
+                for object in self.env.get_object_names()[0]:
+                    for receptacle in self.env.get_receptacle_names()[0]:
                         sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
                         sval_stats = {f"eval_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                         wandb.log(sval_stats, step=steps)
