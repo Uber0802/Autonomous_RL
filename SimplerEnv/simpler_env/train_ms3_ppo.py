@@ -41,15 +41,15 @@ class Args:
     name: str = "PPO-test"
 
     # env
-    num_envs: int = 1
+    num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 1600
+    training_len: int = 80
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
     interval_eval: int = 10
-    interval_save: int = 1
+    interval_save: int = 40
 
     # buffer
     buffer_inferbatch: int = 32
@@ -222,8 +222,8 @@ class Runner:
         self.policy.prep_rollout()
         env_infos = defaultdict(lambda: [])
 
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init)
-        self.env.set_task(object, receptacle)
+        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        print("Evaluating:", instruction[0])
 
         for _ in range(self.args.episode_len):
             obs = dict(image=obs_img, task_description=instruction)
@@ -247,7 +247,7 @@ class Runner:
         return env_stats
 
     @torch.no_grad()
-    def render(self, epoch: int, obj_set: str) -> dict:
+    def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
         self.policy.prep_rollout()
 
         # init logger
@@ -259,8 +259,8 @@ class Runner:
             "info": [],  # info after executing a_t: [1, T]
         } for idx in range(self.args.num_envs)]
 
-        obs_img, instruction, info = self.env.reset(obj_set, same_init=self.args.use_same_init)
-        print("instruction[:3]:", instruction[:3])
+        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        print("Rendering:", instruction[0])
 
         # data dump: instruction
         for idx in range(self.args.num_envs):
@@ -314,7 +314,7 @@ class Runner:
                     )
 
             success = int(infos[-1]["success"])
-            images_to_video(images, str(exp_dir), f"video_{i}-s_{success}",
+            images_to_video(images, str(exp_dir), f"video_{i}-{object[0]}_{receptacle[0]}-s_{success}",
                             fps=10, verbose=False)
 
         # infos
@@ -432,7 +432,7 @@ class Runner:
                 for object in self.env.get_object_names()[0]:
                     for receptacle in self.env.get_receptacle_names()[0]:
                         sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                        sval_stats = {f"eval_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                        sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                         wandb.log(sval_stats, step=steps)
 
             # save
@@ -440,9 +440,11 @@ class Runner:
                 print(f"Saving model at {steps}")
                 save_path = self.glob_dir / f"steps_{episode:0>4d}"
                 self.policy.save(save_path)
+                
+                for object in self.env.get_object_names()[0]:
+                    for receptacle in self.env.get_receptacle_names()[0]:
+                        self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
-                self.render(epoch=episode, obj_set="train")
-                self.render(epoch=episode, obj_set="test")
 
 
 def main():
@@ -451,22 +453,15 @@ def main():
 
     if args.only_render:
         ll = [
-            "PutOnPlateInScene25VisionImage-v1",
-            "PutOnPlateInScene25VisionTexture03-v1",
-            "PutOnPlateInScene25VisionTexture05-v1",
-            "PutOnPlateInScene25VisionWhole03-v1",
-            "PutOnPlateInScene25VisionWhole05-v1",
-
-            "PutOnPlateInScene25Instruct-v1",
-            "PutOnPlateInScene25Plate-v1",
-            "PutOnPlateInScene25Position-v1",
-            "PutOnPlateInScene25EEPose-v1",
-            "PutOnPlateInScene25PositionChange-v1",
-            "PutOnPlateInScene25PositionChangeTo-v1"
+            "OneObjectTwoReceptacle-v1",
+            "TwoObjectOneReceptacle-v1",
+            "TwoObjectTwoReceptacle-v1"
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
+        runner.render(epoch=0, obj_set="train")
         runner.render(epoch=0, obj_set="test")
+        runner.render(epoch=1, obj_set="train")
     else:
         runner.run()
 

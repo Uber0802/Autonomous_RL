@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+import random
 from mani_skill.envs.sapien_env import BaseEnv
 
 
@@ -34,6 +35,10 @@ class SimlerWrapper:
         # constants
         bins = np.linspace(-1, 1, 256)
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
+
+        # Random number for episode_id
+        random.seed(self.args.seed)
+        self.rand_episode_id = random.randint(0, 1000)
 
     def get_reward(self, info):
         reward = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(info["success"].device)  # [B, 1]
@@ -91,12 +96,25 @@ class SimlerWrapper:
 
         return action
 
-    def reset(self, obj_set: str, same_init: bool = False):
+    def set_task(self, object: list[str], receptacle: list[str]) -> bool:
+        """
+        Set task in all envs.
+
+        Input: object names, receptacle names
+        """
+        try:
+            self.env.unwrapped.set_current_task(object, receptacle)
+        except Exception as e:
+            print(f"Failed to set task: {e}")
+            return False
+        
+        return True
+
+    def reset(self, obj_set: str, same_init: bool = False, object: list[str] = [], receptacle: list[str] = []):
         options = {}
         options["obj_set"] = obj_set
         if same_init:
-            # options["episode_id"] = torch.randint(1000000000, (1,)).expand(self.num_envs).to(self.env.device)  # [B]
-            options["episode_id"] = torch.full((self.num_envs,), 42, dtype=torch.long, device=self.env.device)
+            options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
 
 
         
@@ -104,6 +122,10 @@ class SimlerWrapper:
             print("episode id : ", options["episode_id"])
 
         obs, info = self.env.reset(options=options)
+
+        if object and receptacle:
+            self.set_task(object, receptacle)
+
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         instruction = self.env.unwrapped.get_language_instruction()
 
@@ -153,17 +175,3 @@ class SimlerWrapper:
         Get receptacle names in all envs.
         """
         return self.env.unwrapped.receptacle_name()
-
-    def set_task(self, object: list[str], receptacle: list[str]) -> bool:
-        """
-        Set task in all envs.
-
-        Input: object names, receptacle names
-        """
-        try:
-            self.env.unwrapped.set_current_task(object, receptacle)
-        except Exception as e:
-            print(f"Failed to set task: {e}")
-            return False
-        
-        return True

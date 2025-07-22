@@ -620,10 +620,13 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
         ltt = lc * le * lp * lo * l1 * l2
 
         # Use one shared episode ID for all environments
-        single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-        episode_id = torch.full((b,), single_id, device=self.device)
-        episode_id = episode_id.reshape(b)
-        episode_id = episode_id % ltt
+        if "episode_id" in options:
+            episode_id = options["episode_id"]
+        else:
+            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
+            episode_id = torch.full((b,), single_id, device=self.device)
+            episode_id = episode_id.reshape(b)
+            episode_id = episode_id % ltt
 
         self.select_carrot1_ids = episode_id // (le * lp * lo * l1 * l2) + lc_offset  # [b]
         self.select_carrot2_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
@@ -961,10 +964,13 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
-        single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-        episode_id = torch.full((b,), single_id, device=self.device)
-        episode_id = episode_id.reshape(b)
-        episode_id = episode_id % ltt
+        if "episode_id" in options:
+            episode_id = options["episode_id"]
+        else:
+            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
+            episode_id = torch.full((b,), single_id, device=self.device)
+            episode_id = episode_id.reshape(b)
+            episode_id = episode_id % ltt
 
         self.select_carrot_ids = episode_id // (lp * le * lo * l1 * l2)  # [b]
         self.select_plate1_ids = (episode_id // (le * lo * l1 * l2)) % lp
@@ -1312,10 +1318,13 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
-        single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-        episode_id = torch.full((b,), single_id, device=self.device)
-        episode_id = episode_id.reshape(b)
-        episode_id = episode_id % ltt
+        if "episode_id" in options:
+            episode_id = options["episode_id"]
+        else:
+            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
+            episode_id = torch.full((b,), single_id, device=self.device)
+            episode_id = episode_id.reshape(b)
+            episode_id = episode_id % ltt
 
         self.select_carrot1_ids = episode_id // (lp * le * lo * l1 * l2)  # [b]
         self.select_carrot2_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
