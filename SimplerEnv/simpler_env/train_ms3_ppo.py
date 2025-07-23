@@ -358,7 +358,7 @@ class Runner:
             self.buffer.warmup(obs_img.cpu().numpy(), instruction)
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
-            print("instruction : ", instruction)
+            print("instruction : ", instruction[0])
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 value, action, logprob = self.collect()
@@ -404,7 +404,7 @@ class Runner:
                     obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
                     self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
-                    print(step_idx, "switch instruction to ", instruction)
+                    print(step_idx, "switch instruction to ", instruction[0])
                     self.buffer.update_instruction(instruction)
 
             # steps
