@@ -26,8 +26,14 @@ class SimlerWrapper:
             max_episode_steps=self.args.episode_len,
             sensor_configs={"shader_pack": "default"},
         )
+        # Random number for episode_id
+        random.seed(self.args.seed)
+        self.rand_episode_id = random.randint(0, 1000)
+
         self.env: BaseEnv = gym.make(**env_config)
-        self.env.reset(seed=[self.args.seed * 1000 + i + extra_seed for i in range(self.args.num_envs)])
+        options = {}
+        options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+        self.env.reset(seed=[self.args.seed * 1000 + i + extra_seed for i in range(self.args.num_envs)], options=options)
 
         # variables
         self.reward_old = torch.zeros(self.args.num_envs, 1, dtype=torch.float32)  # [B, 1]
@@ -116,12 +122,15 @@ class SimlerWrapper:
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
 
-
         
         if same_init:
             print("episode id : ", options["episode_id"])
 
+        #import ipdb; ipdb.set_trace()
+
         obs, info = self.env.reset(options=options)
+
+        #import ipdb; ipdb.set_trace()
 
         if object and receptacle:
             self.set_task(object, receptacle)

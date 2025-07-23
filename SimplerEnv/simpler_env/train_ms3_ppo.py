@@ -48,7 +48,7 @@ class Args:
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 10
+    interval_eval: int = 1
     interval_save: int = 40
 
     # buffer
@@ -347,18 +347,35 @@ class Runner:
         max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
         max_episodes = 100
         instruction_switch_interval = 80
+        steps = 0
 
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
 
-            obs_img, instruction, info = self.env.reset(obj_set="train", same_init=self.args.use_same_init)
+            obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+            obs_img, instruction, info = self.env.reset(obj_set="train", same_init=self.args.use_same_init, object=[obj]*self.args.num_envs, receptacle=[recep]*self.args.num_envs)
             self.buffer.warmup(obs_img.cpu().numpy(), instruction)
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
+            print("instruction : ", instruction)
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
-                if step_idx % instruction_switch_interval == 0 and step_idx > 0:
+                value, action, logprob = self.collect()
+                obs_img, reward, done, env_info = self.env.step(action)
+                for env_i in range(self.args.num_envs):
+                    rollout_images[env_i].append(obs_img[env_i].cpu().numpy())
+
+
+                data = (obs_img, action, logprob, value, reward, done)
+                self.insert(data)
+
+                # info
+                if "episode" in env_info.keys():
+                    for k, v in env_info["episode"].items():
+                        env_infos[f"{k}"] += v
+
+                if (step_idx+1) % instruction_switch_interval == 0 and step_idx > 0:
                     
                     self.compute_endup()
 
@@ -379,7 +396,7 @@ class Runner:
                     infos = self.train()
                     for k, v in env_infos.items():
                         infos[f"env/{k}"] = np.mean(v)
-                    wandb.log(infos, step=step_idx + episode * self.args.training_len)
+                    # wandb.log(infos, step=step_idx + episode * self.args.training_len)
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
                     #Switch Instruction
@@ -390,41 +407,9 @@ class Runner:
                     print(step_idx, "switch instruction to ", instruction)
                     self.buffer.update_instruction(instruction)
 
-                value, action, logprob = self.collect()
-                obs_img, reward, done, env_info = self.env.step(action)
-                for env_i in range(self.args.num_envs):
-                    rollout_images[env_i].append(obs_img[env_i].cpu().numpy())
-
-
-                data = (obs_img, action, logprob, value, reward, done)
-                self.insert(data)
-
-                # info
-                if "episode" in env_info.keys():
-                    for k, v in env_info["episode"].items():
-                        env_infos[f"{k}"] += v
-
             # steps
             steps = (episode + 1) * self.args.episode_len * self.args.num_envs
-            print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
-
-            # train and process infos
-            self.compute_endup()
-            del value, action, logprob, obs_img, reward, done
-            gc.collect()
-            torch.cuda.empty_cache()
-
-            # train
-            infos = self.train()
-            for k, v in env_infos.items():
-                infos[f"env/{k}"] = np.mean(v)
-
-            # log
-            wandb.log(infos, step=steps)
-
-            elapsed_time = time.time() - ep_time
-            print(f"{self.args.name}: ep {episode:0>4d} | steps {steps} | e {elapsed_time:.2f}s")
-            print(pprint.pformat({k: round(v, 4) for k, v in infos.items()}))
+            # print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
 
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
@@ -459,9 +444,10 @@ def main():
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
-        runner.render(epoch=0, obj_set="train")
-        runner.render(epoch=0, obj_set="test")
-        runner.render(epoch=1, obj_set="train")
+        for object in runner.env.get_object_names()[0]:
+            for receptacle in runner.env.get_receptacle_names()[0]:
+                runner.render(0, "train", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
+
     else:
         runner.run()
 
