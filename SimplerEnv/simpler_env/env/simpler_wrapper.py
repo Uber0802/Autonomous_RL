@@ -42,9 +42,6 @@ class SimlerWrapper:
         bins = np.linspace(-1, 1, 256)
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
 
-        # Random number for episode_id
-        random.seed(self.args.seed)
-        self.rand_episode_id = random.randint(0, 1000)
 
     def get_reward(self, info):
         reward = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(info["success"].device)  # [B, 1]
