@@ -119,9 +119,6 @@ class SimlerWrapper:
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
 
-        
-        if same_init:
-            print("episode id : ", options["episode_id"])
 
         #import ipdb; ipdb.set_trace()
 

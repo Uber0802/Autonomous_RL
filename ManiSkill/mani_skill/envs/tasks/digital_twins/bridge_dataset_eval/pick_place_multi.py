@@ -346,7 +346,6 @@ class BasePickPlace(BaseEnv):
             carrot_name = self.model_db_carrot[select_carrot[idx]]["name"]
             plate_name = self.model_db_plate[select_plate[idx]]["name"]
             instruct.append(f"put {carrot_name} on {plate_name}")
-
         return instruct
 
     def _after_reconfigure(self, options: dict):
@@ -1210,6 +1209,8 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
 
         # random configs
         self.carrot_names = list(self.model_db_carrot.keys())
+
+        # import ipdb; ipdb.set_trace()
         self.plate_names = list(self.model_db_plate.keys())
 
         # rgb overlay
@@ -1421,6 +1422,8 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_plate_ids = self.select_plate1_ids
         self.select_extra2_ids = self.select_plate2_ids
 
+        # import ipdb; ipdb.set_trace()
+
         b = self.num_envs
 
         # rgb overlay
@@ -1442,6 +1445,7 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
         select_extra1 = [self.carrot_names[idx] for idx in self.select_extra1_ids]
         select_extra2 = [self.plate_names[idx] for idx in self.select_extra2_ids]
+        
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
         extra1_actor = [self.objs_carrot[n] for n in select_extra1]
@@ -1454,7 +1458,7 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             self.source_obj_name: carrot_actor[0],
             self.target_obj_name: plate_actor[0]
         }
-
+        # import ipdb; ipdb.set_trace()
         # set pose for robot
         self.agent.robot.set_pose(self.safe_robot_pos)
         # self._settle(0.5)

@@ -329,7 +329,7 @@ class OpenVLAPPO:
         entropy_loss = entropy.mean()
 
         # Total loss
-        loss = policy_loss + 0.5 * value_loss - self.ppo_entropy_coef * entropy_loss
+        loss = policy_loss + 0.01 * value_loss - self.ppo_entropy_coef * entropy_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -351,7 +351,7 @@ class OpenVLAPPO:
             f"Entropy Loss: {entropy_loss.item():.4f}\n"
         )
 
-        with open("/home/exprl/RL4VLA/log.txt", "a") as f:
+        with open("/workspace/Autonomous_RL/log.txt", "a") as f:
             f.write(log_str)
 
 
