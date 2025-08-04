@@ -523,7 +523,7 @@ class Runner:
                     self.buffer.update_instruction(instruction)
 
             # steps
-            steps = (episode + 1) * self.args.episode_len * self.args.num_envs
+            steps = (episode + 1) * self.args.training_len * self.args.num_envs
             # print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
 
             # eval

@@ -107,6 +107,8 @@ class SimlerWrapper:
         """
         try:
             self.env.unwrapped.set_current_task(object, receptacle)
+            # Reset old reward from previous task
+            self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(self.env.device)
         except Exception as e:
             print(f"Failed to set task: {e}")
             return False
