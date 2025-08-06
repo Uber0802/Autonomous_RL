@@ -63,8 +63,8 @@ class Args:
     vla_load_path: str = ""
     vla_lora_rank: int = 32
 
-    vla_lr: float = 3e-5
-    vla_vhlr: float = 3e-3
+    vla_lr: float = 1e-4
+    vla_vhlr: float = 1e-3
     vla_optim_beta1: float = 0.9
     vla_optim_beta2: float = 0.999
     vla_temperature: float = 1.0
@@ -523,7 +523,7 @@ class Runner:
                     self.buffer.update_instruction(instruction)
 
             # steps
-            steps = (episode + 1) * self.args.episode_len * self.args.num_envs
+            steps = (episode + 1) * self.args.training_len * self.args.num_envs
             # print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
 
             # eval
