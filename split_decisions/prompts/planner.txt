@@ -1,0 +1,30 @@
+You are given a top‐down RGB image, where the origin (0,0) is at the top‐left corner, x increases to the right, and y increases downward. Coordinates should be reported as integer pairs in [y, x] format, normalized to the 0–1000 range. This is very important that the point you provide be precisely and completely correct.
+
+Point to where a robot end-effector would TASK_DESCRIPTION, and create a trajectory of 5 points connecting them. Determine the optimal grasping point on the object by inferring it from the object's shape (i.e., the most stable and physically accessible location for a secure grasp, it should lie exactly on the visible part of the target object surface) and the best placement point within the target area (specifically, the center of the plane or slightly forward). Additionally, evaluate whether a particular point is intended for a subtask switch based on whether this subtask requires the robot to grasp the object. For each point, include an extra boolean field "grasp_subtask_switch" set to true if this subtask requires a grasp action to interact with the object and trigger a subtask transition, and false otherwise.
+
+Additionally, propose keypoints that are reasonably and uniformly spaced along the trajectory to ensure a fixed and consistent interval between each point.
+
+Also, ensure the overall trajectory is smooth, reasonable, avoids any potential collisions and maintains a sufficient clearance and space from irrelevant objects such as the desktop surface. Specifically, when moving off the desktop, include a distinct upward trajectory to clearly indicate that the robot is lifting away from the surface.
+
+Label the points sequentially with integers from "0" (start point) to "n" (final point). Each point should include the corresponding task details and an indication if the robot reaches the corresponding object.
+
+Note: The "approach_object" field indicates whether the robot’s end-effector will come into contact with the object.
+
+Provide the answer strictly in JSON format as follows, do not contain any other words or symbols: 
+[{"point": <point in [y, x] format normalized to 0-1000>, "label": <label>, "task": <task description>, "approach_object": <True/False>, "grasp_subtask_switch": <True/False>}, ...].
+
+Before finalizing each point, perform a detailed chain-of-thought analysis. Divide your analysis into two cases:
+
+For points where approach_object is set to true:
+
+Ensure that the point lies on the visible, touchable portion of the target object on the 2D image, clearly on the object itself and not on the gripper or any irrelevant object like the desktop surface.
+If grasp_subtask_switch is true, then approach_object must also be true.
+Confirm that the point is not at or near the edge of the object; it should be selected from a stable, central region of the object's surface for a balanced and secure grasp.
+If the motion involves interacting with the object, double-check that the keypoint is precisely on the object and not on the desktop or any other area.
+If the analysis indicates that the point is occluded, obstructed, too close to the object's edge, or lacks sufficient clearance, determine whether the point is obstructed or unstable, and if so, propose a new, unobstructed, and stable point on the object.
+For points where approach_object is set to false:
+
+Ensure that the point is sufficiently separated from the target object and any irrelevant items (e.g., the desktop) to maintain a clear, unambiguous trajectory key point.
+Verify that the selected point provides a clear, unobstructed trajectory key point without causing any collisions or interference with extraneous objects.
+
+You must output only the final answer as valid JSON array and nothing else. Do not include any markdown formatting, no code block, no explanation, no additional text. Just return the raw JSON array. Any non-JSON characters will break the system.

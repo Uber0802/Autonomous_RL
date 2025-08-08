@@ -18,8 +18,11 @@ from tqdm import tqdm
 from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
 
-from simpler_env.env.simpler_wrapper import SimlerWrapper
+from simpler_env.env.simpler_wrapper import SimlerWrapper, SDSimlerWrapper
 from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
+
+from split_decisions.utils.sampling_utils import costmap_guided_sampling, initialize_cost_map
+from split_decisions.utils.action_utils import get_pose_base, get_pose_world
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -43,7 +46,7 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 160
+    training_len: int = 80
     use_same_init: bool = True
 
     steps_max: int = 2000000
@@ -52,7 +55,7 @@ class Args:
     interval_save: int = 40
 
     # buffer
-    buffer_inferbatch: int = 32
+    buffer_inferbatch: int = 1
     buffer_minibatch: int = 8
     buffer_gamma: float = 0.99
     buffer_lambda: float = 0.95
@@ -78,7 +81,7 @@ class Args:
     alg_entropy_coef: float = 0.03
 
     # other
-    wandb: bool = True
+    wandb: bool = False
     only_render: bool = False
     render_info: bool = False
 
@@ -120,7 +123,7 @@ class Runner:
 
         # env
         unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
-        self.env = SimlerWrapper(self.args, unnorm_state)
+        self.env = SDSimlerWrapper(self.args, unnorm_state)
 
         # buffer
         self.buffer = SeparatedReplayBuffer(
@@ -167,6 +170,83 @@ class Runner:
 
         return values, actions, logprobs
 
+    @torch.no_grad()
+    def _get_action_costmap(self, envs, obs, costmap_handler, subtask_id, deterministic=False):
+        import time
+        start_time_4 = time.time()
+
+        total_batch = obs["image"].shape[0]
+
+        final_values = []
+        final_actions = []
+        final_logprobs = []
+        final_candidates = []
+        num_candidates = 2
+
+        for i in range(0, total_batch, self.args.buffer_inferbatch):
+            obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
+            # obs_batch['image'] = obs_batch['image'].repeat(1, 1, 1, 1)
+            # obs_batch['task_description'] = obs_batch['task_description'] * 1
+
+            top_k = 10
+            start_time_3 = time.time()
+            
+            for j in range(num_candidates):
+                values, actions, logprobs = self.policy.get_action(obs_batch, deterministic)
+                # values, actions, logprobs = self.policy.get_action_temp(obs_batch, True, self.args.vla_temperature, num_beams=40, num_return_sequences=40)
+
+                B = 100
+                noise = torch.randn(B, action_dim, device=actions.device) * sigma
+                noised_actions = actions.repeat(B, 1) + noise  # shape [100, action_dim]
+
+                processed_actions = envs._process_action(actions)
+                
+                start_time = time.time()
+                for k in range(len(processed_actions)):
+                    
+                    cand = processed_actions[k].unsqueeze(0)
+
+                    cost, grid_idx = costmap_handler[i].eval_cost(
+                        subtask_id=subtask_id[i],
+                        point=get_pose_base(envs.env, cand).p.detach().cpu().numpy(),
+                        env=envs,
+                        obs_camera_name="3rd_view_camera",
+                        idx=i,
+                    )
+
+                    final_candidates.append((cost[i], grid_idx, actions[k], values[k], logprobs[k]))
+                end_time = time.time()
+                # print("costmap time : ", end_time - start_time)
+
+            import random
+
+
+            topk_candidates = sorted(final_candidates, key=lambda x: x[0])[:top_k]
+            selected = random.choice(topk_candidates)
+
+            selected_cost, selected_grid_idx, selected_action, selected_value, selected_logprob = selected
+
+            final_actions.append(selected_action)
+            final_values.append(selected_value)
+            final_logprobs.append(selected_logprob)
+
+            end_time = time.time()
+            print("3", end_time - start_time_3)
+            # import ipdb; ipdb.set_trace()
+
+        
+
+        final_values = torch.cat(final_values, dim=0).to(device=self.device)
+        final_actions = torch.cat(final_actions, dim=0).to(device=self.device)
+        final_logprobs = torch.cat(final_logprobs, dim=0).to(device=self.device)
+
+
+        end_time = time.time()
+        print("4", end_time - start_time_4)
+        import ipdb; ipdb.set_trace()
+
+        return final_values, final_actions, final_logprobs
+
     def collect(self):
         self.policy.prep_rollout()
 
@@ -174,6 +254,16 @@ class Runner:
         obs_image = torch.tensor(obs_image).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
         value, action, logprob = self._get_action(obs)
+
+        return value, action, logprob
+
+    def collect_costmap(self, envs, costmap_handler, subtask_id):
+        self.policy.prep_rollout()
+
+        obs_image = self.buffer.obs[self.buffer.step]
+        obs_image = torch.tensor(obs_image).to(self.device)
+        obs = dict(image=obs_image, task_description=self.buffer.instruction)
+        value, action, logprob = self._get_action_costmap(envs=envs, obs=obs, costmap_handler=costmap_handler, subtask_id=subtask_id)
 
         return value, action, logprob
 
@@ -222,7 +312,7 @@ class Runner:
         self.policy.prep_rollout()
         env_infos = defaultdict(lambda: [])
 
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
 
         for _ in range(self.args.episode_len):
@@ -251,7 +341,7 @@ class Runner:
         self.policy.prep_rollout()
 
         env_infos = defaultdict(lambda: [])
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object,receptacle=receptacle)
+        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object,receptacle=receptacle)
 
         data = {
             "image": [],
@@ -340,7 +430,7 @@ class Runner:
             "info": [],  # info after executing a_t: [1, T]
         } for idx in range(self.args.num_envs)]
 
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Rendering:", instruction[0])
 
         # data dump: instruction
@@ -437,6 +527,12 @@ class Runner:
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
 
+            # ***** [ADD] COSTMAP-SWITCH init *****
+            subtask_id           = [0] * 64          # 目前 costmap 的索引
+            current_costmap_id   = [-1] * 64         # 用來偵測是否已切換
+            grasp_success_count  = [0] * 64          # 若 costmap 指定 grasp-based switch
+            best_cost            = [1e9] * 64        # 用來記錄該 step 的最佳 cost
+            # =========================================
 
             objects, receptacles = [], []
             for i in range(4):
@@ -444,7 +540,19 @@ class Runner:
                 objects.extend([obj] * group_size)
                 receptacles.extend([recep] * group_size)
 
-            obs_img, instruction, info = self.env.reset(
+            costmap_dir = f"costmap/rlvla/costmaps"
+            env_reset_options = {
+                "obj_set": "train",
+                "same_init": self.args.use_same_init,
+                "object": objects,
+                "receptacle": receptacles
+            }
+
+            costmap_handler_list = initialize_cost_map(
+                self.env, env_reset_options, costmap_dir, "3rd_view_camera", 4
+            )
+
+            obs_img, instruction, info, _ = self.env.reset(
                 obj_set="train",
                 same_init=self.args.use_same_init,
                 object=objects,
@@ -469,7 +577,17 @@ class Runner:
                 f.write(f"step : {steps}\n")
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
-                value, action, logprob = self.collect()
+                costmap_handler = []
+                for i in  range(self.args.num_envs):
+                    costmap_handler.append(costmap_handler_list[(self.task_id + (i // 16)) % len(self.task_list)])
+                cost_map_info = []
+                for i in range(self.args.num_envs):
+                    if subtask_id[i] != current_costmap_id[i]:
+                        cost_map_info.append(costmap_handler[i].get_costmap_info(subtask_id[i]))
+                        current_costmap_id[i] = subtask_id[i]
+
+                value, action, logprob = self.collect_costmap(envs=self.env, costmap_handler=costmap_handler, subtask_id=subtask_id)
+                # value, action, logprob = self.collect()
                 obs_img, reward, done, env_info = self.env.step(action)
                 for env_i in range(self.args.num_envs):
                     rollout_images[env_i].append(obs_img[env_i].cpu().numpy())

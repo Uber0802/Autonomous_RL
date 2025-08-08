@@ -40,7 +40,7 @@ def masks_to_boxes_pytorch(masks):
 class BasePickPlace(BaseEnv):
     """Base Digital Twin environment for digital twins of the BridgeData v2"""
 
-    SUPPORTED_OBS_MODES = ["rgb+segmentation"]
+    SUPPORTED_OBS_MODES = ["rgb+segmentation", "rgbd"]
     SUPPORTED_REWARD_MODES = ["none"]
 
     obj_static_friction = 1.0

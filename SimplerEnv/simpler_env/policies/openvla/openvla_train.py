@@ -182,21 +182,24 @@ class OpenVLAPolicy:
 
         return values, action, logprobs
 
-    def get_action_temp(self, x: dict, do_sample, temperature, num_beams) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_action_temp(self, x: dict, do_sample, temperature, num_beams, num_return_sequences) -> tuple[torch.Tensor, torch.Tensor]:
         features = self._preprocess_obs(x)
 
-        _, action, logprobs = self.vla.predict_action_batch(
+        values, actions, logprobs = self.vla.predict_action_batch(
             **features,
             unnorm_key=self.args.vla_unnorm_key,
             do_sample=do_sample,
             temperature=temperature,
             num_beams=num_beams,
+            top_k=20,
+            top_p=0.95,
+            num_return_sequences= num_return_sequences,
         )
 
-        assert len(action.shape) == 2
+        assert len(actions.shape) == 2
         assert len(logprobs.shape) == 2 and logprobs.shape[1] == 1
 
-        return action, logprobs
+        return values, actions, logprobs
 
     def get_value(self, x: dict) -> torch.Tensor:
         features = self._preprocess_obs(x)
