@@ -325,11 +325,14 @@ class OpenVLAPPO:
 
         value_loss = value_loss.mean()
 
+        #if abs(policy_loss.item()) < 5*abs(value_loss.item()):
+        #    policy_loss = 5*policy_loss
+
         # Entropy loss
         entropy_loss = entropy.mean()
 
         # Total loss
-        loss = policy_loss + 0.01 * value_loss - self.ppo_entropy_coef * entropy_loss
+        loss = policy_loss + value_loss - self.ppo_entropy_coef * entropy_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -348,10 +351,11 @@ class OpenVLAPPO:
             f"Advantages: {advantages.mean().item():.4f} | "
             f"Policy Loss: {policy_loss.item():.4f} | "
             f"Value Loss: {value_loss.item():.4f} | "
-            f"Entropy Loss: {entropy_loss.item():.4f}\n"
+            f"Entropy Loss: {entropy_loss.item():.4f} | "
+            f"Loss: {loss.item():.4f}\n"
         )
 
-        with open("/workspace/Autonomous_RL/log.txt", "a") as f:
+        with open(self.args.log, "a") as f:
             f.write(log_str)
 
 

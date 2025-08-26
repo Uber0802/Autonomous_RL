@@ -39,11 +39,12 @@ class Args:
     """Seed the model and environment. Default seed is 0"""
 
     name: str = "PPO-test"
+    log: str = "/workspace/Autonomous_RL/rlvla_train_80_seed0.txt"
 
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 160
+    training_len: int = 80
     use_same_init: bool = True
 
     steps_max: int = 2000000
@@ -64,7 +65,7 @@ class Args:
     vla_lora_rank: int = 32
 
     vla_lr: float = 1e-4
-    vla_vhlr: float = 1e-3
+    vla_vhlr: float = 3e-3
     vla_optim_beta1: float = 0.9
     vla_optim_beta2: float = 0.999
     vla_temperature: float = 1.0
@@ -134,6 +135,7 @@ class Runner:
         # Task Switch
         self.task_id = 0
         self.task_list = self.env.get_task_pool()[0]
+        #self.task_list = [self.task_list[-1]]
 
     def extract_obj_recep(self, text_string):
         pattern = r"put (.*?) on (.*)"
@@ -225,7 +227,7 @@ class Runner:
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
 
-        for _ in range(self.args.episode_len):
+        for _ in tqdm(range(self.args.training_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
             value, action, logprob = self._get_action(obs, deterministic=True)
 
@@ -429,6 +431,12 @@ class Runner:
         max_episodes = 100
         instruction_switch_interval = 80
         steps = 0
+        print(f"Evaluating at {steps}")
+        for task in self.task_list:
+            object, receptacle = self.extract_obj_recep(task)
+            sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+            sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+            wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
         group_size = num_envs // 4    
@@ -463,9 +471,9 @@ class Runner:
             # self.buffer.warmup(obs_img.cpu().numpy(), instruction)
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
-            print("instruction : ", instruction[0])
+            print("instruction : ", instruction[0], instruction[16], instruction[32], instruction[48])
 
-            with open("/workspace/Autonomous_RL/log.txt", "a") as f:
+            with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
@@ -529,11 +537,11 @@ class Runner:
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
-                for object in self.env.get_object_names()[0]:
-                    for receptacle in self.env.get_receptacle_names()[0]:
-                        sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                        sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
-                        wandb.log(sval_stats, step=steps)
+                for task in self.task_list:
+                    object, receptacle = self.extract_obj_recep(task)
+                    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    wandb.log(sval_stats, step=steps)
 
             # save
             if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:
@@ -541,9 +549,9 @@ class Runner:
                 save_path = self.glob_dir / f"steps_{episode:0>4d}"
                 self.policy.save(save_path)
                 
-                for object in self.env.get_object_names()[0]:
-                    for receptacle in self.env.get_receptacle_names()[0]:
-                        self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                for task in self.task_list:
+                    object, receptacle = self.extract_obj_recep(task)
+                    self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
 
 
