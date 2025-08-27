@@ -40,7 +40,7 @@ def masks_to_boxes_pytorch(masks):
 class BasePickPlace(BaseEnv):
     """Base Digital Twin environment for digital twins of the BridgeData v2"""
 
-    SUPPORTED_OBS_MODES = ["rgb+segmentation", "rgbd"]
+    SUPPORTED_OBS_MODES = ["rgb+segmentation", "rgbd", "rgb+depth+segmentation"]
     SUPPORTED_REWARD_MODES = ["none"]
 
     obj_static_friction = 1.0
@@ -262,7 +262,6 @@ class BasePickPlace(BaseEnv):
         # whether the source object is grasped
 
         is_src_obj_grasped = torch.zeros((b,), dtype=torch.bool, device=self.device)  # [b]
-
         for idx, name in enumerate(self.model_db_carrot):
             is_select = self.select_carrot_ids == idx  # [b]
             grasped = self.agent.is_grasping(self.objs_carrot[name])  # [b]
@@ -1372,12 +1371,16 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
-        self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
-        }
+        self.source_obj_name = []
+        self.target_obj_name = []
+        self.objs = []
+        for idx in range(self.num_envs):
+            self.source_obj_name.append(select_carrot[idx])
+            self.target_obj_name.append(select_plate[idx])
+            self.objs.append({
+                select_carrot[idx]: carrot_actor[idx],
+                select_plate[idx]: plate_actor[idx]
+            })
 
     def object_name(self):
         """
@@ -1451,14 +1454,24 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         extra1_actor = [self.objs_carrot[n] for n in select_extra1]
         extra2_actor = [self.objs_plate[n] for n in select_extra2]
 
+
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
-        self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
-        }
-        # import ipdb; ipdb.set_trace()
+        self.source_obj_name = []
+        self.target_obj_name = []
+        self.objs = []
+        for idx in range(len(env_idx)):
+            self.source_obj_name.append(select_carrot[idx])
+            self.target_obj_name.append(select_plate[idx])
+            self.objs.append({
+                select_carrot[idx]: carrot_actor[idx],
+                select_plate[idx]: plate_actor[idx]
+            })
+        # self.source_obj_name = select_carrot[0]
+        # self.target_obj_name = select_plate[0]
+        # self.objs = {
+        #     self.source_obj_name: carrot_actor[0],
+        #     self.target_obj_name: plate_actor[0]
+        # }
         # set pose for robot
         self.agent.robot.set_pose(self.safe_robot_pos)
         # self._settle(0.5)
@@ -1478,7 +1491,14 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
             q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)  # [b, 4]
 
-            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
+            # import ipdb; ipdb.set_trace()
+            idx_list = env_idx.detach().to('cpu').tolist()
+            for ei in idx_list:
+                p_i = p[ei:ei+1] 
+                q_i = q[ei:ei+1]  
+                self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
+
+            # self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
 
         for idx, name in enumerate(self.model_db_plate):
             p_reset = torch.tensor([2.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
@@ -1494,7 +1514,13 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
             q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)
 
-            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
+            idx_list = env_idx.detach().to('cpu').tolist()
+            for ei in idx_list:
+                p_i = p[ei:ei+1] 
+                q_i = q[ei:ei+1]  
+                self.objs_plate[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
+
+            # self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
 
         self._settle(0.5)
 

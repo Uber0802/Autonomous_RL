@@ -3,6 +3,7 @@ import random
 import numpy as np
 import os
 import json
+import torch
 
 from transforms3d.euler import euler2axangle
 from .action_utils import get_pose_base, get_pose_world
@@ -114,6 +115,14 @@ def reconstruct_action_from_norm_openvla(
     decoded_unnorm = 0.5 * (decoded_norm + 1.0) * (unnorm_max - unnorm_min) + unnorm_min
 
     return decoded_unnorm
+
+def encode_actions_from_norm_openvla(norm_vec: np.ndarray, action_tokenizer) -> np.ndarray:
+    if isinstance(norm_vec, torch.Tensor):
+        norm_vec = norm_vec.detach().cpu().numpy()
+    discretized = np.digitize(norm_vec, action_tokenizer.bins)
+    token_ids = action_tokenizer.tokenizer.vocab_size - discretized
+    return token_ids.astype(np.int64)
+
 
 
 def costmap_guided_sampling(

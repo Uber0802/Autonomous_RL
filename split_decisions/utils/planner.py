@@ -42,7 +42,7 @@ def _get_text_from_response(resp) -> str:
 # ── main API ──────────────────────────────────────────────────────────────────
 def plan_task(task_description,
               image,
-              model_name="gemini-2.5-pro-preview-05-06",
+              model_name="gemini-2.5-pro",
               temperature=0.0,
               max_output_tokens=30000,
               image_size=800,

@@ -21,8 +21,12 @@ from mani_skill.utils.visualization.misc import images_to_video
 from simpler_env.env.simpler_wrapper import SimlerWrapper, SDSimlerWrapper
 from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
 
-from split_decisions.utils.sampling_utils import costmap_guided_sampling, initialize_cost_map
+from split_decisions.utils.sampling_utils import costmap_guided_sampling, initialize_cost_map, encode_actions_from_norm_openvla, reconstruct_action_from_norm_openvla
 from split_decisions.utils.action_utils import get_pose_base, get_pose_world
+from split_decisions.prismatic.vla.action_tokenizer import ActionTokenizer
+from split_decisions.utils.observation_utils import world_to_screen, world_to_screen_idx
+import imageio
+import cv2
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -51,11 +55,11 @@ class Args:
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 4
+    interval_eval: int = 2
     interval_save: int = 40
 
     # buffer
-    buffer_inferbatch: int = 1
+    buffer_inferbatch: int = 32
     buffer_minibatch: int = 8
     buffer_gamma: float = 0.99
     buffer_lambda: float = 0.95
@@ -66,7 +70,7 @@ class Args:
     vla_load_path: str = ""
     vla_lora_rank: int = 32
 
-    vla_lr: float = 1e-4
+    vla_lr: float = 3e-5
     vla_vhlr: float = 1e-3
     vla_optim_beta1: float = 0.9
     vla_optim_beta2: float = 0.999
@@ -76,12 +80,12 @@ class Args:
     # ppo & grpo
     alg_name: str = "ppo"  # ppo, grpo
     alg_grpo_fix: bool = True
-    alg_gradient_accum: int = 20
+    alg_gradient_accum: int = 640
     alg_ppo_epoch: int = 1
-    alg_entropy_coef: float = 0.03
+    alg_entropy_coef: float = 0.05
 
     # other
-    wandb: bool = False
+    wandb: bool = True
     only_render: bool = False
     render_info: bool = False
 
@@ -171,81 +175,153 @@ class Runner:
         return values, actions, logprobs
 
     @torch.no_grad()
-    def _get_action_costmap(self, envs, obs, costmap_handler, subtask_id, deterministic=False):
-        import time
-        start_time_4 = time.time()
-
+    def _get_action_costmap(self, envs, obs, costmap_handler, subtask_id, viz_writers, deterministic=False):
         total_batch = obs["image"].shape[0]
 
         final_values = []
         final_actions = []
         final_logprobs = []
         final_candidates = []
-        num_candidates = 2
+        final_costs = []
 
         for i in range(0, total_batch, self.args.buffer_inferbatch):
             obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
-            # obs_batch['image'] = obs_batch['image'].repeat(1, 1, 1, 1)
-            # obs_batch['task_description'] = obs_batch['task_description'] * 1
 
             top_k = 10
-            start_time_3 = time.time()
+            action_low = torch.tensor(envs.unnorm_state["q01"], device=self.device).unsqueeze(0) 
+            action_high = torch.tensor(envs.unnorm_state["q99"], device=self.device).unsqueeze(0)
+            B = 50
+            sigma = 0.2 * (action_low - action_high)
+            action_tokenizer = ActionTokenizer(self.policy.processor.tokenizer)
             
-            for j in range(num_candidates):
-                values, actions, logprobs = self.policy.get_action(obs_batch, deterministic)
-                # values, actions, logprobs = self.policy.get_action_temp(obs_batch, True, self.args.vla_temperature, num_beams=40, num_return_sequences=40)
+            batch_values, batch_actions, batch_logprobs = self.policy.get_action(obs_batch, deterministic)
+            for j in range(self.args.buffer_inferbatch):
+                env_idx = i + j
+                vis_img = obs_batch['image'][j]
+                final_candidates = []
 
-                B = 100
-                noise = torch.randn(B, action_dim, device=actions.device) * sigma
-                noised_actions = actions.repeat(B, 1) + noise  # shape [100, action_dim]
-
-                processed_actions = envs._process_action(actions)
+                actions = batch_actions[j]
+                # processed_actions = envs._process_action(actions)
+                decoded_norm = action_tokenizer.decode_token_ids_to_actions(actions.detach().cpu().numpy())
+                actions = 0.5 * (decoded_norm + 1.0) * (action_high.cpu().numpy() - action_low.cpu().numpy()) + action_low.cpu().numpy()
+                processed_actions = torch.from_numpy(actions).to(dtype=torch.float64, device="cuda:0")
                 
-                start_time = time.time()
-                for k in range(len(processed_actions)):
-                    
-                    cand = processed_actions[k].unsqueeze(0)
+                action_dim = actions.shape[-1]
+                mask = torch.zeros(1, action_dim, device=self.device)
+                mask[:, :3] = 1
+                noise = torch.randn(B, action_dim, device=self.device) * sigma * mask
+                processed_noised_actions = processed_actions.repeat(B, 1) + noise
+                processed_noised_actions = torch.cat([processed_noised_actions, processed_actions], dim=0)
+                processed_noised_actions = torch.clamp(processed_noised_actions, min=action_low, max=action_high)
+                # print("0 :", processed_noised_actions)
+                # processed_noised_actions = reconstruct_action_from_norm_openvla(processed_noised_actions.cpu().numpy(), action_tokenizer, envs, action_low.cpu().numpy(), action_high.cpu().numpy())
+                # processed_noised_actions = torch.from_numpy(processed_noised_actions).to(dtype=torch.float64, device="cuda:0")
+                # print("1 :", processed_noised_actions)
+                normalized_actions = 2 * (processed_noised_actions - action_low) / (action_high - action_low) - 1.0
+                token_ids_np = encode_actions_from_norm_openvla(normalized_actions, action_tokenizer) 
+                token_ids = torch.tensor(token_ids_np, device=self.device)
+                
 
-                    cost, grid_idx = costmap_handler[i].eval_cost(
-                        subtask_id=subtask_id[i],
-                        point=get_pose_base(envs.env, cand).p.detach().cpu().numpy(),
-                        env=envs,
+                for k in range(len(processed_noised_actions)):
+                    # check cand
+                    cand = processed_noised_actions[k].unsqueeze(0)
+                    # check get_pose_world points
+                    points = get_pose_world(envs.env, cand, env_idx).p.detach().cpu().numpy()
+
+
+                    cost, grid_idx, affordance_points = costmap_handler[env_idx].eval_cost(
+                        subtask_id=subtask_id[env_idx],
+                        point=points[env_idx],
+                        env=envs.env,
                         obs_camera_name="3rd_view_camera",
-                        idx=i,
+                        idx=env_idx,
                     )
 
-                    final_candidates.append((cost[i], grid_idx, actions[k], values[k], logprobs[k]))
-                end_time = time.time()
-                # print("costmap time : ", end_time - start_time)
+                    # visualize
+                    # cand_2d = world_to_screen_idx(envs.env, "3rd_view_camera", points[env_idx], env_idx)
+                    # cand_2d = cand_2d.flatten()
+                    
 
-            import random
+                    # if isinstance(vis_img, torch.Tensor):
+                    #     vis_img = vis_img.detach().cpu().numpy()
+
+                    # h, w = vis_img.shape[:2]
+                    # scale_x = w / 640.0
+                    # scale_y = h / 480.0
+
+                    # u, v = cand_2d
+                    # x = int(u * scale_x)
+                    # y = int(v * scale_y)
+
+                    # if 0 <= x < vis_img.shape[1] and 0 <= y < vis_img.shape[0]:
+                    #     cv2.circle(vis_img, (int(x), int(y)), 1, (255, 0, 0), -1)
+
+                    # u, v = affordance_points.flatten()
+                    # x = int(u * scale_x)
+                    # y = int(v * scale_y)
+
+                    # if 0 <= x < vis_img.shape[1] and 0 <= y < vis_img.shape[0]:
+                    #     cv2.circle(vis_img, (int(x), int(y)), 3, (0, 255, 0), -1)
+
+                    
+                    final_candidates.append((cost, grid_idx, token_ids[k]))
+
+                
+
+                
 
 
-            topk_candidates = sorted(final_candidates, key=lambda x: x[0])[:top_k]
-            selected = random.choice(topk_candidates)
 
-            selected_cost, selected_grid_idx, selected_action, selected_value, selected_logprob = selected
+                topk_candidates = sorted(final_candidates, key=lambda x: x[0])[:top_k]
+                
+                # if isinstance(vis_img, torch.Tensor):
+                #     vis_img = vis_img.detach().cpu().numpy()
+                # h, w = vis_img.shape[:2]
+                # scale_x = w / 640.0
+                # scale_y = h / 480.0
 
-            final_actions.append(selected_action)
-            final_values.append(selected_value)
-            final_logprobs.append(selected_logprob)
+                # for _, _, _, c2d in topk_candidates:
+                #     u, v = c2d.flatten()
+                #     x = int(u * scale_x); y = int(v * scale_y)
+                #     if 0 <= x < vis_img.shape[1] and 0 <= y < vis_img.shape[0]:
+                #         cv2.circle(vis_img, (int(x), int(y)), 2, (0, 0, 255), -1)
+                # viz_writers[env_idx].append_data(vis_img)
 
-            end_time = time.time()
-            print("3", end_time - start_time_3)
-            # import ipdb; ipdb.set_trace()
+                selected = random.choice(topk_candidates)
+                selected_cost, _, selected_action = selected
+
+                
+
+                final_actions.append(selected_action.unsqueeze(0))
+                final_costs.append(torch.tensor([selected_cost], device=self.device, dtype=torch.float32))  # [1]
+
+
+            N = self.args.buffer_inferbatch
+            tok_selected = torch.cat(final_actions[-N:], dim=0).to(self.device)        
+            tok_selected = tok_selected.to(dtype=torch.long)                          
+
+            mini = 8
+            for s in range(0, N, mini):
+                e = min(s + mini, N)
+                obs_chunk = {
+                    "image": obs_batch["image"][s:e],                                  
+                    "task_description": [obs_batch["task_description"][k] for k in range(s, e)], 
+                }
+                tok_chunk = tok_selected[s:e]                                           
+                logp, ent, val = self.policy.evaluate_actions(obs_chunk, tok_chunk)
+                final_values.append(val)                                                
+                final_logprobs.append(logp)     
+
 
         
 
         final_values = torch.cat(final_values, dim=0).to(device=self.device)
         final_actions = torch.cat(final_actions, dim=0).to(device=self.device)
         final_logprobs = torch.cat(final_logprobs, dim=0).to(device=self.device)
+        final_costs = torch.cat(final_costs, dim=0).to(device=self.device)
 
 
-        end_time = time.time()
-        print("4", end_time - start_time_4)
-        import ipdb; ipdb.set_trace()
-
-        return final_values, final_actions, final_logprobs
+        return final_values, final_actions, final_logprobs, final_costs
 
     def collect(self):
         self.policy.prep_rollout()
@@ -257,15 +333,17 @@ class Runner:
 
         return value, action, logprob
 
-    def collect_costmap(self, envs, costmap_handler, subtask_id):
+    def collect_costmap(self, envs, costmap_handler, subtask_id, viz_writers):
         self.policy.prep_rollout()
 
         obs_image = self.buffer.obs[self.buffer.step]
         obs_image = torch.tensor(obs_image).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
-        value, action, logprob = self._get_action_costmap(envs=envs, obs=obs, costmap_handler=costmap_handler, subtask_id=subtask_id)
+        value, action, logprob, cost = self._get_action_costmap(envs=envs, obs=obs, costmap_handler=costmap_handler, subtask_id=subtask_id, viz_writers=viz_writers)
+        # with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+        #     f.write(f"logprob : {logprob}\n")
 
-        return value, action, logprob
+        return value, action, logprob, cost
 
     def insert(self, data):
         obs_img, actions, logprob, value_preds, rewards, done = data
@@ -291,11 +369,11 @@ class Runner:
 
         self.buffer.endup(next_value)
 
-    def train(self):
+    def train(self, episode):
         self.policy.prep_training()
 
         if self.args.alg_name == "ppo":
-            train_info = self.alg.train_ppo(self.buffer)
+            train_info = self.alg.train_ppo(self.buffer, episode)
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
         else:
@@ -514,7 +592,6 @@ class Runner:
         return env_stats_ret
 
     def run(self):
-
         max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
         max_episodes = 100
         instruction_switch_interval = 80
@@ -535,12 +612,20 @@ class Runner:
             # =========================================
 
             objects, receptacles = [], []
-            for i in range(4):
-                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                objects.extend([obj] * group_size)
-                receptacles.extend([recep] * group_size)
+            # test
+            # for i in range(4):
+            #     obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+            #     objects.extend([obj] * group_size)
+            #     receptacles.extend([recep] * group_size)
 
-            costmap_dir = f"costmap/rlvla/costmaps"
+            self.task_id = 2
+            obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+            objects.extend([obj] * 64)
+            receptacles.extend([recep] * 64)
+            ### 
+
+
+            costmap_dir = f"costmap/rlvla/costmaps2"
             env_reset_options = {
                 "obj_set": "train",
                 "same_init": self.args.use_same_init,
@@ -560,8 +645,11 @@ class Runner:
             )
 
             task_id_map = []
-            for i in range(4):
-                task_id_map.extend([(self.task_id + i) % len(self.task_list)] * group_size)
+            # test
+            # for i in range(4):
+            #     task_id_map.extend([(self.task_id + i) % len(self.task_list)] * group_size)
+            task_id_map.extend([self.task_id] * 64)
+            ### 
 
             self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
@@ -571,30 +659,76 @@ class Runner:
             # self.buffer.warmup(obs_img.cpu().numpy(), instruction)
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
-            print("instruction : ", instruction[0])
+            print("instruction 0 : ", instruction[0])
+            print("instruction 16 : ", instruction[16])
+            print("instruction 32 : ", instruction[32])
+            print("instruction 48 : ", instruction[48])
 
-            with open("/workspace/Autonomous_RL/log.txt", "a") as f:
-                f.write(f"step : {steps}\n")
+            # import ipdb; ipdb.set_trace()
+
+
+
+            cost_map_info = []
+            viz_writers = []
+            for i in range(self.args.num_envs):
+                viz_path = f"videos_with_costmap/{episode}/costmap_vis_{i:04d}.mp4"
+                os.makedirs(os.path.dirname(viz_path), exist_ok=True)
+                viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
+                viz_writers.append(viz_writer)
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 costmap_handler = []
+                # test
                 for i in  range(self.args.num_envs):
-                    costmap_handler.append(costmap_handler_list[(self.task_id + (i // 16)) % len(self.task_list)])
-                cost_map_info = []
+                #     costmap_handler.append(costmap_handler_list[(self.task_id + (i // group_size)) % len(self.task_list)])
+                    costmap_handler.append(costmap_handler_list[self.task_id])
+                ###
                 for i in range(self.args.num_envs):
-                    if subtask_id[i] != current_costmap_id[i]:
+                    if len(cost_map_info) != self.args.num_envs:
                         cost_map_info.append(costmap_handler[i].get_costmap_info(subtask_id[i]))
                         current_costmap_id[i] = subtask_id[i]
+                    elif subtask_id[i] != current_costmap_id[i]:
+                        cost_map_info[i] = costmap_handler[i].get_costmap_info(subtask_id[i])
+                        current_costmap_id[i] = subtask_id[i]
 
-                value, action, logprob = self.collect_costmap(envs=self.env, costmap_handler=costmap_handler, subtask_id=subtask_id)
+                value, action, logprob, best_cost = self.collect_costmap(envs=self.env, costmap_handler=costmap_handler, subtask_id=subtask_id, viz_writers=viz_writers)
                 # value, action, logprob = self.collect()
                 obs_img, reward, done, env_info = self.env.step(action)
+                for idx in range(self.args.num_envs):
+                    if env_info["success"][idx]:
+                        print(f"[{idx}] success!!!!!!")
+                        # with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+                        #     f.write("[{idx}] success!\n")
                 for env_i in range(self.args.num_envs):
                     rollout_images[env_i].append(obs_img[env_i].cpu().numpy())
+
+                # =========================================
+                # ***** [ADD] COSTMAP-SWITCH decision *****
+                for idx in range(num_envs):
+                    if cost_map_info[idx] is not None:
+                        # grasp-based or cost-based
+                        if cost_map_info[idx]["grasp_subtask_switch"]:
+                            if self.env.env.unwrapped.agent.is_grasping(self.env.env.unwrapped.objs[idx][self.env.env.unwrapped.source_obj_name[idx]])[idx]:
+                                grasp_success_count[idx] += 1
+                            else:
+                                grasp_success_count[idx]  = 0
+                            if grasp_success_count[idx] >= 5 and subtask_id[idx] < len(costmap_handler[idx].costmaps) - 1:
+                                # print(f"[DEBUG][{idx}] grasp success x10 → switch subtask")
+                                subtask_id[idx]          += 1
+                                grasp_success_count[idx]  = 0
+                        else:
+                            thresh = 10 if cost_map_info[idx]["affordance_types"] == "motion" else 0.03
+                            # print("idx :", idx, "subtask :", subtask_id[idx], "best_cost :", best_cost[idx], "thresh :", thresh)
+                            if best_cost[idx] <= thresh and subtask_id[idx] < len(costmap_handler[idx].costmaps) - 1:
+                                # print(f"[DEBUG][{idx}] cost ({best_cost[idx]}) ≤ {thresh:.3f} → switch to subtask {subtask_id[idx] + 1}")
+                                subtask_id[idx] += 1
+                # =========================================
 
 
                 data = (obs_img, action, logprob, value, reward, done)
                 self.insert(data)
+
+                
 
                 # info
                 if "episode" in env_info.keys():
@@ -619,20 +753,28 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
-                    infos = self.train()
+                    infos = self.train(episode)
                     for k, v in env_infos.items():
                         infos[f"env/{k}"] = np.mean(v)
                     # wandb.log(infos, step=step_idx + episode * self.args.training_len)
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
-                    #Switch Instruction
-                    self.task_id = (self.task_id + 1) % len(self.task_list)
+                    # Switch Instruction
+                    # test 
+                    # self.task_id = (self.task_id + 1) % len(self.task_list)
+                    # objects, receptacles = [], []
+                    # for i in range(4):
+                    #     obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                    #     objects.extend([obj] * group_size)
+                    #     receptacles.extend([recep] * group_size)
+                    # self.env.set_task(objects, receptacles)
                     objects, receptacles = [], []
                     for i in range(4):
-                        obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                        objects.extend([obj] * group_size)
-                        receptacles.extend([recep] * group_size)
+                        obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+                        objects.extend([obj] * 64)
+                        receptacles.extend([recep] * 64)
                     self.env.set_task(objects, receptacles)
+                    ###
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
@@ -644,14 +786,20 @@ class Runner:
             steps = (episode + 1) * self.args.training_len * self.args.num_envs
             # print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
 
+            for i in range(self.args.num_envs):
+                viz_writers[i].close()
+
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
+                a = 0
                 for object in self.env.get_object_names()[0]:
                     for receptacle in self.env.get_receptacle_names()[0]:
-                        sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                        sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
-                        wandb.log(sval_stats, step=steps)
+                        if a == 3:
+                            sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                            sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                            wandb.log(sval_stats, step=steps)
+                        a += 1
 
             # save
             if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:

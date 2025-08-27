@@ -8,7 +8,8 @@ import numpy as np
 from .observation_utils import (
     get_default_obs_camera_name,
     world_to_screen,
-    PointCloudObservationWrapper
+    PointCloudObservationWrapper,
+    world_to_screen_idx
 )
 
 
@@ -34,7 +35,7 @@ class CostMapHandler:
         and also create a global step counter (global_step).
         """
         self.costmaps = {}
-        self._grid_size = 600
+        self._grid_size = 800
         self._bounds_min = (-4, -4, 0)
         self._bounds_max = (4, 4, 4)
         self._ucb_factor = 0
@@ -61,18 +62,18 @@ class CostMapHandler:
             return None, None
         data = self.costmaps[subtask_id]
         costmap_info = data["info"]
-        base_cost = CostMapCreator.eval_cost_map(
-            point, costmap_info, env, obs_camera_name)
+        base_cost, affordance_points = CostMapCreator.eval_cost_map(
+            point, costmap_info, env, obs_camera_name, idx)
         grid_idx = convert_point_to_grid_index(
             point, bounds_min=self._bounds_min,
             bounds_max=self._bounds_max, grid=self._grid_size)
-        grid_idx = tuple(grid_idx[idx])
+        # import ipdb; ipdb.set_trace()
         visited = data["visited_cost"][grid_idx]
         # ucb = math.sqrt(math.log(data["total_visits"] + 1) / (visited + 1))
         # Assigns higher cost to frequently visited points.
         ucb_penalty = self._ucb_factor * (math.sqrt(visited) + 1e-5)
         cand_cost = base_cost + ucb_penalty
-        return cand_cost, grid_idx
+        return cand_cost, grid_idx, affordance_points
 
     def apply_update(self, subtask_id, grid_idx):
         """
@@ -124,15 +125,17 @@ class CostMapCreator:
                 Check exprl/prompts/planner.txt for more details
         """
         # wrapped_env = PointCloudObservationWrapper(env.unwrapped)
-        obs, _, _, position_img = env.reset(**env_reset_options)
+        obs, _, _, xyzw = env.reset(**env_reset_options)
 
         if self.obs_camera_name is None:
             camera_name = get_default_obs_camera_name(env)
         else:
             camera_name = self.obs_camera_name
         image = obs[idx]
-        position = position_img[idx]
         h, w = image.shape[:2]
+
+        xyzw = xyzw.detach().cpu().numpy()
+        xyzw = xyzw[idx]
 
         all_costmaps = {}
         for traj_point in traj_data:
@@ -143,14 +146,15 @@ class CostMapCreator:
             scaled_y = int(y_norm / norm_factor * h)
 
 
-            world_3d = position[scaled_y, scaled_x, :]
+            world_3d = xyzw[scaled_y, scaled_x, :4]
 
             if traj_point["approach_object"]:
-                affordance_points = world_3d.reshape(1, 3)
+                affordance_points = world_3d[..., :3].reshape(1, 3)
                 affordance_types = "object"
             else:
                 affordance_points = np.array([scaled_x, scaled_y]).reshape(1, 2)
                 affordance_types = "motion"
+            # import ipdb; ipdb.set_trace()
 
             cost_map_info = {
                 "affordance_points": affordance_points,
@@ -172,7 +176,7 @@ class CostMapCreator:
         return all_costmaps
 
     @staticmethod
-    def eval_cost_map(points, cost_map_info, env, obs_camera_name):
+    def eval_cost_map(points, cost_map_info, env, obs_camera_name, env_idx):
         """Generate a scoring function that returns the cost of an input 3d point,
         given the affordance and collision points stored in the cost_map_info
 
@@ -187,25 +191,33 @@ class CostMapCreator:
             A np array of shape shape [D1, ..., DN], indicating the cost of
             each 3D position
         """
-
+        
 
         
         max_cost = 1000
 
         reshaped_points = points.reshape(-1, 3)
 
+        affordance_points = None
+
 
         # Compute affordance
         if cost_map_info["affordance_types"] == "object":
+            # check affordance_points
             affordance_points = cost_map_info["affordance_points"].reshape(-1, 3)
             if isinstance(affordance_points, torch.Tensor):
                 affordance_points = affordance_points.detach().cpu().numpy()
             affordance_distance = np.linalg.norm(
                 reshaped_points[:, None] - affordance_points[None, :], axis=-1)
+            # affordance_points = world_to_screen_idx(
+            #     env, obs_camera_name, affordance_points.reshape(-1, 3), env_idx
+            # )
+            # if env_idx > 31:
+            #     import ipdb; ipdb.set_trace()
         elif cost_map_info["affordance_types"] == "motion":
             affordance_points = cost_map_info["affordance_points"].reshape(-1, 2)
-            reshaped_points_2d = world_to_screen(
-                env, obs_camera_name, reshaped_points.reshape(-1, 3)
+            reshaped_points_2d = world_to_screen_idx(
+                env, obs_camera_name, reshaped_points.reshape(-1, 3), env_idx
             )
             affordance_distance = np.linalg.norm(
                 reshaped_points_2d[:, None] - affordance_points[None, :], axis=-1)
@@ -226,8 +238,8 @@ class CostMapCreator:
         # Assign max_cost when collision happens
         cost[collision] = max_cost
 
-        if points.ndim == 1:
-            return cost.item()
-        else:
-            return cost.reshape(points.shape[:-1])
 
+        if points.ndim == 1:
+            return cost.item(), affordance_points
+        else:
+            return cost.reshape(points.shape[:-1]), affordance_points

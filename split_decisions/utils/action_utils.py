@@ -2,7 +2,7 @@
 """
 import numpy as np
 import torch
-
+import sapien
 def get_robot_control_mode(robot_name, policy_name):
     """Overwrite simpler_env.utils.env.env_builder.get_robot_control_mode,
     since printing the control mode is annoying.
@@ -19,7 +19,7 @@ def get_robot_control_mode(robot_name, policy_name):
     return control_mode
 
 
-def get_pose_world(env, cand_action):
+def get_pose_world(env, cand_action, idx):
     """A helper function that computes the predicted pose in world frame.
 
     Args:
@@ -30,22 +30,18 @@ def get_pose_world(env, cand_action):
         pose_world: A numpy array representing the pose in world frame.
     """
     controller = env.unwrapped.agent.controllers[
-        get_robot_control_mode(env.unwrapped.robot_uid, "")
+        "arm_pd_ee_target_delta_pose_align2_gripper_pd_joint_pos"
     ].controllers['arm']
     prev_ee_pose_at_base = controller._target_pose
     pose = controller.compute_target_pose(
-        prev_ee_pose_at_base,
-        np.concatenate([
-            cand_action["world_vector"],
-            cand_action["rot_axangle"],
-            cand_action["gripper"]
-        ])
+        prev_ee_pose_at_base[idx],
+        cand_action
     )
     pose_world = controller.articulation.pose * pose
     
     return pose_world
 
-def get_pose_base(env, cand_action):
+def get_pose_base(env, cand_action, idx):
     """A helper function that computes the predicted pose in base frame.
 
     Args:
@@ -62,7 +58,7 @@ def get_pose_base(env, cand_action):
     prev_ee_pose_at_base = controller._target_pose
 
     pose = controller.compute_target_pose(
-        prev_ee_pose_at_base,
+        prev_ee_pose_at_base[idx],
         cand_action
     )
 

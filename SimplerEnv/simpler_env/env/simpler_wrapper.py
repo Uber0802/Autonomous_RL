@@ -195,7 +195,7 @@ class SDSimlerWrapper:
         env_config = dict(
             id=self.args.env_id,
             num_envs=self.args.num_envs,
-            obs_mode="rgbd",
+            obs_mode="rgb+depth+segmentation",
             control_mode=robot_control_mode,
             sim_backend="gpu",
             sim_config={
@@ -234,8 +234,8 @@ class SDSimlerWrapper:
         reward_diff = reward - self.reward_old
         self.reward_old = reward
 
-        # return reward_diff
-        return reward
+        return reward_diff
+        # return reward
 
     def _process_action(self, raw_actions: torch.Tensor) -> torch.Tensor:
         action_scale = 1.0
@@ -257,6 +257,7 @@ class SDSimlerWrapper:
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
             normalized_actions,
         )
+
 
         raw_action = {
             "world_vector": raw_action_np[:, :3],
@@ -309,13 +310,30 @@ class SDSimlerWrapper:
 
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         depth = obs["sensor_data"]["3rd_view_camera"]["depth"].to(torch.uint8)
-        position = obs["sensor_data"]["3rd_view_camera"]["position"].to(torch.uint8)
+        position = obs["sensor_data"]["3rd_view_camera"]["position"].to(torch.float32)
+        position[..., :3] = (
+            position[..., :3] / 1000.0
+        )
+        pos_h, pos_w = position.shape[1], position.shape[2]
+        segmentation = obs["sensor_data"]["3rd_view_camera"]["segmentation"].to(torch.float32)
+        camera_params = self.env.env.unwrapped.get_sensor_params()['3rd_view_camera']
+        cam2world = camera_params["cam2world_gl"]
+        xyzw_list = []
+        for idx in range(self.num_envs):
+            xyzw = torch.cat([position, segmentation != 0], dim=-1).reshape(
+                    position.shape[0], -1, 4
+                )[idx] @ cam2world.transpose(1, 2)[idx]
+            xyzw_list.append(xyzw.reshape(pos_h, pos_w, 4))
+            
+        xyzw = torch.stack(xyzw_list, dim=0)      
+        # import ipdb; ipdb.set_trace()
+
 
         instruction = self.env.unwrapped.get_language_instruction()
 
         self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(obs_image.device)  # [B, 1]
 
-        return obs_image, instruction, info, position
+        return obs_image, instruction, info, xyzw
 
     def step(self, raw_action):
         action = self._process_action(raw_action)

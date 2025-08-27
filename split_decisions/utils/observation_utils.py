@@ -24,6 +24,33 @@ def get_default_obs_camera_name(env):
     
     return camera_name
 
+def world_to_screen_idx(env, obs_camera_name, positions, env_idx):
+    """Convert 3D positions in world frame to 2D positions in screen frame.
+
+    Args:
+        env: Gym environment object.
+        obs_camera_name: A string indicates the camera name
+        positions: A np array of shape [N, 3/4], indicating 3D positions in
+            world frame, where sapien uses OpenGL world frame.
+    """    
+    if positions.shape[-1] == 3:
+        positions = np.concatenate(
+            [positions, np.ones_like(positions[..., :1])], axis=-1
+        )
+    # camera_params = env.unwrapped._cameras[obs_camera_name].get_params()
+    camera_params = env.unwrapped.get_sensor_params()['3rd_view_camera']
+    cam2world = camera_params["cam2world_gl"]
+    cam2world = cam2world.detach().cpu().numpy()
+
+
+    camera_3d = positions @ (np.linalg.inv(cam2world[env_idx])).T
+    
+    camera_3d = camera_3d[..., :3] / camera_3d[..., 3]
+    pixel_2d = camera_to_screen(
+        env, obs_camera_name, camera_3d.reshape(1, 3))
+    
+    return pixel_2d
+
 
 def world_to_screen(env, obs_camera_name, positions):
     """Convert 3D positions in world frame to 2D positions in screen frame.
@@ -38,8 +65,10 @@ def world_to_screen(env, obs_camera_name, positions):
         positions = np.concatenate(
             [positions, np.ones_like(positions[..., :1])], axis=-1
         )
-    camera_params = env.unwrapped._cameras[obs_camera_name].get_params()
+    # camera_params = env.unwrapped._cameras[obs_camera_name].get_params()
+    camera_params = env.unwrapped.get_sensor_params()['3rd_view_camera']
     cam2world = camera_params["cam2world_gl"]
+    cam2world = cam2world.detach().cpu().numpy()
 
     camera_3d = positions @ (np.linalg.inv(cam2world)).T
     camera_3d = camera_3d[..., :3] / camera_3d[..., 3]
@@ -58,7 +87,9 @@ def camera_to_screen(env, obs_camera_name, positions):
         positions: A np array of shape [N, 3], indicating 3D positions in
             camera frame, where sapien uses OpenGL camera frame.
     """
-    camera = env.unwrapped._cameras[obs_camera_name].camera
+    # import ipdb; ipdb.set_trace()
+    # camera = env.unwrapped._cameras[obs_camera_name].camera
+    camera = env.unwrapped._sensors['3rd_view_camera'].camera
 
     # Sapien use OpenGL projection matrix
     cx, cy = camera.cx, camera.cy

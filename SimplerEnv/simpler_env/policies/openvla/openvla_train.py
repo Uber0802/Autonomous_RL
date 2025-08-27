@@ -124,7 +124,6 @@ class OpenVLAPolicy:
         images = images.permute(0, 3, 1, 2)  # [B, C, H, W]
         images = images.to(**self.tpdv)
 
-        torch.cuda.synchronize()
 
 
         # prompt
@@ -153,20 +152,6 @@ class OpenVLAPolicy:
         do_sample = (temperature != 0.0)
         features = self._preprocess_obs(x)
 
-        # import numpy as np
-        # with open("/home/exprl/RL4VLA/log.txt", "a") as f:
-        #     f.write("=== FEATURES ===\n")
-        #     for key, value in features.items():
-        #         try:
-        #             if isinstance(value, torch.Tensor):
-        #                 value = value.detach().to(torch.float32).cpu()
-        #                 array = value.numpy()
-        #                 f.write(f"{key}: shape={array.shape}, dtype={array.dtype}\n")
-        #                 f.write(f"{key} sample: {array.flatten()[:10]}\n\n")
-        #             else:
-        #                 f.write(f"{key}: non-tensor value: {value}\n\n")
-        #         except Exception as e:
-        #             f.write(f"{key}: failed to log, error: {e}\n")
 
         torch.cuda.synchronize()
         values, action, logprobs = self.vla.predict_action_batch(
@@ -286,14 +271,14 @@ class OpenVLAPPO:
     def __init__(self, all_args, policy: OpenVLAPolicy):
         self.args = all_args
         self.policy = policy
-        self.ppo_clip = 0.2
+        self.ppo_clip = 0.5
         self.ppo_grad_norm = 10.0
         self.ppo_entropy_coef = self.args.alg_entropy_coef
         self.ppo_huber_delta = 5.0
         self.tpdv = self.policy.tpdv
         self.tpdv_vn = self.policy.tpdv_vn
 
-    def train_ppo_step(self, idx, total, batch):
+    def train_ppo_step(self, idx, total, batch, episode):
         obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
 
         obs = dict(image=torch.tensor(obs_image).to(self.tpdv["device"]), task_description=instruct)  # uint8
@@ -309,10 +294,23 @@ class OpenVLAPPO:
         logprob, entropy, values = self.policy.evaluate_actions(obs, actions)
 
         ratio = torch.exp(logprob - old_logprob)
+        if episode <= 10:
+            self.ppo_clip = 1
+        elif episode <= 15:
+            self.ppo_clip = 0.5
+        elif episode <= 20:
+            self.ppo_clip = 0.3
+        else:
+            self.ppo_clip = 0.2
+        
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
         # policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
         policy_loss = -torch.min(surr1, surr2).mean()
+
+
+        # print("episode :", episode, "idx :", idx, "ratio :", ratio)
+        
 
 
         # Value loss
@@ -332,7 +330,8 @@ class OpenVLAPPO:
         entropy_loss = entropy.mean()
 
         # Total loss
-        loss = policy_loss + 0.01 * value_loss - self.ppo_entropy_coef * entropy_loss
+        print("here")
+        loss = policy_loss + 1 * value_loss - self.ppo_entropy_coef * entropy_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -349,12 +348,13 @@ class OpenVLAPPO:
             f"[PPO Step {idx}/{total}] "
             f"Returns: {returns.mean().item():.4f} | "
             f"Advantages: {advantages.mean().item():.4f} | "
-            f"Policy Loss: {policy_loss.item():.4f} | "
-            f"Value Loss: {value_loss.item():.4f} | "
-            f"Entropy Loss: {entropy_loss.item():.4f}\n"
+            f"Policy : {policy_loss.item():.4f} | "
+            f"Value : {value_loss.item():.4f} | "
+            f"Entropy : {entropy_loss.item():.4f}\n"
+            f"loss : {loss.item():.4f}\n"
         )
 
-        with open("/workspace/Autonomous_RL/log.txt", "a") as f:
+        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
             f.write(log_str)
 
 
@@ -380,6 +380,130 @@ class OpenVLAPPO:
             info["grad_norm"] = grad_norm.item()
 
         return info
+
+    def train_ppo_step_batch(self, idx, total, batch, episode):
+        obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
+
+        obs_image   = torch.as_tensor(obs_image)                
+        actions     = torch.as_tensor(actions)                  
+        value_preds = torch.as_tensor(value_preds, dtype=self.tpdv["dtype"])
+        returns     = torch.as_tensor(returns,     dtype=self.tpdv_vn["dtype"])
+        old_logprob = torch.as_tensor(old_logprob, dtype=self.tpdv["dtype"])
+        advantages  = torch.as_tensor(advantages,  dtype=self.tpdv["dtype"])
+
+        B  = obs_image.shape[0]
+        mb = 8                    
+        num_mb = (B + mb - 1) // mb
+
+        self.policy.vh_optimizer.zero_grad(set_to_none=True)
+        self.policy.vla_optimizer.zero_grad(set_to_none=True)
+
+        policy_loss_sum = value_loss_sum = entropy_sum = 0.0
+        ratio_mean_sum = ratio2_mean_sum = 0.0
+        value_clip_ratio_sum = value_preds_sum = values_sum = returns_sum = 0.0
+        logprob_sum = old_logprob_sum = 0.0
+        n_seen = 0
+
+        if episode <= 10:   clip = 0.5
+        elif episode <= 15: clip = 0.3
+        else:               clip = 0.2
+        self.ppo_clip = clip
+
+        for s in range(0, B, mb):
+            e = min(s + mb, B); w = e - s
+
+            obs = dict(
+                image=obs_image[s:e].to(self.tpdv["device"], non_blocking=True),
+                task_description=instruct[s:e],
+            )
+            actions_mb     = actions[s:e].to(self.tpdv["device"], non_blocking=True)
+            value_preds_mb = value_preds[s:e].to(**self.tpdv)
+            returns_mb     = returns[s:e].to(**self.tpdv_vn)
+            old_logprob_mb = old_logprob[s:e].to(**self.tpdv)
+            advantages_mb  = advantages[s:e].to(**self.tpdv)
+            returns_norm_mb= returns_mb.to(**self.tpdv)
+
+            logprob, entropy, values = self.policy.evaluate_actions(obs, actions_mb)
+            ratio = torch.exp(logprob - old_logprob_mb)
+
+            surr1 = ratio * advantages_mb
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantages_mb
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            # print("episode :", episode, "idx :", idx, "ratio :", ratio)
+
+
+            values_f32      = values.float()
+            value_preds_f32 = value_preds_mb.float()
+            value_pred_clipped = value_preds_f32 + (values_f32 - value_preds_f32).clamp(-clip, clip)
+            err_c = returns_mb - value_pred_clipped
+            err_o = returns_mb - values_f32
+            value_loss = torch.max(huber_loss(err_o, self.ppo_huber_delta),
+                                huber_loss(err_c, self.ppo_huber_delta)).mean()
+
+            value_clip_ratio_mb = ((value_pred_clipped - value_preds_f32).abs() > clip).float().mean()
+            entropy_loss = entropy.mean()
+
+            loss_mb = policy_loss + 1 * value_loss - self.ppo_entropy_coef * entropy_loss
+            loss_mb = loss_mb / num_mb
+            loss_mb.backward()   
+
+            n_seen += w
+            policy_loss_sum += policy_loss.item() * w
+            value_loss_sum  += value_loss.item()  * w
+            entropy_sum     += entropy_loss.item() * w
+            ratio_mean_sum  += ratio.mean().item() * w
+            ratio2_mean_sum += (logprob - old_logprob_mb).mean().exp().item() * w
+            value_clip_ratio_sum += value_clip_ratio_mb.item() * w
+            value_preds_sum += value_preds_mb.mean().item() * w
+            values_sum      += values.mean().item() * w
+            returns_sum     += returns_mb.mean().item() * w
+            logprob_sum     += logprob.mean().item() * w
+            old_logprob_sum += old_logprob_mb.mean().item() * w
+
+        grad_norm = nn.utils.clip_grad_norm_(self.policy.params_vla + self.policy.params_vh, self.ppo_grad_norm)
+        self.policy.vh_optimizer.step(); self.policy.vla_optimizer.step()
+
+        policy_loss_mean = policy_loss_sum / n_seen
+        value_loss_mean  = value_loss_sum  / n_seen
+        entropy_mean     = entropy_sum     / n_seen
+        ratio_mean       = ratio_mean_sum  / n_seen
+        ratio2_mean      = ratio2_mean_sum / n_seen
+        value_clip_ratio = value_clip_ratio_sum / n_seen
+        value_old_mean   = value_preds_sum / n_seen
+        values_mean      = values_sum      / n_seen
+        returns_mean     = returns_sum     / n_seen
+        logprob_mean     = logprob_sum     / n_seen
+        logprob_old_mean = old_logprob_sum / n_seen
+        loss_for_log     = policy_loss_mean + 0.01 * value_loss_mean - self.ppo_entropy_coef * entropy_mean
+
+        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+            f.write(f"[PPO Step {idx}/{total}] Returns: {returns_mean:.4f} | "
+                    f"Advantages: {advantages.mean().item():.4f} | "
+                    f"Policy Loss: {policy_loss_mean:.4f} | "
+                    f"Value Loss: {value_loss_mean:.4f} | "
+                    f"Entropy Loss: {entropy_mean:.4f}\n")
+
+        info = dict(
+            loss=float(loss_for_log),
+            policy_loss=policy_loss_mean,
+            value_loss=value_loss_mean,
+            entropy_loss=entropy_mean,
+            ratio=ratio_mean,
+            ratio_median=ratio_mean,
+            ratio_2=ratio2_mean,
+            value_clip_ratio=value_clip_ratio,
+            value_old_mean=value_old_mean,
+            values_mean=values_mean,
+            returns_mean=returns_mean,
+            returns_norm_mean=returns_mean,
+            logprob_mean=logprob_mean,
+            logprob_old_mean=logprob_old_mean,
+            grad_norm=grad_norm.item(),
+        )
+        return info
+
+
 
     def train_grpo_step(self, idx, total, batch):
         obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
@@ -431,7 +555,7 @@ class OpenVLAPPO:
 
         return info
 
-    def train_ppo(self, buffer):
+    def train_ppo(self, buffer, episode):
         train_info = defaultdict(lambda: [])
 
         # buffer
@@ -442,7 +566,9 @@ class OpenVLAPPO:
             data_generator = buffer.feed_forward_generator()
 
             for idx, batch in tqdm(enumerate(data_generator), total=minibatch_count, desc="train"):
-                info = self.train_ppo_step(idx, minibatch_count, batch)
+                if idx >= 640:
+                    break
+                info = self.train_ppo_step(idx, minibatch_count, batch, episode)
                 for key, value in info.items():
                     train_info[key].append(value)
 
