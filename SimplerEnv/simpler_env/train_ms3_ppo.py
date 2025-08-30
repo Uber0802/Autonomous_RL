@@ -346,7 +346,7 @@ class Runner:
         print(f"Evaluating at {steps}")
         sval_stats = self.eval(obj_set="train")
         for task, d in sval_stats.items():
-            stats = {f"eval__{task}/{k}": v for k, v in d.items()}
+            stats = {f"eval＿{task}/{k}": v for k, v in d.items()}
             wandb.log(stats, step=steps)
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
@@ -395,7 +395,7 @@ class Runner:
                 print(f"Evaluating at {steps}")
                 sval_stats = self.eval(obj_set="train")
                 for task, d in sval_stats.items():
-                    stats = {f"eval__{task}/{k}": v for k, v in d.items()}
+                    stats = {f"eval＿{task}/{k}": v for k, v in d.items()}
                     wandb.log(stats, step=steps)
 
             # save
