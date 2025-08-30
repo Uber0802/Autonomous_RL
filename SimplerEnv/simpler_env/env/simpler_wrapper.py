@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+import random
 from mani_skill.envs.sapien_env import BaseEnv
 
 
@@ -25,8 +26,12 @@ class SimlerWrapper:
             max_episode_steps=self.args.episode_len,
             sensor_configs={"shader_pack": "default"},
         )
+        self.rand_episode_id = random.randint(0, 1000)
+
         self.env: BaseEnv = gym.make(**env_config)
-        self.env.reset(seed=[self.args.seed * 1000 + i + extra_seed for i in range(self.args.num_envs)])
+        options = {}
+        options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+        self.env.reset(seed=[self.args.seed * 1000 + i + extra_seed for i in range(self.args.num_envs)], options=options)
 
         # variables
         self.reward_old = torch.zeros(self.args.num_envs, 1, dtype=torch.float32)  # [B, 1]
@@ -94,7 +99,7 @@ class SimlerWrapper:
         options = {}
         options["obj_set"] = obj_set
         if same_init:
-            options["episode_id"] = torch.randint(1000000000, (1,)).expand(self.num_envs).to(self.env.device)  # [B]
+            options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
 
         obs, info = self.env.reset(options=options)
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)

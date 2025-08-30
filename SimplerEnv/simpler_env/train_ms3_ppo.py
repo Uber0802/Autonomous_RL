@@ -42,11 +42,11 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80
-    use_same_init: bool = False
+    use_same_init: bool = True
 
-    steps_max: int = 2000000
+    steps_max: int = 512000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 10
+    interval_eval: int = 4
     interval_save: int = 40
 
     # buffer
@@ -220,13 +220,20 @@ class Runner:
                     env_infos[f"{k}"] += v
 
         # infos
-        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
-        env_stats = env_stats.copy()
+        num_groups = 4
+        group_size = self.args.num_envs // num_groups
+        grouped_stats = {f"{instruction[i* group_size]}": {} for i in range(num_groups)}
+        for k, values in env_infos.items():
+            for group_idx in range(num_groups):
+                start = group_idx * group_size
+                end = (group_idx + 1) * group_size
+                group_vals = values[start:end]
+                grouped_stats[f"{instruction[start]}"][f"{k}"] = float(np.mean(group_vals))
 
-        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
-        print(f"")
+        print(pprint.pformat({g: {k: round(v, 4) for k, v in d.items()} for g, d in grouped_stats.items()}))
+        print("")
 
-        return env_stats
+        return grouped_stats
 
     @torch.no_grad()
     def render(self, epoch: int, obj_set: str) -> dict:
@@ -241,8 +248,8 @@ class Runner:
             "info": [],  # info after executing a_t: [1, T]
         } for idx in range(self.args.num_envs)]
 
-        obs_img, instruction, info = self.env.reset(obj_set)
-        print("instruction[:3]:", instruction[:3])
+        obs_img, instruction, info = self.env.reset(obj_set, self.args.use_same_init)
+        print("instruction:", instruction)
 
         # data dump: instruction
         for idx in range(self.args.num_envs):
@@ -301,8 +308,18 @@ class Runner:
         env_stats = {k: np.mean(v) for k, v in env_infos.items()}
         env_stats_ret = env_stats.copy()
 
-        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
-        print(f"")
+        num_groups = 4
+        group_size = self.args.num_envs // num_groups
+        grouped_stats = {f"{instruction[i* group_size]}": {} for i in range(num_groups)}
+        for k, values in env_infos.items():
+            for group_idx in range(num_groups):
+                start = group_idx * group_size
+                end = (group_idx + 1) * group_size
+                group_vals = values[start:end]
+                grouped_stats[f"{instruction[start]}"][f"{k}"] = float(np.mean(group_vals))
+
+        print(pprint.pformat({g: {k: round(v, 4) for k, v in d.items()} for g, d in grouped_stats.items()}))
+        print("")
 
         # save stats
         last_info = {
@@ -325,11 +342,18 @@ class Runner:
     def run(self):
         max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
 
+        steps = 0
+        print(f"Evaluating at {steps}")
+        sval_stats = self.eval(obj_set="train")
+        for task, d in sval_stats.items():
+            stats = {f"eval__{task}/{k}": v for k, v in d.items()}
+            wandb.log(stats, step=steps)
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
 
             obs_img, instruction, info = self.env.reset(obj_set="train", same_init=self.args.use_same_init)
+            print("Instructions: ",instruction)
             self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
             for _ in tqdm(range(self.args.episode_len), desc="rollout"):
@@ -370,12 +394,9 @@ class Runner:
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
                 sval_stats = self.eval(obj_set="train")
-                sval_stats = {f"eval/{k}": v for k, v in sval_stats.items()}
-                wandb.log(sval_stats, step=steps)
-
-                sval_stats = self.eval(obj_set="test")
-                sval_stats = {f"eval/{k}_ood": v for k, v in sval_stats.items()}
-                wandb.log(sval_stats, step=steps)
+                for task, d in sval_stats.items():
+                    stats = {f"eval__{task}/{k}": v for k, v in d.items()}
+                    wandb.log(stats, step=steps)
 
             # save
             if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:
@@ -404,11 +425,12 @@ def main():
             "PutOnPlateInScene25Position-v1",
             "PutOnPlateInScene25EEPose-v1",
             "PutOnPlateInScene25PositionChange-v1",
-            "PutOnPlateInScene25PositionChangeTo-v1"
+            "PutOnPlateInScene25PositionChangeTo-v1",
+            "TwoCarrotTwoPlate"
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
-        runner.render(epoch=0, obj_set="test")
+        runner.render(epoch=0, obj_set="train")
     else:
         runner.run()
 
