@@ -286,7 +286,7 @@ class OpenVLAPPO:
         self.ppo_clip = 0.2
         self.ppo_grad_norm = 10.0
         self.ppo_entropy_coef = self.args.alg_entropy_coef
-        self.ppo_huber_delta = 5.0
+        self.ppo_huber_delta = 10.0
         self.tpdv = self.policy.tpdv
         self.tpdv_vn = self.policy.tpdv_vn
 
@@ -308,8 +308,7 @@ class OpenVLAPPO:
         ratio = torch.exp(logprob - old_logprob)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
-        # policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
-        policy_loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
 
 
         # Value loss

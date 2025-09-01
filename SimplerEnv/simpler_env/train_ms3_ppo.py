@@ -39,12 +39,12 @@ class Args:
     """Seed the model and environment. Default seed is 0"""
 
     name: str = "PPO-test"
-    log: str = "/workspace/Autonomous_RL/rlvla_train_80_seed0.txt"
+    log: str = "/workspace/Autonomous_RL/rlvla_train_160_seed2.txt"
 
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 80
+    training_len: int = 160
     use_same_init: bool = True
 
     steps_max: int = 2000000
@@ -76,7 +76,7 @@ class Args:
     alg_grpo_fix: bool = True
     alg_gradient_accum: int = 20
     alg_ppo_epoch: int = 1
-    alg_entropy_coef: float = 0.03
+    alg_entropy_coef: float = 0.0
 
     # other
     wandb: bool = True
@@ -227,7 +227,7 @@ class Runner:
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
 
-        for _ in tqdm(range(self.args.training_len), desc="eval"):
+        for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
             value, action, logprob = self._get_action(obs, deterministic=True)
 
@@ -243,8 +243,8 @@ class Runner:
         env_stats = {k: np.mean(v) for k, v in env_infos.items()}
         env_stats = env_stats.copy()
 
-        # print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
-        # print(f"")
+        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
+        print(f"")
 
         return env_stats
 
@@ -356,7 +356,7 @@ class Runner:
             obs_img_new, reward, done, env_info = self.env.step(action)
 
             # info
-            print({k: round(v.to(torch.float32).mean().tolist(), 4) for k, v in env_info.items() if k != "episode"})
+            #print({k: round(v.to(torch.float32).mean().tolist(), 4) for k, v in env_info.items() if k != "episode"})
             if "episode" in env_info.keys():
                 for k, v in env_info["episode"].items():
                     env_infos[f"{k}"] += v
