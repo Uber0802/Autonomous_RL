@@ -54,8 +54,7 @@ class SimlerWrapper:
         reward_diff = reward - self.reward_old
         self.reward_old = reward
 
-        # return reward_diff
-        return reward
+        return reward_diff
 
     def _process_action(self, raw_actions: torch.Tensor) -> torch.Tensor:
         action_scale = 1.0
