@@ -1327,9 +1327,9 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        self.select_carrot1_ids = episode_id // (lp * le * lo * l1 * l2)  # [b]
+        self.select_carrot1_ids = episode_id // (lp * le * lo * l1 * l2) + 6 # [b]
         self.select_carrot2_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
-        self.select_carrot2_ids = (self.select_carrot1_ids + self.select_carrot2_ids + 1) % lc + lp_offset  # [b]
+        self.select_carrot2_ids = (self.select_carrot1_ids + self.select_carrot2_ids -5) % lc + lp_offset  # [b]
 
         self.select_plate1_ids = (episode_id // (le * lo * l1 * l2)) % lp
         self.select_plate2_ids = (episode_id // (lo * l1 * l2)) % le

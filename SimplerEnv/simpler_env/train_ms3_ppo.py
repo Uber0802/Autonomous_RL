@@ -20,6 +20,7 @@ from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
 from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
+import copy
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -39,7 +40,7 @@ class Args:
     """Seed the model and environment. Default seed is 0"""
 
     name: str = "PPO-test"
-    log: str = "/workspace/Autonomous_RL/rlvla_train_160_seed2.txt"
+    log: str = "/workspace/Autonomous_RL/two_buffer_160_seed2.txt"
 
     # env
     num_envs: int = 64
@@ -124,6 +125,7 @@ class Runner:
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
+        self.first_buffer = None
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
@@ -207,7 +209,13 @@ class Runner:
         self.policy.prep_training()
 
         if self.args.alg_name == "ppo":
-            train_info = self.alg.train_ppo(self.buffer)
+            if self.first_buffer == None:
+                train_info = self.alg.train_ppo(self.buffer)
+                self.first_buffer = copy.deepcopy(self.buffer)
+            else:
+                train_info = self.alg.train_ppo_2buffer(self.first_buffer, self.buffer)
+                self.first_buffer = None
+
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
         else:
@@ -431,12 +439,12 @@ class Runner:
         max_episodes = 100
         instruction_switch_interval = 80
         steps = 0
-        print(f"Evaluating at {steps}")
-        for task in self.task_list:
-            object, receptacle = self.extract_obj_recep(task)
-            sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-            sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
-            wandb.log(sval_stats, step=steps)
+        #print(f"Evaluating at {steps}")
+        #for task in self.task_list:
+        #    object, receptacle = self.extract_obj_recep(task)
+        #    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+        #    sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+        #    wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
         group_size = num_envs // 4    
@@ -475,7 +483,8 @@ class Runner:
 
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
-
+            # Reset buffer for 0-79 step    
+            self.first_buffer = None
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 value, action, logprob = self.collect()
                 obs_img, reward, done, env_info = self.env.step(action)

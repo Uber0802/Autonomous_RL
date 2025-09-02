@@ -452,6 +452,35 @@ class OpenVLAPPO:
 
         return final_info
 
+    def train_ppo_2buffer(self, buffer1, buffer2):
+        train_info = defaultdict(lambda: [])
+
+        # buffer
+        buffer1.compute_returns_ppo()
+        buffer2.compute_returns_ppo()
+        assert buffer1.get_minibatch_count() == buffer2.get_minibatch_count()
+        minibatch_count = buffer1.get_minibatch_count() + buffer2.get_minibatch_count()
+
+        for _ in range(self.args.alg_ppo_epoch):
+            data_generator1 = buffer1.feed_forward_generator()
+            data_generator2 = buffer2.feed_forward_generator()
+
+            for idx in tqdm(range(minibatch_count), desc="train interleaved"):
+                if idx % 2 == 0:
+                    batch = next(data_generator1)
+                else:
+                    batch = next(data_generator2)
+                    
+                info = self.train_ppo_step(idx, minibatch_count, batch)
+                for key, value in info.items():
+                    train_info[key].append(value)
+
+        final_info = {}
+        for key, value in train_info.items():
+            final_info[key] = np.mean(value)
+
+        return final_info
+
     def train_grpo(self, buffer):
         train_info = defaultdict(lambda: [])
 
