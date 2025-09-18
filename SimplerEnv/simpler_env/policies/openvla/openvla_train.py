@@ -124,7 +124,7 @@ class OpenVLAPolicy:
         images = images.permute(0, 3, 1, 2)  # [B, C, H, W]
         images = images.to(**self.tpdv)
 
-
+        torch.cuda.synchronize()
 
         # prompt
         if action is None:
@@ -220,7 +220,8 @@ class OpenVLAPolicy:
         self.vla.eval()
 
     def prep_training(self):
-        self.vla.eval()
+        self.vla.train()
+        # self.vla.eval()
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -271,8 +272,8 @@ class OpenVLAPPO:
     def __init__(self, all_args, policy: OpenVLAPolicy):
         self.args = all_args
         self.policy = policy
-        self.ppo_clip = 0.5
-        self.ppo_grad_norm = 10.0
+        self.ppo_clip = 0.2
+        self.ppo_grad_norm = 5.0
         self.ppo_entropy_coef = self.args.alg_entropy_coef
         self.ppo_huber_delta = 5.0
         self.tpdv = self.policy.tpdv
@@ -306,7 +307,16 @@ class OpenVLAPPO:
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
         # policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
-        policy_loss = -torch.min(surr1, surr2).mean()
+        # policy_loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
+
+        # if episode <= 10:
+        #     logprob_b = logprob.float().sum(dim=-1, keepdim=True)  
+        #     adv = advantages.float()
+        #     adv = (adv - adv.mean()) / (adv.std() + 1e-8) 
+        #     policy_loss = -(logprob_b * adv).mean()
+        # else:
+        #     policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
 
 
         # print("episode :", episode, "idx :", idx, "ratio :", ratio)
@@ -330,8 +340,8 @@ class OpenVLAPPO:
         entropy_loss = entropy.mean()
 
         # Total loss
-        print("here")
-        loss = policy_loss + 1 * value_loss - self.ppo_entropy_coef * entropy_loss
+        # print("here")
+        loss = policy_loss + value_loss - self.ppo_entropy_coef * entropy_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -354,7 +364,7 @@ class OpenVLAPPO:
             f"loss : {loss.item():.4f}\n"
         )
 
-        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+        with open("./-1_sft_multitask_0.05_guide15.txt", "a") as f:
             f.write(log_str)
 
 
@@ -477,7 +487,7 @@ class OpenVLAPPO:
         logprob_old_mean = old_logprob_sum / n_seen
         loss_for_log     = policy_loss_mean + 0.01 * value_loss_mean - self.ppo_entropy_coef * entropy_mean
 
-        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+        with open("./log.txt", "a") as f:
             f.write(f"[PPO Step {idx}/{total}] Returns: {returns_mean:.4f} | "
                     f"Advantages: {advantages.mean().item():.4f} | "
                     f"Policy Loss: {policy_loss_mean:.4f} | "
