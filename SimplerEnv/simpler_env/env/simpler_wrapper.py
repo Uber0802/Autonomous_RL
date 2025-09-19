@@ -208,6 +208,7 @@ class SDSimlerWrapper:
         # Random number for episode_id
         random.seed(self.args.seed)
         self.rand_episode_id = random.randint(0, 1000)
+        self.save_episode_id = self.rand_episode_id
 
         self.env: BaseEnv = gym.make(**env_config)
         options = {}
@@ -296,19 +297,64 @@ class SDSimlerWrapper:
         
         return True
 
-    def reset(self, obj_set: str, same_init: bool = False, object: list[str] = [], receptacle: list[str] = []):
+    def reset(self, obj_set: str, same_init: bool = False, object: list[str] = [], receptacle: list[str] = [], set_costmap: bool = False):
         options = {}
         options["obj_set"] = obj_set
         if same_init:
-            options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+            if not set_costmap:
+                import torch
+                base   = int(self.save_episode_id)   # 243
+                offset = torch.tensor([0, 10, 20, 30], device="cuda:0")  
+                block  = offset.repeat_interleave(2)                  
 
-
+                pattern = (base + block)                               
+                repeat_times = (self.num_envs + pattern.numel() - 1) // pattern.numel()
+                options["episode_id"] = pattern.repeat(repeat_times)[:self.num_envs]
+                print(options["episode_id"])
+            else:
+                import torch
+                options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+        
         obs, info = self.env.reset(options=options)
 
         if object and receptacle:
             self.set_task(object, receptacle)
 
+
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
+
+        # from PIL import Image
+        # import os
+        # import torch
+
+        # def save_batch_images(obs_image, out_dir="frames", prefix="frame"):
+        #     # obs_image: [B, H, W, 3] or [B, 3, H, W], dtype 可為 uint8 / float
+        #     os.makedirs(out_dir, exist_ok=True)
+
+        #     imgs = obs_image
+        #     if isinstance(imgs, torch.Tensor):
+        #         # 若是 [B, 3, H, W] 轉為 [B, H, W, 3]
+        #         if imgs.dim() == 4 and imgs.shape[1] == 3:
+        #             imgs = imgs.permute(0, 2, 3, 1)
+
+        #         # 若不是 uint8，轉成 0..255 的 uint8（假設目前是 0..1 或 0..255）
+        #         if imgs.dtype != torch.uint8:
+        #             # 若數值已是 0..1：
+        #             if imgs.max() <= 1.0:
+        #                 imgs = (imgs * 255.0).clamp(0, 255)
+        #             imgs = imgs.to(torch.uint8)
+
+        #         imgs_np = imgs.detach().cpu().numpy()  # [B,H,W,3] uint8
+        #     else:
+        #         raise TypeError("obs_image 應該是 torch.Tensor")
+
+        #     for i, arr in enumerate(imgs_np):
+        #         Image.fromarray(arr).save(os.path.join(out_dir, f"{prefix}_{i:02d}.png"))
+
+        # # 使用：
+        # save_batch_images(obs_image, out_dir="frames", prefix="frame")
+        # if not set_costmap:
+        #     import ipdb; ipdb.set_trace()
         depth = obs["sensor_data"]["3rd_view_camera"]["depth"].to(torch.uint8)
         position = obs["sensor_data"]["3rd_view_camera"]["position"].to(torch.float32)
         position[..., :3] = (
@@ -326,7 +372,6 @@ class SDSimlerWrapper:
             xyzw_list.append(xyzw.reshape(pos_h, pos_w, 4))
             
         xyzw = torch.stack(xyzw_list, dim=0)      
-        # import ipdb; ipdb.set_trace()
 
 
         instruction = self.env.unwrapped.get_language_instruction()

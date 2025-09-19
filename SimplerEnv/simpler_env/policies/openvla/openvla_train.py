@@ -124,7 +124,7 @@ class OpenVLAPolicy:
         images = images.permute(0, 3, 1, 2)  # [B, C, H, W]
         images = images.to(**self.tpdv)
 
-
+        torch.cuda.synchronize()
 
         # prompt
         if action is None:
@@ -220,7 +220,8 @@ class OpenVLAPolicy:
         self.vla.eval()
 
     def prep_training(self):
-        self.vla.eval()
+        self.vla.train()
+        # self.vla.eval()
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -271,8 +272,8 @@ class OpenVLAPPO:
     def __init__(self, all_args, policy: OpenVLAPolicy):
         self.args = all_args
         self.policy = policy
-        self.ppo_clip = 0.5
-        self.ppo_grad_norm = 10.0
+        self.ppo_clip = 0.2
+        self.ppo_grad_norm = 5.0
         self.ppo_entropy_coef = self.args.alg_entropy_coef
         self.ppo_huber_delta = 5.0
         self.tpdv = self.policy.tpdv
@@ -306,7 +307,16 @@ class OpenVLAPPO:
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
         # policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
-        policy_loss = -torch.min(surr1, surr2).mean()
+        # policy_loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
+
+        # if episode <= 10:
+        #     logprob_b = logprob.float().sum(dim=-1, keepdim=True)  
+        #     adv = advantages.float()
+        #     adv = (adv - adv.mean()) / (adv.std() + 1e-8) 
+        #     policy_loss = -(logprob_b * adv).mean()
+        # else:
+        #     policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
 
 
         # print("episode :", episode, "idx :", idx, "ratio :", ratio)
@@ -330,8 +340,8 @@ class OpenVLAPPO:
         entropy_loss = entropy.mean()
 
         # Total loss
-        print("here")
-        loss = policy_loss + 1 * value_loss - self.ppo_entropy_coef * entropy_loss
+        # print("here")
+        loss = policy_loss + value_loss - self.ppo_entropy_coef * entropy_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -354,7 +364,7 @@ class OpenVLAPPO:
             f"loss : {loss.item():.4f}\n"
         )
 
-        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
+        with open("./3_sft_multitask_4pos_0.05_guide15.txt", "a") as f:
             f.write(log_str)
 
 
@@ -381,128 +391,7 @@ class OpenVLAPPO:
 
         return info
 
-    def train_ppo_step_batch(self, idx, total, batch, episode):
-        obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
-
-        obs_image   = torch.as_tensor(obs_image)                
-        actions     = torch.as_tensor(actions)                  
-        value_preds = torch.as_tensor(value_preds, dtype=self.tpdv["dtype"])
-        returns     = torch.as_tensor(returns,     dtype=self.tpdv_vn["dtype"])
-        old_logprob = torch.as_tensor(old_logprob, dtype=self.tpdv["dtype"])
-        advantages  = torch.as_tensor(advantages,  dtype=self.tpdv["dtype"])
-
-        B  = obs_image.shape[0]
-        mb = 8                    
-        num_mb = (B + mb - 1) // mb
-
-        self.policy.vh_optimizer.zero_grad(set_to_none=True)
-        self.policy.vla_optimizer.zero_grad(set_to_none=True)
-
-        policy_loss_sum = value_loss_sum = entropy_sum = 0.0
-        ratio_mean_sum = ratio2_mean_sum = 0.0
-        value_clip_ratio_sum = value_preds_sum = values_sum = returns_sum = 0.0
-        logprob_sum = old_logprob_sum = 0.0
-        n_seen = 0
-
-        if episode <= 10:   clip = 0.5
-        elif episode <= 15: clip = 0.3
-        else:               clip = 0.2
-        self.ppo_clip = clip
-
-        for s in range(0, B, mb):
-            e = min(s + mb, B); w = e - s
-
-            obs = dict(
-                image=obs_image[s:e].to(self.tpdv["device"], non_blocking=True),
-                task_description=instruct[s:e],
-            )
-            actions_mb     = actions[s:e].to(self.tpdv["device"], non_blocking=True)
-            value_preds_mb = value_preds[s:e].to(**self.tpdv)
-            returns_mb     = returns[s:e].to(**self.tpdv_vn)
-            old_logprob_mb = old_logprob[s:e].to(**self.tpdv)
-            advantages_mb  = advantages[s:e].to(**self.tpdv)
-            returns_norm_mb= returns_mb.to(**self.tpdv)
-
-            logprob, entropy, values = self.policy.evaluate_actions(obs, actions_mb)
-            ratio = torch.exp(logprob - old_logprob_mb)
-
-            surr1 = ratio * advantages_mb
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantages_mb
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            # print("episode :", episode, "idx :", idx, "ratio :", ratio)
-
-
-            values_f32      = values.float()
-            value_preds_f32 = value_preds_mb.float()
-            value_pred_clipped = value_preds_f32 + (values_f32 - value_preds_f32).clamp(-clip, clip)
-            err_c = returns_mb - value_pred_clipped
-            err_o = returns_mb - values_f32
-            value_loss = torch.max(huber_loss(err_o, self.ppo_huber_delta),
-                                huber_loss(err_c, self.ppo_huber_delta)).mean()
-
-            value_clip_ratio_mb = ((value_pred_clipped - value_preds_f32).abs() > clip).float().mean()
-            entropy_loss = entropy.mean()
-
-            loss_mb = policy_loss + 1 * value_loss - self.ppo_entropy_coef * entropy_loss
-            loss_mb = loss_mb / num_mb
-            loss_mb.backward()   
-
-            n_seen += w
-            policy_loss_sum += policy_loss.item() * w
-            value_loss_sum  += value_loss.item()  * w
-            entropy_sum     += entropy_loss.item() * w
-            ratio_mean_sum  += ratio.mean().item() * w
-            ratio2_mean_sum += (logprob - old_logprob_mb).mean().exp().item() * w
-            value_clip_ratio_sum += value_clip_ratio_mb.item() * w
-            value_preds_sum += value_preds_mb.mean().item() * w
-            values_sum      += values.mean().item() * w
-            returns_sum     += returns_mb.mean().item() * w
-            logprob_sum     += logprob.mean().item() * w
-            old_logprob_sum += old_logprob_mb.mean().item() * w
-
-        grad_norm = nn.utils.clip_grad_norm_(self.policy.params_vla + self.policy.params_vh, self.ppo_grad_norm)
-        self.policy.vh_optimizer.step(); self.policy.vla_optimizer.step()
-
-        policy_loss_mean = policy_loss_sum / n_seen
-        value_loss_mean  = value_loss_sum  / n_seen
-        entropy_mean     = entropy_sum     / n_seen
-        ratio_mean       = ratio_mean_sum  / n_seen
-        ratio2_mean      = ratio2_mean_sum / n_seen
-        value_clip_ratio = value_clip_ratio_sum / n_seen
-        value_old_mean   = value_preds_sum / n_seen
-        values_mean      = values_sum      / n_seen
-        returns_mean     = returns_sum     / n_seen
-        logprob_mean     = logprob_sum     / n_seen
-        logprob_old_mean = old_logprob_sum / n_seen
-        loss_for_log     = policy_loss_mean + 0.01 * value_loss_mean - self.ppo_entropy_coef * entropy_mean
-
-        with open("/workspace/AutoRL_SD/log.txt", "a") as f:
-            f.write(f"[PPO Step {idx}/{total}] Returns: {returns_mean:.4f} | "
-                    f"Advantages: {advantages.mean().item():.4f} | "
-                    f"Policy Loss: {policy_loss_mean:.4f} | "
-                    f"Value Loss: {value_loss_mean:.4f} | "
-                    f"Entropy Loss: {entropy_mean:.4f}\n")
-
-        info = dict(
-            loss=float(loss_for_log),
-            policy_loss=policy_loss_mean,
-            value_loss=value_loss_mean,
-            entropy_loss=entropy_mean,
-            ratio=ratio_mean,
-            ratio_median=ratio_mean,
-            ratio_2=ratio2_mean,
-            value_clip_ratio=value_clip_ratio,
-            value_old_mean=value_old_mean,
-            values_mean=values_mean,
-            returns_mean=returns_mean,
-            returns_norm_mean=returns_mean,
-            logprob_mean=logprob_mean,
-            logprob_old_mean=logprob_old_mean,
-            grad_norm=grad_norm.item(),
-        )
-        return info
-
+    
 
 
     def train_grpo_step(self, idx, total, batch):
