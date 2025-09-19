@@ -12,39 +12,40 @@ from .create_costmaps_gemini import CostMapCreator, CostMapHandler
 from .planner import plan_task
 from ..prismatic.vla.action_tokenizer import ActionTokenizer
 
-def initialize_cost_map(env, env_reset_options, save_dir, obs_camera_name, num_instruction):
+def initialize_cost_map(env, env_reset_options, save_dir, obs_camera_name, num_instruction, num_pos):
     os.makedirs(save_dir, exist_ok=True)
     costmap_root = os.path.join(save_dir, "costmaps")
     os.makedirs(costmap_root, exist_ok=True)
-    obs, instruction, _, _ = env.reset(**env_reset_options)
-
-    group_size = len(obs) // num_instruction
     all_costmap_handler = []
+    for j in range(num_pos):
+        env.rand_episode_id = env.save_episode_id + j * 10
+        obs, instruction, _, _ = env.reset(**env_reset_options)     
+        group_size = len(obs) // num_instruction 
 
-    for i in range(num_instruction):
-        print(f"[INFO] Generating costmap {i}")
+        for i in range(num_instruction):
+            print(f"[INFO] Generating costmap {j * num_pos + i}")
 
-        image = obs[i * group_size].cpu().numpy()
-        task_description = instruction[i * group_size]
+            image = obs[i * group_size].cpu().numpy()
+            task_description = instruction[i * group_size]
 
-        sub_dir = os.path.join(costmap_root, str(i))
-        os.makedirs(sub_dir, exist_ok=True)
+            sub_dir = os.path.join(costmap_root, str(j * num_pos + i))
+            os.makedirs(sub_dir, exist_ok=True)
 
-        action_info_path = os.path.join(sub_dir, "action_info.json")
-        if not os.path.exists(action_info_path):
-            plan_traj_data = plan_task(task_description, image, idx=i)
-            with open(action_info_path, "w") as f:
-                json.dump(plan_traj_data, f, indent=4)
-        else:
-            with open(action_info_path, "r") as f:
-                plan_traj_data = json.load(f)
+            action_info_path = os.path.join(sub_dir, "action_info.json")
+            if not os.path.exists(action_info_path):
+                plan_traj_data = plan_task(task_description, image, idx=j * num_pos + i)
+                with open(action_info_path, "w") as f:
+                    json.dump(plan_traj_data, f, indent=4)
+            else:
+                with open(action_info_path, "r") as f:
+                    plan_traj_data = json.load(f)
 
-        # logger.debug("[DEBUG] Cost maps created using CostMapCreator.")
-        costmap_creator = CostMapCreator(sub_dir, obs_camera_name)
-        costmaps = costmap_creator.create_costmaps(
-            env, env_reset_options, plan_traj_data, i * group_size)
-        costmap_handler = CostMapHandler(costmaps)
-        all_costmap_handler.append(costmap_handler)
+            # logger.debug("[DEBUG] Cost maps created using CostMapCreator.")
+            costmap_creator = CostMapCreator(sub_dir, obs_camera_name)
+            costmaps = costmap_creator.create_costmaps(
+                env, env_reset_options, plan_traj_data, i * group_size)
+            costmap_handler = CostMapHandler(costmaps)
+            all_costmap_handler.append(costmap_handler)
 
     return all_costmap_handler
 

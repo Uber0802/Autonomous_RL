@@ -208,6 +208,7 @@ class SDSimlerWrapper:
         # Random number for episode_id
         random.seed(self.args.seed)
         self.rand_episode_id = random.randint(0, 1000)
+        self.save_episode_id = self.rand_episode_id 
 
         self.env: BaseEnv = gym.make(**env_config)
         options = {}
@@ -296,11 +297,25 @@ class SDSimlerWrapper:
         
         return True
 
-    def reset(self, obj_set: str, same_init: bool = False, object: list[str] = [], receptacle: list[str] = []):
+    def reset(self, obj_set: str, same_init: bool = False, object: list[str] = [], receptacle: list[str] = [], set_costmap: bool = False):
         options = {}
         options["obj_set"] = obj_set
+        # if same_init:
+        #     options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
         if same_init:
-            options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+            if not set_costmap:
+                base   = int(self.save_episode_id)   # 243
+                offset = torch.tensor([0, 10, 20, 30], device="cuda:0")  
+                block  = offset.repeat_interleave(2)                  
+
+                pattern = (base + block)                               
+                repeat_times = (self.num_envs + pattern.numel() - 1) // pattern.numel()
+                options["episode_id"] = pattern.repeat(repeat_times)[:self.num_envs]
+                print(options["episode_id"])
+            else:
+                options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
+                print("set costmap !!!!!!!!!!!!!!!!!!!!!!!!!!")
+                print(options["episode_id"])
 
 
         obs, info = self.env.reset(options=options)

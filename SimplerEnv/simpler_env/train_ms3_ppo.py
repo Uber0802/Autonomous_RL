@@ -294,6 +294,7 @@ class Args:
 class Runner:
     def __init__(self, all_args: Args):
         self.args = all_args
+        self.args.seed = 2
 
         # alg_name
         assert self.args.alg_name in ["ppo", "grpo"]
@@ -947,7 +948,7 @@ class Runner:
         self.policy.prep_rollout()
         env_infos = defaultdict(lambda: [])
 
-        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle, set_costmap=False)
         
 
         viz_writers = []
@@ -1013,6 +1014,7 @@ class Runner:
             same_init=self.args.use_same_init,
             object=object,
             receptacle=receptacle,
+            set_costmap=False
         )
         print(f"Evaluating({num_envs}-env, reuse self.env):", instruction[0])
 
@@ -1095,86 +1097,6 @@ class Runner:
 
         return {k: np.mean(v) for k, v in env_infos.items()}
 
-    @torch.no_grad()
-    def eval_video(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
-        self.policy.prep_rollout()
-
-        env_infos = defaultdict(lambda: [])
-        obs_img, instruction, info, _ = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object,receptacle=receptacle)
-
-        data = {
-            "image": [],
-            "instruction": "",
-            "action": [],
-            "info": [],
-        }
-
-        print("Evaluating:", instruction[0])
-        data["instruction"] = instruction[0]
-
-        for _ in range(self.args.episode_len):
-            obs = dict(image=obs_img, task_description=instruction)
-            value, action, logprob = self._get_action(obs, deterministic=True)
-
-            obs_img_new, reward, done, env_info = self.env.step(action)
-
-            if "episode" in env_info.keys():
-                for k, v in env_info["episode"].items():
-                    value = v[0]
-                    if isinstance(value, bool):
-                        env_infos[k].append(value)
-                    else:
-                        env_infos[k].append(value.item())
-
-
-            post_action = self.env._process_action(action)
-            log_image = obs_img[0].cpu().numpy()
-            log_action = post_action[0].cpu().numpy().tolist()
-            log_info = {k: v[0].tolist() for k, v in env_info.items() if k != "episode"}
-
-            data["image"].append(log_image)
-            data["action"].append(log_action)
-            data["info"].append(log_info)
-
-            obs_img = obs_img_new
-
-        data["image"].append(obs_img[0].cpu().numpy())
-
-        exp_dir = Path(self.glob_dir) / f"eval_{epoch}_{obj_set}_{instruction[0]}"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.args.render_info:
-            for j in range(len(data["info"])):
-                data["image"][j + 1] = visualization.put_info_on_image(
-                    data["image"][j + 1],
-                    data["info"][j],
-                    extras=[f"Ins: {data['instruction']}"]
-                )
-
-        success = int(data["info"][-1]["success"])
-        images_to_video(
-            data["image"],
-            str(exp_dir),
-            f"video_{object[0]}_{receptacle[0]}-s_{success}",
-            fps=10,
-            verbose=False
-        )
-
-        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
-        env_stats_ret = env_stats.copy()
-
-
-        save_stats = {
-            "env_name": self.args.env_id,
-            "ep_len": self.args.episode_len,
-            "epoch": epoch,
-            "stats": {k: float(v) for k, v in env_stats.items()},
-            "instruction": data["instruction"],
-            "last_info": data["info"][-1],
-        }
-        yaml.dump(save_stats, open(exp_dir / "stats.yaml", "w"))
-
-        return env_stats_ret
 
     @torch.no_grad()
     def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
@@ -1189,7 +1111,7 @@ class Runner:
         } for idx in range(self.args.num_envs)]
 
         obs_img, instruction, info, _ = self.env.reset(
-            obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle
+            obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle, set_costmap=False
         )
         print("Rendering:", instruction[0])
 
@@ -1301,7 +1223,7 @@ class Runner:
             objects, receptacles = [], []
             # test
             for i in range(4):
-                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                obj, recep = self.extract_obj_recep(self.task_list[i])
                 objects.extend([obj] * group_size)
                 receptacles.extend([recep] * group_size)
 
@@ -1317,18 +1239,27 @@ class Runner:
                 "obj_set": "train",
                 "same_init": self.args.use_same_init,
                 "object": objects,
-                "receptacle": receptacles
+                "receptacle": receptacles,
+                "set_costmap": True
             }
 
             costmap_handler_list = initialize_cost_map(
-                self.env, env_reset_options, costmap_dir, "3rd_view_camera", 4
+                self.env, env_reset_options, costmap_dir, "3rd_view_camera", 4, 4
             )
+
+            costmap_handler = []
+            for i in  range(self.args.num_envs):
+                group = i // group_size
+                group_index = (i - group * group_size) % 4
+                costmap_handler.append(costmap_handler_list[group + group_index * 4])
+
 
             obs_img, instruction, info, _ = self.env.reset(
                 obj_set="train",
                 same_init=self.args.use_same_init,
                 object=objects,
-                receptacle=receptacles
+                receptacle=receptacles,
+                set_costmap=False
             )
 
             task_id_map = []
@@ -1365,10 +1296,10 @@ class Runner:
             #     viz_writers[i] = imageio.get_writer(viz_path, fps=10, codec="libx264")
 
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
-                costmap_handler = []
+                # costmap_handler = []
                 # test
-                for i in  range(self.args.num_envs):
-                    costmap_handler.append(costmap_handler_list[(self.task_id + (i // group_size)) % len(self.task_list)])
+                # for i in  range(self.args.num_envs):
+                #     costmap_handler.append(costmap_handler_list[(self.task_id + (i // group_size)) % len(self.task_list)])
                     # costmap_handler.append(costmap_handler_list[self.task_id])
                 ###
                 for i in range(self.args.num_envs):
@@ -1525,10 +1456,10 @@ class Runner:
 
                     # Switch Instruction
                     # test 
-                    self.task_id = (self.task_id + 1) % len(self.task_list)
+                    # self.task_id = (self.task_id + 1) % len(self.task_list)
                     objects, receptacles = [], []
                     for i in range(4):
-                        obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                        obj, recep = self.extract_obj_recep(self.task_list[i])
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)

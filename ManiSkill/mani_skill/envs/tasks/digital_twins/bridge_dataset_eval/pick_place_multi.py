@@ -1492,13 +1492,13 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)  # [b, 4]
 
             # import ipdb; ipdb.set_trace()
-            idx_list = env_idx.detach().to('cpu').tolist()
-            for ei in idx_list:
-                p_i = p[ei:ei+1] 
-                q_i = q[ei:ei+1]  
-                self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
+            # idx_list = env_idx.detach().to('cpu').tolist()
+            # for ei in idx_list:
+            #     p_i = p[ei:ei+1] 
+            #     q_i = q[ei:ei+1]  
+            #     self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
 
-            # self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
+            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
 
         for idx, name in enumerate(self.model_db_plate):
             p_reset = torch.tensor([2.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
@@ -1514,13 +1514,13 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
             q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)
 
-            idx_list = env_idx.detach().to('cpu').tolist()
-            for ei in idx_list:
-                p_i = p[ei:ei+1] 
-                q_i = q[ei:ei+1]  
-                self.objs_plate[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
+            # idx_list = env_idx.detach().to('cpu').tolist()
+            # for ei in idx_list:
+            #     p_i = p[ei:ei+1] 
+            #     q_i = q[ei:ei+1]  
+            #     self.objs_plate[name].set_pose(Pose.create_from_pq(p=p_i, q=q_i))
 
-            # self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
+            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
 
         self._settle(0.5)
 
