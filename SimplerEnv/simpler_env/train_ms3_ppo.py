@@ -1250,8 +1250,8 @@ class Runner:
             costmap_handler = []
             for i in  range(self.args.num_envs):
                 group = i // group_size
-                group_index = (i - group * group_size) // 4
-                costmap_handler.append(costmap_handler_list[group + group_index * 4])
+                group_index = (i - group * group_size) // (group_size / 4)
+                costmap_handler.append(costmap_handler_list[group + int(group_index) * 4])
 
 
             obs_img, instruction, info, _ = self.env.reset(
