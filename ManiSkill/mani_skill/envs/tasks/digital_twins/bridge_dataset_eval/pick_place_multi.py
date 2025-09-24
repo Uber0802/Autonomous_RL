@@ -944,10 +944,10 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
             le = 16
             le_mod = 17
         elif obj_set == "test":
-            lp = 16
-            lp_offset = 1
-            le = 15
-            le_mod = 16
+            lp = 1
+            lp_offset = 0
+            le = 16
+            le_mod = 17
         elif obj_set == "all":
             lp = 17
             lp_offset = 0
@@ -981,6 +981,11 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
+        if obj_set == "test":
+            rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+            rand_id = rand_id.reshape(b)
+            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_quat_ids = rand_id % l2
 
     def set_current_task(self, object: list[str], receptacle: list[str]):
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
@@ -1300,10 +1305,10 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             le = 16
             le_mod = 17
         elif obj_set == "test":
-            lp = 16
-            lp_offset = 1
-            le = 15
-            le_mod = 16
+            lp = 1
+            lp_offset = 0
+            le = 16
+            le_mod = 17
         elif obj_set == "all":
             lp = 17
             lp_offset = 0
@@ -1340,6 +1345,11 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
+        if obj_set == "test":
+            rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+            rand_id = rand_id.reshape(b)
+            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_quat_ids = rand_id % l2
 
     def set_current_task(self, object: list[str], receptacle: list[str]):
         select_carrot1 = [self.carrot_names[idx] for idx in self.select_carrot1_ids]

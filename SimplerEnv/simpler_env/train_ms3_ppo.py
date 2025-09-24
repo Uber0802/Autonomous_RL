@@ -363,7 +363,7 @@ class Runner:
         for idx in range(self.args.num_envs):
             datas[idx]["instruction"] = instruction[idx]
 
-        for _ in range(self.args.episode_len):
+        for _ in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
             obs = dict(image=obs_img, task_description=instruction)
             value, action, logprob = self._get_action(obs, deterministic=True)
 
@@ -591,9 +591,9 @@ def main():
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
-        for object in runner.env.get_object_names()[0]:
-            for receptacle in runner.env.get_receptacle_names()[0]:
-                runner.render(0, "train", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
+        for task in runner.task_list:
+            object, receptacle = runner.extract_obj_recep(task)
+            runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
 
     else:
         runner.run()
