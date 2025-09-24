@@ -452,12 +452,40 @@ class OpenVLAPPO:
 
         return final_info
 
+    def train_ppo_joint(self, buffer, buffer2):
+        train_info = defaultdict(lambda: [])
+
+        # buffer
+        buffer.cat_buffer(buffer2)
+        buffer.compute_returns_ppo()
+        minibatch_count = buffer.get_minibatch_count()
+
+        for _ in range(self.args.alg_ppo_epoch):
+            data_generator = buffer.feed_forward_generator()
+
+            for idx, batch in tqdm(enumerate(data_generator), total=minibatch_count, desc="train joint buffer"):
+                info = self.train_ppo_step(idx, minibatch_count, batch)
+                for key, value in info.items():
+                    train_info[key].append(value)
+
+        final_info = {}
+        for key, value in train_info.items():
+            final_info[key] = np.mean(value)
+
+        return final_info
+
     def train_ppo_2buffer(self, buffer1, buffer2):
         train_info = defaultdict(lambda: [])
 
         # buffer
         buffer1.compute_returns_ppo()
         buffer2.compute_returns_ppo()
+        # Normalized together
+        all_adv = np.concatenate([buffer1.advantages, buffer2.advantages])
+        mean_adv = all_adv.mean()
+        std_adv = all_adv.std()
+        buffer1.advantages = (buffer1.advantages - mean_adv) / (std_adv + 1e-5)
+        buffer2.advantages = (buffer2.advantages - mean_adv) / (std_adv + 1e-5)
         assert buffer1.get_minibatch_count() == buffer2.get_minibatch_count()
         minibatch_count = buffer1.get_minibatch_count() + buffer2.get_minibatch_count()
 

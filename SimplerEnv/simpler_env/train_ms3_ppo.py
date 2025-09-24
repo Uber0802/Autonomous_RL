@@ -45,13 +45,16 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 160
+    training_len: int = 320
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 4
-    interval_save: int = 40
+    interval_eval: int = 2
+    interval_save: int = 12
+    max_episodes: int = 32
+    instruction_switch_interval: int = 80
+    eval_at_start: bool = False
 
     # buffer
     buffer_inferbatch: int = 32
@@ -207,23 +210,26 @@ class Runner:
 
     def train(self):
         self.policy.prep_training()
+        info = None
+        train_info = None
 
         if self.args.alg_name == "ppo":
             if self.first_buffer == None:
-                train_info = self.alg.train_ppo(self.buffer)
+                #train_info = self.alg.train_ppo(self.buffer)
                 self.first_buffer = copy.deepcopy(self.buffer)
             else:
-                train_info = self.alg.train_ppo_2buffer(self.first_buffer, self.buffer)
+                #train_info = self.alg.train_ppo_2buffer(self.first_buffer, self.buffer)
+                train_info = self.alg.train_ppo_joint(self.first_buffer, self.buffer)
                 self.first_buffer = None
 
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
         else:
             raise ValueError(f"Unknown alg_name: {self.args.alg_name}")
-
-        info = {f"train/{k}": v for k, v in train_info.items()}
-        info["buffer/reward_mean"] = np.mean(self.buffer.rewards)
-        info["buffer/mask_mean"] = np.mean(1.0 - self.buffer.masks)
+        if train_info:
+            info = {f"train/{k}": v for k, v in train_info.items()}
+            info["buffer/reward_mean"] = np.mean(self.buffer.rewards)
+            info["buffer/mask_mean"] = np.mean(1.0 - self.buffer.masks)
 
         return info
 
@@ -436,15 +442,16 @@ class Runner:
     def run(self):
 
         max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
-        max_episodes = 100
-        instruction_switch_interval = 80
+        max_episodes = self.args.max_episodes
+        instruction_switch_interval = self.args.instruction_switch_interval
         steps = 0
-        #print(f"Evaluating at {steps}")
-        #for task in self.task_list:
-        #    object, receptacle = self.extract_obj_recep(task)
-        #    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-        #    sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
-        #    wandb.log(sval_stats, step=steps)
+        if self.args.eval_at_start:
+            print(f"Evaluating at {steps}")
+            for task in self.task_list:
+                object, receptacle = self.extract_obj_recep(task)
+                sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
         group_size = num_envs // 4    
@@ -479,7 +486,7 @@ class Runner:
             # self.buffer.warmup(obs_img.cpu().numpy(), instruction)
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
-            print("instruction : ", instruction[0], instruction[16], instruction[32], instruction[48])
+            print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
 
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
@@ -518,11 +525,17 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
-                    infos = self.train()
-                    for k, v in env_infos.items():
-                        infos[f"env/{k}"] = np.mean(v)
+                    if step_idx+1 == self.args.training_len:
+                        infos = self.train()
+                    elif self.first_buffer:
+                        self.first_buffer.cat_buffer(self.buffer)
+                    else:
+                        self.first_buffer = copy.deepcopy(self.buffer)
+
+                    #for k, v in env_infos.items():
+                    #    infos[f"env/{k}"] = np.mean(v)
                     # wandb.log(infos, step=step_idx + episode * self.args.training_len)
-                    self.buffer.warmup(obs_img.cpu().numpy(), instruction)
+                    #self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
                     #Switch Instruction
                     self.task_id = (self.task_id + 1) % len(self.task_list)
@@ -532,11 +545,13 @@ class Runner:
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)
+                    obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
-                    print(step_idx, "switch instruction to ", instruction[0], instruction[16], instruction[32], instruction[48])
+                    print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+                    self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
 
             # steps

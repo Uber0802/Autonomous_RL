@@ -23,6 +23,49 @@ class SeparatedReplayBuffer(object):
 
         self.step = 0
 
+    def cat_buffer(self, buffer: 'SeparatedReplayBuffer'):
+        assert self.ep_len == buffer.ep_len, "Episode lengths must match"
+        assert self.obs.shape[0] == buffer.obs.shape[0], "Obs time dimension mismatch"
+        assert self.obs.shape[2:] == buffer.obs.shape[2:], "Obs shape mismatch"
+
+        def print_shape_diff(name, before, after):
+            print(f"{name}: {before} -> {after}")
+
+        # Print shapes before
+        print("Before concatenation:")
+        print(f"obs: {self.obs.shape}, buffer.obs: {buffer.obs.shape}")
+        print(f"value_preds: {self.value_preds.shape}, buffer: {buffer.value_preds.shape}")
+        print(f"returns: {self.returns.shape}, buffer: {buffer.returns.shape}")
+        print(f"actions: {self.actions.shape}, buffer: {buffer.actions.shape}")
+        print(f"action_log_probs: {self.action_log_probs.shape}, buffer: {buffer.action_log_probs.shape}")
+        print(f"rewards: {self.rewards.shape}, buffer: {buffer.rewards.shape}")
+        print(f"masks: {self.masks.shape}, buffer: {buffer.masks.shape}")
+        print(f"advantages: {self.advantages.shape}, buffer: {buffer.advantages.shape}")
+
+        self.obs = np.concatenate([self.obs, buffer.obs], axis=1)
+        self.instruction += buffer.instruction  # List of strings
+        self.value_preds = np.concatenate([self.value_preds, buffer.value_preds], axis=1)
+        self.returns = np.concatenate([self.returns, buffer.returns], axis=1)
+        self.actions = np.concatenate([self.actions, buffer.actions], axis=1)
+        self.action_log_probs = np.concatenate([self.action_log_probs, buffer.action_log_probs], axis=1)
+        self.rewards = np.concatenate([self.rewards, buffer.rewards], axis=1)
+        self.masks = np.concatenate([self.masks, buffer.masks], axis=1)
+        self.advantages = np.concatenate([self.advantages, buffer.advantages], axis=1)
+
+        print("After concatenation:")
+        print_shape_diff("obs", buffer.obs.shape, self.obs.shape)
+        print_shape_diff("value_preds", buffer.value_preds.shape, self.value_preds.shape)
+        print_shape_diff("returns", buffer.returns.shape, self.returns.shape)
+        print_shape_diff("actions", buffer.actions.shape, self.actions.shape)
+        print_shape_diff("action_log_probs", buffer.action_log_probs.shape, self.action_log_probs.shape)
+        print_shape_diff("rewards", buffer.rewards.shape, self.rewards.shape)
+        print_shape_diff("masks", buffer.masks.shape, self.masks.shape)
+        print_shape_diff("advantages", buffer.advantages.shape, self.advantages.shape)
+
+        self.num_env += buffer.num_env
+        if self.step != buffer.step:
+            print(f"[Warning] Step mismatch: self.step={self.step}, buffer.step={buffer.step}. Using self.step.")
+
     def insert(self, obs, actions, action_log_probs, value_preds, rewards, masks):
         self.obs[self.step + 1] = obs.copy()
         self.actions[self.step] = actions.copy()

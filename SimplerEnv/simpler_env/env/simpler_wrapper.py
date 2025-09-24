@@ -179,3 +179,25 @@ class SimlerWrapper:
         Get receptacle names in all envs.
         """
         return self.env.unwrapped.receptacle_name()
+
+    def reset_robot(self):
+        env_idx = torch.arange(0, self.env.unwrapped.num_envs, device=self.env.unwrapped.device)
+        self.env.unwrapped._elapsed_steps[env_idx] = 0
+        self.env.unwrapped._clear_sim_state()
+        self.env.unwrapped.agent.reset()
+        self.env.unwrapped.agent.robot.set_pose(self.env.unwrapped.initial_robot_pos)
+        self.env.unwrapped._settle(0.5)
+        self.env.unwrapped.agent.reset(init_qpos=self.env.unwrapped.initial_qpos)
+        
+        self.env.unwrapped.scene._gpu_apply_all()
+        self.env.unwrapped.scene.px.gpu_update_articulation_kinematics()
+        self.env.unwrapped.scene._gpu_fetch_all()
+        if isinstance(self.env.unwrapped.agent.controller, dict):
+            for controller in self.env.unwrapped.agent.controller.values():
+                    controller.reset()
+        else:
+            self.env.unwrapped.agent.controller.reset()
+        info = self.env.unwrapped.get_info()
+        obs = self.env.unwrapped.get_obs(info)
+        obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
+        return obs_image
