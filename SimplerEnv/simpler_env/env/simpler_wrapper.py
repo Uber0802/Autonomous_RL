@@ -201,3 +201,9 @@ class SimlerWrapper:
         obs = self.env.unwrapped.get_obs(info)
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         return obs_image
+
+    def get_obs_image(self):
+        info = self.env.unwrapped.get_info()
+        obs = self.env.unwrapped.get_obs(info)
+        obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
+        return obs_image

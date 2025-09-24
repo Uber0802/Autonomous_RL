@@ -14,6 +14,7 @@ import tyro
 import wandb
 from dataclasses import dataclass
 import yaml
+import itertools
 from tqdm import tqdm
 from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
@@ -85,6 +86,7 @@ class Args:
     # other
     wandb: bool = True
     only_render: bool = False
+    only_render_seq: bool = False
     render_info: bool = False
 
 
@@ -344,8 +346,9 @@ class Runner:
         return env_stats_ret
 
     @torch.no_grad()
-    def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
-        self.policy.prep_rollout()
+    def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str], reset=True, exp_dir=None) -> dict:
+        if reset:
+            self.policy.prep_rollout()
 
         # init logger
         env_infos = defaultdict(lambda: [])
@@ -355,8 +358,12 @@ class Runner:
             "action": [],  # a_t: [0, T-1]
             "info": [],  # info after executing a_t: [1, T]
         } for idx in range(self.args.num_envs)]
-
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        if reset:
+            obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        else:
+            self.env.set_task(object, receptacle)
+            obs_img = self.env.get_obs_image()
+            instruction = self.env.get_language_instruction()
         print("Rendering:", instruction[0])
 
         # data dump: instruction
@@ -393,7 +400,10 @@ class Runner:
             datas[i]["image"].append(log_image)
 
         # save video
-        exp_dir = Path(self.glob_dir) / f"vis_{epoch}_{obj_set}"
+        if exp_dir:
+            exp_dir = Path(self.glob_dir) / exp_dir
+        else:
+            exp_dir = Path(self.glob_dir) / f"vis_{epoch}_{obj_set}"
 
         print("exp_dir : ", exp_dir)
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -438,6 +448,24 @@ class Runner:
         yaml.dump(save_stats, open(exp_dir / "stats.yaml", "w"))
 
         return env_stats_ret
+
+    @torch.no_grad()
+    def render_seq(self, obj_set: str, n = 4, eval_training_seq=True):
+        perms = list(itertools.permutations(self.task_list))
+        training_seq = perms.pop(0)
+        selected = random.sample(perms, n)
+        if eval_training_seq:
+            selected = [training_seq] + selected
+        
+        for i, task_lst in enumerate(tqdm(selected)):
+            print(task_lst)           
+            for j, task in enumerate(task_lst):
+                object, receptacle = self.extract_obj_recep(task)
+                if j == 0:
+                    reset = True
+                else:
+                    reset = False
+                stats = self.render(0, obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs, reset, f"{i}-{j}")
 
     def run(self):
 
@@ -595,6 +623,9 @@ def main():
             object, receptacle = runner.extract_obj_recep(task)
             runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
 
+    elif args.only_render_seq:
+        runner.render_seq("train", 4, True)
+    
     else:
         runner.run()
 
