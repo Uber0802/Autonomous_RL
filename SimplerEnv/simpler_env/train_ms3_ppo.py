@@ -46,15 +46,16 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 320
+    training_len: int = 640
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
-    interval_save: int = 12
-    max_episodes: int = 32
+    interval_eval: int = 1
+    interval_save: int = 4
+    max_episodes: int = 16
     instruction_switch_interval: int = 80
+    training_interval: int = 160
     eval_at_start: bool = False
 
     # buffer
@@ -553,7 +554,7 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
-                    if step_idx+1 == self.args.training_len:
+                    if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
                     elif self.first_buffer:
                         self.first_buffer.cat_buffer(self.buffer)
@@ -603,7 +604,7 @@ class Runner:
                 
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
-                    self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    self.render(episode, "test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
 
 
