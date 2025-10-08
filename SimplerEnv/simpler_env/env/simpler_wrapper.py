@@ -207,3 +207,22 @@ class SimlerWrapper:
         obs = self.env.unwrapped.get_obs(info)
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         return obs_image
+
+    def get_unsuitable_envs(self):
+        # Extract z-values
+        obj_pos = self.env.unwrapped.get_obj_pos()
+        recep_pos = self.env.unwrapped.get_recep_pos()
+        obj_z = obj_pos[:, 2]
+        recep_z = recep_pos[:, 2]
+
+        # Find indices where either z is less than 0.7
+        low_z_mask = (obj_z < 0.7) | (recep_z < 0.7)
+        env_indices = torch.nonzero(low_z_mask, as_tuple=False).squeeze()
+
+        # Ensure result is a list of ints
+        if env_indices.ndim == 0:
+            env_indices_list = [env_indices.item()]
+        else:
+            env_indices_list = env_indices.tolist()
+        print("Unsuitable Envs: ", env_indices_list)
+        return env_indices_list

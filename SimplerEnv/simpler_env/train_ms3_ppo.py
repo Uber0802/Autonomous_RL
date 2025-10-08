@@ -46,15 +46,16 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 320
+    training_len: int = 640
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
-    interval_save: int = 12
-    max_episodes: int = 32
+    interval_eval: int = 1
+    interval_save: int = 4
+    max_episodes: int = 16
     instruction_switch_interval: int = 80
+    training_interval: int = 160
     eval_at_start: bool = False
 
     # buffer
@@ -217,12 +218,13 @@ class Runner:
 
         if self.args.alg_name == "ppo":
             if self.first_buffer == None:
-                #train_info = self.alg.train_ppo(self.buffer)
-                self.first_buffer = copy.deepcopy(self.buffer)
+                train_info = self.alg.train_ppo(self.buffer)
             else:
-                #train_info = self.alg.train_ppo_2buffer(self.first_buffer, self.buffer)
-                train_info = self.alg.train_ppo_joint(self.first_buffer, self.buffer)
+                tmp_buffer = copy.deepcopy(self.buffer)
+                tmp_buffer.remove_envs(self.unsuitable_envs)
+                train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer)
                 self.first_buffer = None
+                tmp_buffer = None
 
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
@@ -496,7 +498,7 @@ class Runner:
                 receptacles.extend([recep] * group_size)
 
             obs_img, instruction, info = self.env.reset(
-                obj_set="train",
+                obj_set="test",
                 same_init=self.args.use_same_init,
                 object=objects,
                 receptacle=receptacles
@@ -520,6 +522,7 @@ class Runner:
                 f.write(f"step : {steps}\n")
             # Reset buffer for 0-79 step    
             self.first_buffer = None
+            self.unsuitable_envs = []
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 value, action, logprob = self.collect()
                 obs_img, reward, done, env_info = self.env.step(action)
@@ -553,12 +556,16 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
-                    if step_idx+1 == self.args.training_len:
+                    if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
                     elif self.first_buffer:
-                        self.first_buffer.cat_buffer(self.buffer)
+                        tmp_buffer = copy.deepcopy(self.buffer)
+                        tmp_buffer.remove_envs(self.unsuitable_envs)
+                        self.first_buffer.cat_buffer(tmp_buffer)
+                        tmp_buffer = None
                     else:
                         self.first_buffer = copy.deepcopy(self.buffer)
+                        self.first_buffer.remove_envs(self.unsuitable_envs)
 
                     #for k, v in env_infos.items():
                     #    infos[f"env/{k}"] = np.mean(v)
@@ -581,6 +588,8 @@ class Runner:
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
+                    self.unsuitable_envs = self.env.get_unsuitable_envs()
+                    self.unsuitable_envs = []
 
             # steps
             steps = (episode + 1) * self.args.training_len * self.args.num_envs
@@ -591,8 +600,8 @@ class Runner:
                 print(f"Evaluating at {steps}")
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
-                    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                    sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                     wandb.log(sval_stats, step=steps)
 
             # save
@@ -603,7 +612,7 @@ class Runner:
                 
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
-                    self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    self.render(episode, "test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
 
 

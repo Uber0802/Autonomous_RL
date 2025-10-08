@@ -76,6 +76,27 @@ class SeparatedReplayBuffer(object):
 
         self.step = (self.step + 1) % self.ep_len
 
+    def remove_envs(self, env_indices):
+        if not len(env_indices):
+            print("No Envs Deleted")
+            return
+        keep_envs = np.setdiff1d(np.arange(self.num_env), env_indices)
+    
+        # Filter each buffer array that has shape (..., num_env, ...)
+        self.obs = self.obs[:, keep_envs, ...]
+        self.instruction = [self.instruction[i] for i in keep_envs]
+        self.value_preds = self.value_preds[:, keep_envs, :]
+        self.returns = self.returns[:, keep_envs, :]
+        self.actions = self.actions[:, keep_envs, :]
+        self.action_log_probs = self.action_log_probs[:, keep_envs, :]
+        self.rewards = self.rewards[:, keep_envs, :]
+        self.masks = self.masks[:, keep_envs, :]
+        self.advantages = self.advantages[:, keep_envs, :]
+    
+        # Update num_env to reflect the new number of environments
+        self.num_env = len(keep_envs)
+        print("Deleted Envs: ", env_indices)
+        
     def warmup(self, obs, instruction):
         self.obs[0] = obs
         self.instruction = instruction

@@ -333,6 +333,12 @@ class BasePickPlace(BaseEnv):
 
         return dict(**self.episode_stats, success=success)
 
+    def get_obj_pos(self):
+        return self.extra_stats["extra_pos_carrot"]
+        
+    def get_recep_pos(self):    
+        return self.extra_stats["extra_pos_plate"]
+
     def is_final_subtask(self):
         # whether the current subtask is the final one, only meaningful for long-horizon tasks
         return True
