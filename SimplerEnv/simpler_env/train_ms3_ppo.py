@@ -46,14 +46,14 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 640
+    training_len: int = 320
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 1
-    interval_save: int = 4
-    max_episodes: int = 16
+    interval_eval: int = 2
+    interval_save: int = 8
+    max_episodes: int = 32
     instruction_switch_interval: int = 80
     training_interval: int = 160
     eval_at_start: bool = False
@@ -478,8 +478,8 @@ class Runner:
             print(f"Evaluating at {steps}")
             for task in self.task_list:
                 object, receptacle = self.extract_obj_recep(task)
-                sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                 wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
@@ -497,7 +497,7 @@ class Runner:
                 receptacles.extend([recep] * group_size)
 
             obs_img, instruction, info = self.env.reset(
-                obj_set="train",
+                obj_set="test",
                 same_init=self.args.use_same_init,
                 object=objects,
                 receptacle=receptacles
@@ -592,8 +592,8 @@ class Runner:
                 print(f"Evaluating at {steps}")
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
-                    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                    sval_stats = {f"eval＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                     wandb.log(sval_stats, step=steps)
 
             # save
