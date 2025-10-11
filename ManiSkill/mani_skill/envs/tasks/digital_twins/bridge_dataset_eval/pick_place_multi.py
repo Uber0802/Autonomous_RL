@@ -339,6 +339,64 @@ class BasePickPlace(BaseEnv):
     def get_recep_pos(self):    
         return self.extra_stats["extra_pos_plate"]
 
+    def reset_unsuitable_envs(self, env_idx=[]):
+        xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
+        xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+
+        # Get unsuitable object, recep idx
+        obj_pos = self.get_obj_pos()
+        recep_pos = self.get_recep_pos()
+        obj_z = obj_pos[:, 2]
+        recep_z = recep_pos[:, 2]
+
+        # Find indices where obj_z < 0.7
+        obj_low_z_mask = obj_z < 0.7
+        obj_low_z_indices = torch.nonzero(obj_low_z_mask, as_tuple=False).squeeze()
+
+        # Convert to list of ints
+        if obj_low_z_indices.ndim == 0:
+            obj_low_z_list = [obj_low_z_indices.item()]
+        else:
+            obj_low_z_list = obj_low_z_indices.tolist()
+
+        # Find indices where recep_z < 0.7
+        recep_low_z_mask = recep_z < 0.7
+        recep_low_z_indices = torch.nonzero(recep_low_z_mask, as_tuple=False).squeeze()
+
+        # Convert to list of ints
+        if recep_low_z_indices.ndim == 0:
+            recep_low_z_list = [recep_low_z_indices.item()]
+        else:
+            recep_low_z_list = recep_low_z_indices.tolist()
+
+        # loop over actor
+        for idx, a in enumerate(carrot_actor):
+            # create a new pose (customize as needed)
+            new_pos = torch.rand(3, device=self.device) * (xyz_max - xyz_min) + xyz_min
+            prev_mask = a.scene._reset_mask.clone()
+            a.scene._reset_mask[:] = False
+            a.scene._reset_mask[obj_low_z_list] = True
+            # set the pose in batched format
+            a.set_pose(Pose.create_from_pq(p=new_pos, q=a.pose.q[idx]))
+            a.scene._reset_mask = prev_mask
+
+        for idx, a in enumerate(plate_actor):
+            # create a new pose (customize as needed)
+            new_pos = torch.rand(3, device=self.device) * (xyz_max - xyz_min) + xyz_min
+            prev_mask = a.scene._reset_mask.clone()
+            a.scene._reset_mask[:] = False
+            a.scene._reset_mask[recep_low_z_list] = True
+            # set the pose in batched format
+            a.set_pose(Pose.create_from_pq(p=new_pos, q=a.pose.q[idx]))
+            a.scene._reset_mask = prev_mask
+
+        self._settle(0.5)
+        print(f"Reset Unsuitable. Obj: {obj_low_z_list}, Recep: {recep_low_z_list}")
+
     def is_final_subtask(self):
         # whether the current subtask is the final one, only meaningful for long-horizon tasks
         return True

@@ -226,3 +226,8 @@ class SimlerWrapper:
             env_indices_list = env_indices.tolist()
         print("Unsuitable Envs: ", env_indices_list)
         return env_indices_list
+
+    def reset_unsuitable_envs(self):
+        self.reset_robot()
+        self.env.unwrapped.reset_unsuitable_envs()
+        return self.get_obs_image()

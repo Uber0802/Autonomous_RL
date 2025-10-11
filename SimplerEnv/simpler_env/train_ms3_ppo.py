@@ -46,14 +46,14 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 640
+    training_len: int = 320
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 1
-    interval_save: int = 4
-    max_episodes: int = 16
+    interval_eval: int = 2
+    interval_save: int = 8
+    max_episodes: int = 32
     instruction_switch_interval: int = 80
     training_interval: int = 160
     eval_at_start: bool = False
@@ -580,12 +580,13 @@ class Runner:
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)
-                    obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+                    obs_img = self.env.reset_unsuitable_envs()
+                    obs_img = self.env.reset_robot()
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
                     self.unsuitable_envs = self.env.get_unsuitable_envs()
@@ -633,7 +634,7 @@ def main():
             runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
 
     elif args.only_render_seq:
-        runner.render_seq("train", 4, True)
+        runner.render_seq("test", 4, True)
     
     else:
         runner.run()
