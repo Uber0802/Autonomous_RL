@@ -46,14 +46,14 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 320
+    training_len: int = 1280
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
-    interval_save: int = 8
-    max_episodes: int = 32
+    interval_eval: int = 1
+    interval_save: int = 2
+    max_episodes: int = 8
     instruction_switch_interval: int = 80
     training_interval: int = 160
     eval_at_start: bool = False
@@ -585,6 +585,8 @@ class Runner:
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+                    if (step_idx+1) % 320 == 0 and step_idx > 0:
+                        obs_img = self.env.reset_partial_envs(list(range(0, self.args.num_envs, 4)))
                     obs_img = self.env.reset_unsuitable_envs()
                     obs_img = self.env.reset_robot()
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)

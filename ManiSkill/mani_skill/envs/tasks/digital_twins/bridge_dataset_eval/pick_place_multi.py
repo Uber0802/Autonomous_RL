@@ -339,6 +339,77 @@ class BasePickPlace(BaseEnv):
     def get_recep_pos(self):    
         return self.extra_stats["extra_pos_plate"]
 
+    def reset_partial_envs(self, env_idx=[]):
+        xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
+        xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        select_carrot2 = [self.carrot_names[idx] for idx in self.select_extra1_ids]
+        select_plate2 = [self.plate_names[idx] for idx in self.select_extra2_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+        carrot2_actor = [self.objs_carrot[n] for n in select_carrot2]
+        plate2_actor = [self.objs_plate[n] for n in select_plate2]
+
+        lc = 16
+        lo = len(self.overlay_images_numpy)
+        l1 = len(self.xyz_configs)
+        l2 = len(self.quat_configs)
+        ltt = lc * 1 * 16 * lo * l1 * l2
+        indices = np.random.choice(ltt, self.num_envs)
+
+        xyz_indices = (indices//l2) %l1
+        xyz_sample = torch.tensor(self.xyz_configs[xyz_indices], device=self.device)
+        quant_indices = indices % l2
+        quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
+
+        for idx, a in enumerate(carrot_actor):
+            if idx in env_idx:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[0], q=quant[0]))
+                a.scene._reset_mask = prev_mask
+
+        for idx, a in enumerate(carrot2_actor):
+            if idx in env_idx:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[1], q=quant[0]))
+                a.scene._reset_mask = prev_mask
+
+        for idx, a in enumerate(plate2_actor):
+            if idx in env_idx:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[2], q=quant[1]))
+                a.scene._reset_mask = prev_mask
+
+        for idx, a in enumerate(plate_actor):
+            if idx in env_idx:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[3], q=quant[1]))
+                a.scene._reset_mask = prev_mask
+
+        self._settle(6)
+        print(f"Reset Envs {env_idx}")
+
     def reset_unsuitable_envs(self, env_idx=[]):
         xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
         xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
@@ -373,6 +444,16 @@ class BasePickPlace(BaseEnv):
         else:
             recep_low_z_list = recep_low_z_indices.tolist()
 
+        for idx, a in enumerate(plate_actor):
+            # create a new pose (customize as needed)
+            new_pos = torch.rand(3, device=self.device) * (xyz_max - xyz_min) + xyz_min
+            prev_mask = a.scene._reset_mask.clone()
+            a.scene._reset_mask[:] = False
+            a.scene._reset_mask[recep_low_z_list] = True
+            # set the pose in batched format
+            a.set_pose(Pose.create_from_pq(p=new_pos, q=a.pose.q[idx]))
+            a.scene._reset_mask = prev_mask
+
         # loop over actor
         for idx, a in enumerate(carrot_actor):
             # create a new pose (customize as needed)
@@ -380,16 +461,6 @@ class BasePickPlace(BaseEnv):
             prev_mask = a.scene._reset_mask.clone()
             a.scene._reset_mask[:] = False
             a.scene._reset_mask[obj_low_z_list] = True
-            # set the pose in batched format
-            a.set_pose(Pose.create_from_pq(p=new_pos, q=a.pose.q[idx]))
-            a.scene._reset_mask = prev_mask
-
-        for idx, a in enumerate(plate_actor):
-            # create a new pose (customize as needed)
-            new_pos = torch.rand(3, device=self.device) * (xyz_max - xyz_min) + xyz_min
-            prev_mask = a.scene._reset_mask.clone()
-            a.scene._reset_mask[:] = False
-            a.scene._reset_mask[recep_low_z_list] = True
             # set the pose in batched format
             a.set_pose(Pose.create_from_pq(p=new_pos, q=a.pose.q[idx]))
             a.scene._reset_mask = prev_mask

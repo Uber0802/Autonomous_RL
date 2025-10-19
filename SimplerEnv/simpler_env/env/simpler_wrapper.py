@@ -231,3 +231,8 @@ class SimlerWrapper:
         self.reset_robot()
         self.env.unwrapped.reset_unsuitable_envs()
         return self.get_obs_image()
+
+    def reset_partial_envs(self, env_idx=[]):
+        self.reset_robot()
+        self.env.unwrapped.reset_partial_envs(env_idx)
+        return self.get_obs_image()
