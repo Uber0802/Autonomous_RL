@@ -20,7 +20,7 @@ from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
-from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
+from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer
 from simpler_env.utils.offline_buffer import SuccessOfflineBuffer
 import copy
 
@@ -82,7 +82,7 @@ class Args:
     # ppo & grpo
     alg_name: str = "ppo"  # ppo, grpo
     alg_grpo_fix: bool = True
-    alg_gradient_accum: int = 20
+    alg_gradient_accum: int = 20*2
     alg_ppo_epoch: int = 1
     alg_entropy_coef: float = 0.0
 
@@ -137,10 +137,15 @@ class Runner:
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
-        self.first_buffer = None
+        self.prealloc_buffer = PreallocReplayBuffer(
+            all_args,
+            obs_dim=(480, 640, 3),
+            act_dim=7,
+        )
         self.bc_buffer = SuccessOfflineBuffer(
             save_dir = self.args.bc_buffer_path,
             buffer_minibatch = self.args.buffer_minibatch,
+            max_traj = self.args.num_envs * self.args.training_interval // self.args.episode_len,
         )
         self.buffer = SeparatedReplayBuffer(
             all_args,
@@ -227,20 +232,10 @@ class Runner:
         train_info = None
 
         if self.args.alg_name == "ppo":
-            if self.first_buffer == None:
-                if self.args.add_bc:
-                    train_info = self.alg.train_ppo(self.buffer, self.bc_buffer)
-                else:
-                    train_info = self.alg.train_ppo(self.buffer)
+            if self.args.add_bc:
+                train_info = self.alg.train_ppo(self.prealloc_buffer, self.bc_buffer)
             else:
-                tmp_buffer = copy.deepcopy(self.buffer)
-                tmp_buffer.remove_envs(self.unsuitable_envs)
-                if self.args.add_bc:
-                    train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer, self.bc_buffer)
-                else:
-                    train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer)
-                self.first_buffer = None
-                tmp_buffer = None
+                train_info = self.alg.train_ppo(self.prealloc_buffer)
 
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
@@ -505,6 +500,7 @@ class Runner:
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
+            self.prealloc_buffer.reset()
 
 
             objects, receptacles = [], []
@@ -537,7 +533,6 @@ class Runner:
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
             # Reset buffer for 0-79 step    
-            self.first_buffer = None
             self.unsuitable_envs = []
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 value, action, logprob = self.collect()
@@ -567,7 +562,7 @@ class Runner:
 
                     rollout_images = [[] for _ in range(self.args.num_envs)]
                     successful_envs = [env_id for env_id, success in enumerate(env_infos['success']) if success]
-                    print(f"Success Envs at Ep {episode} Step {step_idx}: {successful_envs}. Total Envs: {len(env_infos['success'])}")
+                    print(f"Success Envs at Ep {episode} Step {step_idx}: {successful_envs}")
                     for env_id, success in enumerate(env_infos['success']):
                         if success:
                             successful_envs.append(env_id)
@@ -579,16 +574,9 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
+                    self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
-                    elif self.first_buffer:
-                        tmp_buffer = copy.deepcopy(self.buffer)
-                        tmp_buffer.remove_envs(self.unsuitable_envs)
-                        self.first_buffer.cat_buffer(tmp_buffer)
-                        tmp_buffer = None
-                    else:
-                        self.first_buffer = copy.deepcopy(self.buffer)
-                        self.first_buffer.remove_envs(self.unsuitable_envs)
 
                     #for k, v in env_infos.items():
                     #    infos[f"env/{k}"] = np.mean(v)
