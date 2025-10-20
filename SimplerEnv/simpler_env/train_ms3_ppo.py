@@ -21,6 +21,7 @@ from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
 from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
+from simpler_env.utils.offline_buffer import SuccessOfflineBuffer
 import copy
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
@@ -42,25 +43,26 @@ class Args:
 
     name: str = "PPO-test"
     log: str = "/workspace/Autonomous_RL/two_buffer_160_seed2.txt"
+    bc_buffer_path: str = "/workspace/Autonomous_RL/two_buffer_160_seed2_BCTraj"
 
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 1280
+    training_len: int = 320
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 1
-    interval_save: int = 2
-    max_episodes: int = 8
+    interval_eval: int = 4
+    interval_save: int = 8
+    max_episodes: int = 32
     instruction_switch_interval: int = 80
     training_interval: int = 160
     eval_at_start: bool = False
 
     # buffer
     buffer_inferbatch: int = 32
-    buffer_minibatch: int = 8
+    buffer_minibatch: int = 8//2
     buffer_gamma: float = 0.99
     buffer_lambda: float = 0.95
 
@@ -83,6 +85,10 @@ class Args:
     alg_gradient_accum: int = 20
     alg_ppo_epoch: int = 1
     alg_entropy_coef: float = 0.0
+
+    # BC
+    add_bc: bool = True
+    lambda_bc: float = 0.1
 
     # other
     wandb: bool = True
@@ -132,6 +138,10 @@ class Runner:
 
         # buffer
         self.first_buffer = None
+        self.bc_buffer = SuccessOfflineBuffer(
+            save_dir = self.args.bc_buffer_path,
+            buffer_minibatch = self.args.buffer_minibatch,
+        )
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
@@ -218,11 +228,17 @@ class Runner:
 
         if self.args.alg_name == "ppo":
             if self.first_buffer == None:
-                train_info = self.alg.train_ppo(self.buffer)
+                if self.args.add_bc:
+                    train_info = self.alg.train_ppo(self.buffer, self.bc_buffer)
+                else:
+                    train_info = self.alg.train_ppo(self.buffer)
             else:
                 tmp_buffer = copy.deepcopy(self.buffer)
                 tmp_buffer.remove_envs(self.unsuitable_envs)
-                train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer)
+                if self.args.add_bc:
+                    train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer, self.bc_buffer)
+                else:
+                    train_info = self.alg.train_ppo_joint(self.first_buffer, tmp_buffer)
                 self.first_buffer = None
                 tmp_buffer = None
 
@@ -550,6 +566,13 @@ class Runner:
                         images_to_video(images, str(render_dir), f"env{env_i}", fps=10, verbose=False)
 
                     rollout_images = [[] for _ in range(self.args.num_envs)]
+                    successful_envs = [env_id for env_id, success in enumerate(env_infos['success']) if success]
+                    print(f"Success Envs at Ep {episode} Step {step_idx}: {successful_envs}. Total Envs: {len(env_infos['success'])}")
+                    for env_id, success in enumerate(env_infos['success']):
+                        if success:
+                            successful_envs.append(env_id)
+                            obs, actions, instructions = self.buffer.extract_trajectory(env_id)
+                            self.bc_buffer.save_trajectory(obs, actions, instructions, f"ep{episode}_step{step_idx}_env{env_id}.npz")
 
                     del value, action, logprob, reward, done
                     gc.collect()
@@ -585,14 +608,15 @@ class Runner:
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
-                    if (step_idx+1) % 320 == 0 and step_idx > 0:
-                        obs_img = self.env.reset_partial_envs(list(range(0, self.args.num_envs, 4)))
-                    obs_img = self.env.reset_unsuitable_envs()
+                    #if (step_idx+1) % 320 == 0 and step_idx > 0:
+                    #    obs_img = self.env.reset_partial_envs(list(range(0, self.args.num_envs, 4)))
+                    #obs_img = self.env.reset_unsuitable_envs()
                     obs_img = self.env.reset_robot()
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
                     self.unsuitable_envs = self.env.get_unsuitable_envs()
                     self.unsuitable_envs = []
+                    env_infos = defaultdict(lambda: [])
 
             # steps
             steps = (episode + 1) * self.args.training_len * self.args.num_envs

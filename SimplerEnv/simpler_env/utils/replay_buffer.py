@@ -76,6 +76,27 @@ class SeparatedReplayBuffer(object):
 
         self.step = (self.step + 1) % self.ep_len
 
+    def extract_trajectory(self, env_id: int):
+        """
+        Extracts one full trajectory from a specific environment index.
+        
+        Returns:
+            obs: np.ndarray of shape [T, *obs_dim]
+            actions: np.ndarray of shape [T, act_dim]
+            instructions: list of str, length T
+        """
+        assert 0 <= env_id < self.num_env, "Invalid environment ID"
+    
+        # Observations: from step 0 to step T-1 (i.e., self.ep_len)
+        obs = self.obs[:self.ep_len, env_id]  # [T, *obs_dim]
+        actions = self.actions[:, env_id]     # [T, act_dim]
+    
+        # Instruction: assume repeated per step
+        instr = self.instruction[env_id]
+        instructions = [instr] * self.ep_len  # list of length T
+    
+        return obs, actions, instructions
+
     def remove_envs(self, env_indices):
         if not len(env_indices):
             print("No Envs Deleted")
