@@ -577,6 +577,7 @@ class Runner:
                     self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
+                        self.prealloc_buffer.reset()
 
                     #for k, v in env_infos.items():
                     #    infos[f"env/{k}"] = np.mean(v)
