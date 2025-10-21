@@ -20,7 +20,7 @@ from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
-from simpler_env.utils.replay_buffer import SeparatedReplayBuffer
+from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer
 import copy
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
@@ -46,16 +46,16 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 320
+    training_len: int = 1280
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
-    interval_save: int = 8
-    max_episodes: int = 32
+    interval_eval: int = 1
+    interval_save: int = 2
+    max_episodes: int = 8
     instruction_switch_interval: int = 80
-    training_interval: int = 160
+    training_interval: int = 1280
     eval_at_start: bool = False
 
     # buffer
@@ -83,6 +83,7 @@ class Args:
     alg_gradient_accum: int = 20
     alg_ppo_epoch: int = 1
     alg_entropy_coef: float = 0.0
+    lambda_bc: float = 0.1
 
     # other
     wandb: bool = True
@@ -131,7 +132,11 @@ class Runner:
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
-        self.first_buffer = None
+        self.prealloc_buffer = PreallocReplayBuffer(
+            all_args,
+            obs_dim=(480, 640, 3),
+            act_dim=7,
+        )
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
@@ -217,13 +222,7 @@ class Runner:
         train_info = None
 
         if self.args.alg_name == "ppo":
-            if self.first_buffer == None:
-                #train_info = self.alg.train_ppo(self.buffer)
-                self.first_buffer = copy.deepcopy(self.buffer)
-            else:
-                #train_info = self.alg.train_ppo_2buffer(self.first_buffer, self.buffer)
-                train_info = self.alg.train_ppo_joint(self.first_buffer, self.buffer)
-                self.first_buffer = None
+            train_info = self.alg.train_ppo(self.prealloc_buffer)
 
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
@@ -488,6 +487,7 @@ class Runner:
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
+            self.prealloc_buffer.reset()
 
 
             objects, receptacles = [], []
@@ -520,7 +520,6 @@ class Runner:
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
             # Reset buffer for 0-79 step    
-            self.first_buffer = None
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 value, action, logprob = self.collect()
                 obs_img, reward, done, env_info = self.env.step(action)
@@ -554,12 +553,10 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
+                    self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
-                    elif self.first_buffer:
-                        self.first_buffer.cat_buffer(self.buffer)
-                    else:
-                        self.first_buffer = copy.deepcopy(self.buffer)
+                        self.prealloc_buffer.reset()
 
                     #for k, v in env_infos.items():
                     #    infos[f"env/{k}"] = np.mean(v)
@@ -625,7 +622,7 @@ def main():
             runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
 
     elif args.only_render_seq:
-        runner.render_seq("train", 4, True)
+        runner.render_seq("test", 4, True)
     
     else:
         runner.run()

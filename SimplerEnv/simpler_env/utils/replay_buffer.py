@@ -179,3 +179,58 @@ class SeparatedReplayBuffer(object):
         assert isinstance(new_instruction, list)
         assert len(new_instruction) == self.num_env
         self.instruction = new_instruction
+
+class PreallocReplayBuffer(SeparatedReplayBuffer):
+    def __init__(self, all_args, obs_dim, act_dim):
+        self.ep_len = all_args.episode_len
+        self.num_env = 0
+        self.gamma = all_args.buffer_gamma
+        self.gae_lambda = all_args.buffer_lambda
+        self.buffer_minibatch = all_args.buffer_minibatch
+        self.alg_grpo_fix = all_args.alg_grpo_fix
+
+        max_num_envs = all_args.num_envs * all_args.training_interval // all_args.episode_len
+        self.curr_env = 0
+
+        # Preallocate huge buffers
+        self.obs = np.zeros((self.ep_len + 1, max_num_envs, *obs_dim), dtype=np.uint8)
+        self.instruction = [""] * max_num_envs
+        self.value_preds = np.zeros((self.ep_len + 1, max_num_envs, 1), dtype=np.float32)
+        self.returns = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
+        self.actions = np.zeros((self.ep_len, max_num_envs, act_dim), dtype=np.int32)
+        self.action_log_probs = np.zeros((self.ep_len, max_num_envs, act_dim), dtype=np.float32)
+        self.rewards = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
+        self.masks = np.ones((self.ep_len + 1, max_num_envs, 1), dtype=np.float32)
+        self.advantages = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
+
+        self.step = 0
+        self.max_num_envs = max_num_envs
+
+    def cat_buffer(self, buffer: 'SeparatedReplayBuffer'):
+        if self.curr_env + buffer.num_env > self.max_num_envs:
+            raise MemoryError(f"Buffer overflow: {self.curr_env + buffer.num_env} > {self.max_num_envs}")
+
+        start, end = self.curr_env, self.curr_env + buffer.num_env
+
+        self.obs[:, start:end] = buffer.obs
+        self.instruction[start:end] = buffer.instruction
+        self.value_preds[:, start:end] = buffer.value_preds
+        self.returns[:, start:end] = buffer.returns
+        self.actions[:, start:end] = buffer.actions
+        self.action_log_probs[:, start:end] = buffer.action_log_probs
+        self.rewards[:, start:end] = buffer.rewards
+        self.masks[:, start:end] = buffer.masks
+        self.advantages[:, start:end] = buffer.advantages
+
+        self.curr_env = end
+        self.num_env += buffer.num_env
+        print(f"Num Envs Saved In Prealloc: {self.num_env}.")
+
+        if self.step != buffer.step:
+            print(f"[Warning] Step mismatch: self.step={self.step}, buffer.step={buffer.step}")
+        
+    def reset(self):
+        self.step = 0
+        self.curr_env = 0
+        self.num_env = 0
+        print("Reset PreallocReplayBuffer")

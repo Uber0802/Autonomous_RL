@@ -289,8 +289,9 @@ class OpenVLAPPO:
         self.ppo_huber_delta = 10.0
         self.tpdv = self.policy.tpdv
         self.tpdv_vn = self.policy.tpdv_vn
+        self.lambda_bc = self.args.lambda_bc
 
-    def train_ppo_step(self, idx, total, batch):
+    def train_ppo_step(self, idx, total, batch, demo_batch=None):
         obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
 
         obs = dict(image=torch.tensor(obs_image).to(self.tpdv["device"]), task_description=instruct)  # uint8
@@ -324,14 +325,27 @@ class OpenVLAPPO:
 
         value_loss = value_loss.mean()
 
-        #if abs(policy_loss.item()) < 5*abs(value_loss.item()):
-        #    policy_loss = 5*policy_loss
-
         # Entropy loss
         entropy_loss = entropy.mean()
 
+        # Behavior Cloning Loss
+        bc_loss = 0.0
+        if demo_batch is not None:
+            # demo_batch is a tuple (obs_demo_image, instruct_demo, actions_demo)
+            obs_demo_image, instruct_demo, actions_demo = demo_batch
+            obs_demo = dict(image=torch.tensor(obs_demo_image).to(self.tpdv["device"]),
+                            task_description=instruct_demo)
+            actions_demo = torch.tensor(actions_demo).to(self.tpdv["device"])
+            # compute log probability of the demo actions under current policy
+            logprob_demo, _, _ = self.policy.evaluate_actions(obs_demo, actions_demo)
+            # supervised BC loss: negative log‐likelihood
+            bc_loss = -logprob_demo.mean()   # for discrete actions
+            # optionally scale/weight it later
+
         # Total loss
         loss = policy_loss + value_loss - self.ppo_entropy_coef * entropy_loss
+        if demo_batch is not None:
+            loss = loss + self.lambda_bc * bc_loss
         loss /= self.args.alg_gradient_accum
         loss.backward()
 
@@ -344,6 +358,8 @@ class OpenVLAPPO:
         else:
             grad_norm = None
         # Logging to log.txt
+        if demo_batch is not None:
+            bc_loss = bc_loss.item()
         log_str = (
             f"[PPO Step {idx}/{total}] "
             f"Returns: {returns.mean().item():.4f} | "
@@ -351,6 +367,7 @@ class OpenVLAPPO:
             f"Policy Loss: {policy_loss.item():.4f} | "
             f"Value Loss: {value_loss.item():.4f} | "
             f"Entropy Loss: {entropy_loss.item():.4f} | "
+            f"BC Loss: {bc_loss:.4f} | "
             f"Loss: {loss.item():.4f}\n"
         )
 
@@ -364,6 +381,7 @@ class OpenVLAPPO:
             policy_loss=policy_loss.item(),
             value_loss=value_loss.item(),
             entropy_loss=entropy_loss.item(),
+            bc_loss=bc_loss,
             ratio=ratio.mean().item(),
             ratio_median=ratio.median().item(),
             ratio_2=(logprob - old_logprob).mean().exp().item(),
