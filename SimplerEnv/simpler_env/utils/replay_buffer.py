@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import gc
 
 class SeparatedReplayBuffer(object):
     def __init__(self, all_args, obs_dim, act_dim):
@@ -180,6 +181,11 @@ class SeparatedReplayBuffer(object):
         assert len(new_instruction) == self.num_env
         self.instruction = new_instruction
 
+def create_memmap(filename, shape, dtype):
+    if os.path.exists(filename):
+        os.remove(filename)  # overwrite existing file
+    return np.memmap(filename, dtype=dtype, mode='w+', shape=shape)
+
 class PreallocReplayBuffer(SeparatedReplayBuffer):
     def __init__(self, all_args, obs_dim, act_dim):
         self.ep_len = all_args.episode_len
@@ -193,15 +199,16 @@ class PreallocReplayBuffer(SeparatedReplayBuffer):
         self.curr_env = 0
 
         # Preallocate huge buffers
-        self.obs = np.zeros((self.ep_len + 1, max_num_envs, *obs_dim), dtype=np.uint8)
+        self.obs = create_memmap('obs.dat', (self.ep_len + 1, max_num_envs, *obs_dim), np.uint8)
+        self.value_preds = create_memmap('value_preds.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
+        self.returns = create_memmap('returns.dat', (self.ep_len, max_num_envs, 1), np.float32)
+        self.actions = create_memmap('actions.dat', (self.ep_len, max_num_envs, act_dim), np.int32)
+        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+        self.rewards = create_memmap('rewards.dat', (self.ep_len, max_num_envs, 1), np.float32)
+        self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
+        self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
+
         self.instruction = [""] * max_num_envs
-        self.value_preds = np.zeros((self.ep_len + 1, max_num_envs, 1), dtype=np.float32)
-        self.returns = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
-        self.actions = np.zeros((self.ep_len, max_num_envs, act_dim), dtype=np.int32)
-        self.action_log_probs = np.zeros((self.ep_len, max_num_envs, act_dim), dtype=np.float32)
-        self.rewards = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
-        self.masks = np.ones((self.ep_len + 1, max_num_envs, 1), dtype=np.float32)
-        self.advantages = np.zeros((self.ep_len, max_num_envs, 1), dtype=np.float32)
 
         self.step = 0
         self.max_num_envs = max_num_envs
@@ -224,10 +231,14 @@ class PreallocReplayBuffer(SeparatedReplayBuffer):
 
         self.curr_env = end
         self.num_env += buffer.num_env
-        print(f"Num Envs Saved In Prealloc: {self.num_env}.")
+        print(f"Num Envs In Prealloc: {self.num_env}.")
 
         if self.step != buffer.step:
             print(f"[Warning] Step mismatch: self.step={self.step}, buffer.step={buffer.step}")
+        
+        del buffer
+        gc.collect()
+
         
     def reset(self):
         self.step = 0
