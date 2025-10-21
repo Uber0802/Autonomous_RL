@@ -47,7 +47,8 @@ class SuccessOfflineBuffer:
         Load all successful trajectories from disk into memory, preallocating space for obs, actions, and instructions.
         """
         files = sorted(f for f in os.listdir(self.save_dir) if f.endswith('.npz'))
-        if self.max_traj < len(files):
+        total_files = len(files)
+        if self.max_traj < total_files:
             files = random.sample(files, self.max_traj)
 
         num_traj = len(files)
@@ -78,7 +79,7 @@ class SuccessOfflineBuffer:
             'instructions': instructions_array,
         }
 
-        print(f"Loaded {num_traj} trajectories from {self.save_dir} with preallocated arrays.")
+        print(f"Loaded {num_traj} from {self.save_dir} with {total_files} trajectories.")
 
 
     def feed_forward_generator(self, batch_count):

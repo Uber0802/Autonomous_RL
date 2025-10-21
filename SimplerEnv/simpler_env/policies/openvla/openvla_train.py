@@ -336,11 +336,8 @@ class OpenVLAPPO:
             obs_demo = dict(image=torch.tensor(obs_demo_image).to(self.tpdv["device"]),
                             task_description=instruct_demo)
             actions_demo = torch.tensor(actions_demo).to(self.tpdv["device"])
-            # compute log probability of the demo actions under current policy
             logprob_demo, _, _ = self.policy.evaluate_actions(obs_demo, actions_demo)
-            # supervised BC loss: negative log‐likelihood
-            bc_loss = -logprob_demo.mean()   # for discrete actions
-            # optionally scale/weight it later
+            bc_loss = -logprob_demo.mean() 
 
         # Total loss
         loss = policy_loss + value_loss - self.ppo_entropy_coef * entropy_loss

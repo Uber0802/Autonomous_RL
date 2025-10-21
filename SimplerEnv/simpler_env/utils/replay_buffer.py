@@ -266,7 +266,7 @@ class PreallocReplayBuffer(SeparatedReplayBuffer):
 
         self.curr_env = end
         self.num_env += buffer.num_env
-        print(f"Num Envs Saved In Prealloc: {self.num_env}.")
+        print(f"Num Envs In PreallocReplayBuffer: {self.num_env}.")
 
         if self.step != buffer.step:
             print(f"[Warning] Step mismatch: self.step={self.step}, buffer.step={buffer.step}")
