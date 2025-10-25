@@ -20,7 +20,7 @@ from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
-from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer
+from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer, FIFOReplayBuffer
 import copy
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
@@ -55,7 +55,7 @@ class Args:
     interval_save: int = 2
     max_episodes: int = 8
     instruction_switch_interval: int = 80
-    training_interval: int = 1280
+    training_interval: int = 160
     eval_at_start: bool = False
 
     # buffer
@@ -132,10 +132,16 @@ class Runner:
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
-        self.prealloc_buffer = PreallocReplayBuffer(
+        #self.prealloc_buffer = PreallocReplayBuffer(
+        #    all_args,
+        #    obs_dim=(480, 640, 3),
+        #    act_dim=7,
+        #)
+        self.prealloc_buffer = FIFOReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
             act_dim=7,
+            max_num_envs=64*16,
         )
         self.buffer = SeparatedReplayBuffer(
             all_args,
@@ -370,9 +376,12 @@ class Runner:
         for idx in range(self.args.num_envs):
             datas[idx]["instruction"] = instruction[idx]
 
-        for _ in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
+        for idx in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
             obs = dict(image=obs_img, task_description=instruction)
             value, action, logprob = self._get_action(obs, deterministic=True)
+            #np_value = value.detach().cpu().to(torch.float32).numpy()
+            #filename = os.path.basename(self.args.vla_load_path)
+            #np.save(f"{filename}.npy", np_value)
 
             obs_img_new, reward, done, env_info = self.env.step(action)
 
@@ -487,7 +496,7 @@ class Runner:
         for episode in range(max_episodes):
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
-            self.prealloc_buffer.reset()
+            #self.prealloc_buffer.reset()
 
 
             objects, receptacles = [], []
@@ -556,7 +565,11 @@ class Runner:
                     self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
-                        self.prealloc_buffer.reset()
+                        #self.prealloc_buffer.reset()
+                    #print(f"Saving model at {steps}")
+                    #save_path = self.glob_dir / f"ep{episode}_step{step_idx}"
+                    #print(f"Saving model at {save_path}")
+                    #self.policy.save(save_path)
 
                     #for k, v in env_infos.items():
                     #    infos[f"env/{k}"] = np.mean(v)
@@ -620,6 +633,7 @@ def main():
         for task in runner.task_list:
             object, receptacle = runner.extract_obj_recep(task)
             runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
+            break
 
     elif args.only_render_seq:
         runner.render_seq("test", 4, True)
