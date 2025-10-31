@@ -614,12 +614,13 @@ class Runner:
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)
-                    obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+                    obs_img = self.env.reset_unsuitable_envs()
+                    obs_img = self.env.reset_robot()
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
 
