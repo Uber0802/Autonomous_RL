@@ -838,6 +838,68 @@ class OpenVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration)
 
         return values, generated_ids, logprobs
 
+    def predict_action_batch_wEmbedding(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor,
+        pixel_values: torch.FloatTensor,
+        unnorm_key: str,
+        do_sample: bool = True,
+        **kwargs
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:  # ← extra return
+
+        batch_size = input_ids.shape[0]
+        action_len = self.get_action_dim(unnorm_key)
+
+        # === NEW: get image embeddings first ===
+        with torch.no_grad():
+            patch_features = self.vision_backbone(pixel_values)             # [B, N, vision_dim]
+            image_embeddings = self.projector(patch_features)               # [B, N, text_hidden_dim]
+
+        # === existing logic ===
+        assert torch.all(input_ids[:, 0] == 1)
+        assert torch.all(attention_mask[:, 0] == 1)
+        assert torch.all(input_ids[:, -1] == 29871)
+        assert torch.all(attention_mask[:, -1] == 1)
+
+        output = self.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            max_new_tokens=action_len,
+            return_dict_in_generate=True,
+            output_hidden_states=True,
+            output_logits=True,
+            logits_processor=LogitsProcessorList([AllowedTokensLogitsProcessor()]),
+            do_sample=do_sample,
+            **kwargs
+        )
+        generated_ids = output.sequences[:, -action_len:]  # [B, action_len]
+        assert torch.all(generated_ids >= 32000 - 256) and torch.all(generated_ids < 32000)
+
+        logits_tensor = torch.stack(output.logits, dim=1)[:, :, 32000 - 256 : 32000]
+        logprobs_tensor = F.log_softmax(logits_tensor, dim=-1)
+        idxes = generated_ids.unsqueeze(-1) - (32000 - 256)
+        logprobs = torch.gather(logprobs_tensor, 2, idxes).squeeze(-1).sum(dim=1, keepdim=True)
+
+        # value head as before
+        if self.vh_mode == "a0":
+            last_hidden_state = output.hidden_states[0][-1]
+            hidden_features = last_hidden_state[:, -1]
+            values = self.value_head(hidden_features)
+        elif self.vh_mode == "a6":
+            last_hidden_state = output.hidden_states[6][-1]
+            hidden_features = last_hidden_state[:, -1]
+            values = self.value_head(hidden_features)
+        elif self.vh_mode == "a":
+            last_hidden_state = torch.cat([h[-1][:, -1] for h in output.hidden_states], dim=-1)
+            values = self.value_head(last_hidden_state)
+        else:
+            raise ValueError(f"Unknown value head mode: {self.vh_mode}")
+
+        # === NEW RETURN ===
+        return values, generated_ids, logprobs, image_embeddings
+
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict[str, Dict[str, Any]], unnorm_key: Optional[str]) -> str:
         if unnorm_key is None:

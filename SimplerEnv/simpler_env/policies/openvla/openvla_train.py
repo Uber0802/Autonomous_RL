@@ -182,6 +182,40 @@ class OpenVLAPolicy:
 
         return values, action, logprobs
 
+    def get_action_wEmbedding(self, x: dict, deterministic) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        temperature = self.args.vla_temperature_eval if deterministic else self.args.vla_temperature
+        do_sample = (temperature != 0.0)
+        features = self._preprocess_obs(x)
+
+        # import numpy as np
+        # with open("/home/exprl/RL4VLA/log.txt", "a") as f:
+        #     f.write("=== FEATURES ===\n")
+        #     for key, value in features.items():
+        #         try:
+        #             if isinstance(value, torch.Tensor):
+        #                 value = value.detach().to(torch.float32).cpu()
+        #                 array = value.numpy()
+        #                 f.write(f"{key}: shape={array.shape}, dtype={array.dtype}\n")
+        #                 f.write(f"{key} sample: {array.flatten()[:10]}\n\n")
+        #             else:
+        #                 f.write(f"{key}: non-tensor value: {value}\n\n")
+        #         except Exception as e:
+        #             f.write(f"{key}: failed to log, error: {e}\n")
+
+        torch.cuda.synchronize()
+        values, action, logprobs, embedding = self.vla.predict_action_batch_wEmbedding(
+            **features,
+            unnorm_key=self.args.vla_unnorm_key,
+            do_sample=do_sample,
+            temperature=temperature,
+        )
+
+        assert len(values.shape) == 2 and values.shape[1] == 1
+        assert len(action.shape) == 2 and action.shape[0] == values.shape[0]
+        assert len(logprobs.shape) == 2 and logprobs.shape[1] == 1
+
+        return values, action, logprobs, embedding
+
     def get_action_temp(self, x: dict, do_sample, temperature, num_beams) -> tuple[torch.Tensor, torch.Tensor]:
         features = self._preprocess_obs(x)
 

@@ -52,7 +52,7 @@ class Args:
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
     interval_eval: int = 1
-    interval_save: int = 2
+    interval_save: int = 1
     max_episodes: int = 8
     instruction_switch_interval: int = 80
     training_interval: int = 160
@@ -141,7 +141,7 @@ class Runner:
             all_args,
             obs_dim=(480, 640, 3),
             act_dim=7,
-            max_num_envs=64*16,
+            max_num_envs=64*8,
         )
         self.buffer = SeparatedReplayBuffer(
             all_args,
@@ -187,6 +187,30 @@ class Runner:
         logprobs = torch.cat(logprobs, dim=0).to(device=self.device)
 
         return values, actions, logprobs
+
+    @torch.no_grad()
+    def _get_action_wEmbedding(self, obs, deterministic=False):
+        total_batch = obs["image"].shape[0]
+
+        values = []
+        actions = []
+        logprobs = []
+        embeddings = []
+
+        for i in range(0, total_batch, self.args.buffer_inferbatch):
+            obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
+            value, action, logprob, embed = self.policy.get_action_wEmbedding(obs_batch, deterministic)
+            values.append(value)
+            actions.append(action)
+            logprobs.append(logprob)
+            embeddings.append(embed)
+
+        values = torch.cat(values, dim=0).to(device=self.device)
+        actions = torch.cat(actions, dim=0).to(device=self.device)
+        logprobs = torch.cat(logprobs, dim=0).to(device=self.device)
+        embeddings = torch.cat(embeddings, dim=0)
+
+        return values, actions, logprobs, embeddings
 
     def collect(self):
         self.policy.prep_rollout()
@@ -376,12 +400,16 @@ class Runner:
         for idx in range(self.args.num_envs):
             datas[idx]["instruction"] = instruction[idx]
 
+        embeddings = []
+
         for idx in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
             obs = dict(image=obs_img, task_description=instruction)
             value, action, logprob = self._get_action(obs, deterministic=True)
+            #value, action, logprob, image_embeddings = self._get_action_wEmbedding(obs, deterministic=True)
             #np_value = value.detach().cpu().to(torch.float32).numpy()
             #filename = os.path.basename(self.args.vla_load_path)
             #np.save(f"{filename}.npy", np_value)
+            #embeddings.append(image_embeddings.detach().cpu().to(torch.float32).numpy())
 
             obs_img_new, reward, done, env_info = self.env.step(action)
 
@@ -416,6 +444,8 @@ class Runner:
 
         print("exp_dir : ", exp_dir)
         exp_dir.mkdir(parents=True, exist_ok=True)
+        #filename = os.path.basename(self.args.vla_load_path)
+        #np.save(f"{exp_dir}/embed.npy", np.array(embeddings))
 
         for i in range(self.args.num_envs):
             images = datas[i]["image"]
@@ -630,10 +660,10 @@ def main():
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
-        for task in runner.task_list:
+        for idx, task in enumerate(runner.task_list):
             object, receptacle = runner.extract_obj_recep(task)
-            runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
-            break
+            runner.render(0, "test_ood", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs, exp_dir=f"{idx}")
+            #break
 
     elif args.only_render_seq:
         runner.render_seq("test", 4, True)

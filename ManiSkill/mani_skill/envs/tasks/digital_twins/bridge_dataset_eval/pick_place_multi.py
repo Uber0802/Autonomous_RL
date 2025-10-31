@@ -1244,6 +1244,61 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
         half_edge_length = np.array([0.075, 0.075]).reshape(1, 2)
 
+
+        grid_pos = np.array([
+            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
+            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
+            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
+            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
+            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
+            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
+        ]) * 2 - 1  # [36, 2]
+        grid_pos = grid_pos * half_edge_length + xy_center
+
+        xyz_configs = []
+        for i, p1 in enumerate(grid_pos):
+            for j, p2 in enumerate(grid_pos):
+                for k, p3 in enumerate(grid_pos):
+                    for l, p4 in enumerate(grid_pos):
+                        # Ensure all positions are spaced apart
+                        if (
+                            np.linalg.norm(p1 - p2) > 0.12 and
+                            np.linalg.norm(p1 - p3) > 0.12 and
+                            np.linalg.norm(p1 - p4) > 0.12 and
+                            np.linalg.norm(p2 - p3) > 0.12 and
+                            np.linalg.norm(p2 - p4) > 0.12 and
+                            np.linalg.norm(p3 - p4) > 0.12
+                        ):
+                            xyz_configs.append(
+                                np.array([
+                                    np.append(p1, 1.0),    # carrot 1
+                                    np.append(p2, 1.0),    # carrot 2
+                                    np.append(p3, 0.95),   # plate 1
+                                    np.append(p4, 0.95),   # plate 2
+                                ])
+                            )
+        xyz_configs = np.stack(xyz_configs)
+
+        quat_configs = np.stack(
+            [
+                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
+            ]
+        )
+
+        self.xyz_configs = xyz_configs
+        self.quat_configs = quat_configs
+
+        print(f"xyz_configs: {xyz_configs.shape}")
+        print(f"quat_configs: {quat_configs.shape}")
+
+    def _generate_OOD_init_pose(self):
+        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
+        half_edge_length = np.array([0.11, 0.15]).reshape(1, 2)
+        
+
         grid_pos = np.array([
             [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
             [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
@@ -1309,6 +1364,12 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             lp_offset = 0
             le = 16
             le_mod = 17
+        elif obj_set == "test_ood":
+            lp = 1
+            lp_offset = 0
+            le = 16
+            le_mod = 17
+            self._generate_OOD_init_pose()
         elif obj_set == "all":
             lp = 17
             lp_offset = 0
@@ -1345,7 +1406,7 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
-        if obj_set == "test":
+        if obj_set != "train":
             rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1
