@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 import random
+import re
 from mani_skill.envs.sapien_env import BaseEnv
 
 
@@ -37,6 +38,7 @@ class SimlerWrapper:
 
         # variables
         self.reward_old = torch.zeros(self.args.num_envs, 1, dtype=torch.float32)  # [B, 1]
+        self.backward = np.zeros(self.args.num_envs, dtype=bool)
 
         # constants
         bins = np.linspace(-1, 1, 256)
@@ -45,14 +47,21 @@ class SimlerWrapper:
 
     def get_reward(self, info):
         reward = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(info["success"].device)  # [B, 1]
+        backward_mask = torch.tensor(self.backward, dtype=torch.bool, device=info["success"].device).reshape(-1, 1)
 
         reward += info["is_src_obj_grasped"].reshape(-1, 1) * 0.1
         reward += info["consecutive_grasp"].reshape(-1, 1) * 0.1
-        reward += (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 1.0
+        reward += torch.where(
+            backward_mask,
+            (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 1.0,  # if backward, only src_on_table counts
+            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 1.0  # else, success & grasped
+        )
+        #print(f"Reward: {reward.squeeze().cpu().tolist()}")
 
         # diff
         reward_diff = reward - self.reward_old
         self.reward_old = reward
+        #print(f"Reward Diff: {reward_diff.squeeze().cpu().tolist()}")
 
         return reward_diff
 
@@ -131,7 +140,7 @@ class SimlerWrapper:
             self.set_task(object, receptacle)
 
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
-        instruction = self.env.unwrapped.get_language_instruction()
+        instruction = self.get_language_instruction()
 
         self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(obs_image.device)  # [B, 1]
 
@@ -156,11 +165,38 @@ class SimlerWrapper:
 
         return obs_image, reward, truncated, info
 
+    def extract_obj_recep(self, text_string):
+        pattern = r"put (.*?) on (.*)"
+        match = re.search(pattern, text_string)
+
+        if match:
+            obj = match.group(1)
+            recep = match.group(2)
+            return obj, recep
+        else:
+            return None, None
+
     def get_language_instruction(self) -> list[str]:
         """
         Get task instructions in all envs.
         """
-        return self.env.unwrapped.get_language_instruction()
+        default_instructions = self.env.unwrapped.get_language_instruction()  # list of strings
+    
+        instructions = []
+        for i, instr in enumerate(default_instructions):
+            parts = instr.split(" ")
+            carrot_name = parts[1]
+
+            if self.backward[i]:
+                # Instruction for backward envs: put carrot on table
+                obj, recep = self.extract_obj_recep(instr)
+                instructions.append(f"put {obj} on table")
+            else:
+                # Keep the original instruction
+                instructions.append(instr)
+
+        return instructions
+
 
     def get_task_pool(self) -> list[list[str]]:
         """
@@ -179,6 +215,40 @@ class SimlerWrapper:
         Get receptacle names in all envs.
         """
         return self.env.unwrapped.receptacle_name()
+
+    def set_forward(self, envs=None):
+        """
+        Select env ids to set tasks to forward (backward=False).
+        Set all envs to forward if envs is not specified.
+        """
+        if envs is None:
+            # Set all environments to forward
+            self.backward[:] = False
+        else:
+            # Set only the selected envs to forward
+            self.backward[envs] = False
+        
+        # Reset old reward from previous task
+        self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(self.env.device)
+        forward_envs = np.where(self.backward == False)[0]
+        print(f"Environments currently set to forward: {forward_envs}")
+    
+    def set_backward(self, envs=None):
+        """
+        Select env ids to set tasks to backward.
+        Set all envs to backward if envs is not specified.
+        """
+        if envs is None:
+            # Set all environments to backward
+            self.backward[:] = True
+        else:
+            # Set only the selected env indices to backward
+            self.backward[envs] = True
+
+        # Reset old reward from previous task
+        self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(self.env.device)
+        backward_envs = np.where(self.backward == True)[0]
+        print(f"Environments currently set to backward: {backward_envs}")
 
     def reset_robot(self):
         env_idx = torch.arange(0, self.env.unwrapped.num_envs, device=self.env.unwrapped.device)
@@ -200,6 +270,7 @@ class SimlerWrapper:
         info = self.env.unwrapped.get_info()
         obs = self.env.unwrapped.get_obs(info)
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
+        self.env.unwrapped.reset_grasp_stats()
         return obs_image
 
     def get_obs_image(self):

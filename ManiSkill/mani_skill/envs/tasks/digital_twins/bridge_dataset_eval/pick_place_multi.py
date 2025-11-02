@@ -215,6 +215,12 @@ class BasePickPlace(BaseEnv):
         if self.gpu_sim_enabled:
             self.scene._gpu_fetch_all()
 
+    def reset_grasp_stats(self):
+        self.consecutive_grasp.zero_()
+        self.episode_stats["is_src_obj_grasped"].zero_()
+        self.episode_stats["consecutive_grasp"].zero_()
+        print("reset Grasp Stats")
+
     def evaluate(self, success_require_src_completely_on_target=True):
         xy_flag_required_offset = 0.01
         z_flag_required_offset = 0.05
@@ -225,13 +231,17 @@ class BasePickPlace(BaseEnv):
         # actor
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        select_plate2 = [self.plate_names[idx] for idx in self.select_extra2_ids]
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
+        plate2_actor = [self.objs_plate[n] for n in select_plate2]
 
         carrot_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(carrot_actor)])  # [b, 3]
         carrot_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])  # [b, 4]
         plate_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(plate_actor)])  # [b, 3]
         plate_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])  # [b, 4]
+        plate2_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(plate2_actor)])  # [b, 3]
+        plate2_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate2_actor)])  # [b, 4]
 
         # whether moved the correct object
         # source_obj_xy_move_dist = torch.linalg.norm(
@@ -272,6 +282,12 @@ class BasePickPlace(BaseEnv):
         self.consecutive_grasp += is_src_obj_grasped
         self.consecutive_grasp[is_src_obj_grasped == 0] = 0
         consecutive_grasp = self.consecutive_grasp >= 5
+        #print(f"is_src_obj_grasped: {is_src_obj_grasped.squeeze().cpu().tolist()}")
+        #print(f"consecutive_grasp: {self.consecutive_grasp.squeeze().cpu().tolist()}")
+        #g = self.episode_stats["is_src_obj_grasped"]
+        #print(f"info is_src_obj_grasped: {g.squeeze().cpu().tolist()}")
+        #g = self.episode_stats["consecutive_grasp"]
+        #print(f"info consecutive_grasp: {g.squeeze().cpu().tolist()}")
 
         # whether the source object is on the target object based on bounding box position
         tgt_obj_half_length_bbox = (
@@ -308,6 +324,19 @@ class BasePickPlace(BaseEnv):
 
         success = src_on_target
 
+        # Track if object on other receptable
+        pos_tgt2 = plate2_p
+        offset2 = pos_src - pos_tgt2
+        xy_flag2 = (
+            torch.linalg.norm(offset2[:, :2], dim=1)
+            <= tgt_obj_half_length_bbox.max(dim=1).values + xy_flag_required_offset
+        )
+        z_flag2 = (offset2[:, 2] > 0) & (
+            offset2[:, 2] - tgt_obj_half_length_bbox[:, 2] - src_obj_half_length_bbox[:, 2]
+            <= z_flag_required_offset
+        )
+        src_on_target2 = xy_flag2 & z_flag2
+
         # prepare dist
         gripper_p = (self.agent.finger1_link.pose.p + self.agent.finger2_link.pose.p) / 2  # [b, 3]
         gripper_q = (self.agent.finger1_link.pose.q + self.agent.finger2_link.pose.q) / 2  # [b, 4]
@@ -315,9 +344,17 @@ class BasePickPlace(BaseEnv):
         gripper_plate_dist = torch.linalg.norm(gripper_p - plate_p, dim=1)  # [b, 3]
         carrot_plate_dist = torch.linalg.norm(carrot_p - plate_p, dim=1)  # [b, 3]
 
+        # Track if object on table
+        src_not_on_any_plate = (~src_on_target) & (~src_on_target2)
+        src_not_grasped = ~is_src_obj_grasped
+        src_not_on_floor = carrot_p[:, 2] >= 0.7
+        src_on_table = src_not_on_any_plate & src_not_grasped & src_not_on_floor
+
         # self.episode_stats["moved_correct_obj"] = moved_correct_obj
         # self.episode_stats["moved_wrong_obj"] = moved_wrong_obj
         self.episode_stats["src_on_target"] = src_on_target
+        self.episode_stats["src_on_target2"] = src_on_target2
+        self.episode_stats["src_on_table"] = src_on_table
         self.episode_stats["is_src_obj_grasped"] = self.episode_stats["is_src_obj_grasped"] | is_src_obj_grasped
         self.episode_stats["consecutive_grasp"] = self.episode_stats["consecutive_grasp"] | consecutive_grasp
         self.episode_stats["gripper_carrot_dist"] = gripper_carrot_dist
@@ -1567,6 +1604,8 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             # is_closest_to_tgt=torch.zeros((b,), dtype=torch.bool),
             consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
             src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_target2=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_table = torch.ones((b,), dtype=torch.bool, device=self.device),
 
             gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
             gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),

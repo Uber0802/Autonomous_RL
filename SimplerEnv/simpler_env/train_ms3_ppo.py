@@ -46,14 +46,14 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 1280
+    training_len: int = 320
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 1
-    interval_save: int = 2
-    max_episodes: int = 8
+    interval_eval: int = 2
+    interval_save: int = 8
+    max_episodes: int = 32
     instruction_switch_interval: int = 80
     training_interval: int = 160
     eval_at_start: bool = False
@@ -132,17 +132,17 @@ class Runner:
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
-        #self.prealloc_buffer = PreallocReplayBuffer(
-        #    all_args,
-        #    obs_dim=(480, 640, 3),
-        #    act_dim=7,
-        #)
-        self.prealloc_buffer = FIFOReplayBuffer(
+        self.prealloc_buffer = PreallocReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
             act_dim=7,
-            max_num_envs=64*16,
         )
+        #self.prealloc_buffer = FIFOReplayBuffer(
+        #    all_args,
+        #    obs_dim=(480, 640, 3),
+        #    act_dim=7,
+        #    max_num_envs=64*16,
+        #)
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
@@ -491,12 +491,14 @@ class Runner:
                 wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
-        group_size = num_envs // 4    
+        group_size = num_envs // 4   
 
         for episode in range(max_episodes):
+            self.env.set_forward()
+            forward = True 
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
-            #self.prealloc_buffer.reset()
+            self.prealloc_buffer.reset()
 
 
             objects, receptacles = [], []
@@ -565,7 +567,7 @@ class Runner:
                     self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         infos = self.train()
-                        #self.prealloc_buffer.reset()
+                        self.prealloc_buffer.reset()
                     #print(f"Saving model at {steps}")
                     #save_path = self.glob_dir / f"ep{episode}_step{step_idx}"
                     #print(f"Saving model at {save_path}")
@@ -577,13 +579,20 @@ class Runner:
                     #self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
                     #Switch Instruction
-                    self.task_id = (self.task_id + 1) % len(self.task_list)
-                    objects, receptacles = [], []
-                    for i in range(4):
-                        obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                        objects.extend([obj] * group_size)
-                        receptacles.extend([recep] * group_size)
-                    self.env.set_task(objects, receptacles)
+                    if forward:
+                        self.env.set_backward()
+                        forward = False
+                    else:
+                        self.task_id = (self.task_id + 1) % len(self.task_list)
+                        objects, receptacles = [], []
+                        for i in range(4):
+                            obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                            objects.extend([obj] * group_size)
+                            receptacles.extend([recep] * group_size)
+                        self.env.set_forward()
+                        self.env.set_task(objects, receptacles)
+                        forward = True
+                        
                     obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
@@ -633,7 +642,7 @@ def main():
         for task in runner.task_list:
             object, receptacle = runner.extract_obj_recep(task)
             runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
-            break
+            #break
 
     elif args.only_render_seq:
         runner.render_seq("test", 4, True)
