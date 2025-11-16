@@ -13,6 +13,9 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPredictionWit
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from split_decisions.utils.sampling_utils import costmap_guided_sampling, initialize_cost_map, encode_actions_from_norm_openvla, reconstruct_action_from_norm_openvla
+from transformers import AutoTokenizer, AutoModel
+from peft import LoraConfig, get_peft_model
+from torch.optim import AdamW
 
 def huber_loss(e, d):
     a = (abs(e) <= d).to(torch.float32)
@@ -25,9 +28,9 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class ResidualPolicyNet(nn.Module):
-    def __init__(self, hidden_dim, action_dim, action_high, action_low):
+    def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
         super().__init__()
-        input_dim = hidden_dim + action_dim
+        input_dim = hidden_dim + action_dim + instr_dim
         self.fc = nn.Sequential(
             layer_init(nn.Linear(input_dim, 512)),
             nn.ReLU(),
@@ -40,11 +43,11 @@ class ResidualPolicyNet(nn.Module):
         nn.init.zeros_(self.fc[-1].bias)
 
         action_range = action_high - action_low
-        init_std = (action_range / 20.0).clamp(min=1e-3)
+        init_std = (action_range / 5.0).clamp(min=1e-3)
         self.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
 
-    def forward(self, hidden, a_base):
-        ax = torch.cat([hidden, a_base], dim=-1)
+    def forward(self, instr, hidden, a_base):
+        ax = torch.cat([instr, hidden, a_base], dim=-1)
         mu = self.fc(ax.squeeze(0))
         mu = torch.tanh(mu) * 0.1
         std = self.log_std.exp().clamp(1e-4, 0.1).expand_as(mu)
@@ -145,14 +148,39 @@ class OpenVLAPolicy:
         self.action_low = torch.tensor(self.unnorm_state["q01"], device=self.tpdv["device"]).unsqueeze(0)
         self.action_high = torch.tensor(self.unnorm_state["q99"], device=self.tpdv["device"]).unsqueeze(0)
         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer)
-        self.residual_policy = ResidualPolicyNet(4096, 7, self.action_high, self.action_low).to(self.tpdv["device"])
+        self.residual_policy = ResidualPolicyNet(384, 4096, 7, self.action_high, self.action_low).to(self.tpdv["device"])
         self.value_head_res = nn.Sequential(
-            nn.Linear(4096 + 7, 1024),
+            nn.Linear(384+ 4096 + 7, 1024),
             nn.ReLU(),
             nn.Linear(1024, 1)
         ).to(self.tpdv["device"])
 
-        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()), lr=7e-5)
+        self.text_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+        self.text_encoder = AutoModel.from_pretrained(
+            "sentence-transformers/all-MiniLM-L6-v2"
+        ).to(self.tpdv["device"])
+
+        lora_cfg = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["query", "value"],  
+            lora_dropout=0.05,
+            bias="none",
+        )
+        self.text_encoder = get_peft_model(self.text_encoder, lora_cfg)
+
+
+        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()), lr=7e-5)
+
+        
+
+    def encode_instruction(self, text):
+        tokens = self.text_tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(self.tpdv["device"])
+        with torch.no_grad():
+            output = self.text_encoder(**tokens)
+            emb = output.last_hidden_state.mean(dim=1)  
+        return emb
 
 
     def _setup_optimizer(self):
@@ -300,13 +328,13 @@ class OpenVLAPolicy:
 
         return logprobs, entropy, values
 
-    def evaluate_residual(self, hidden, a_base, a_final):
-        mu, std = self.residual_policy(hidden, a_base)
+    def evaluate_residual(self, hidden, a_base, a_final, instr_emb):
+        mu, std = self.residual_policy(instr_emb, hidden, a_base)
         dist = torch.distributions.Normal(mu, std)
         a_res = a_final - a_base
         logprob = dist.log_prob(a_res[...,:-1]).sum(dim=-1, keepdim=True)
         entropy = dist.entropy().sum(dim=-1, keepdim=True)
-        values = self.value_head_res(torch.cat([hidden, a_base], dim=-1))
+        values = self.value_head_res(torch.cat([instr_emb, hidden, a_base], dim=-1))
         return logprob, entropy, values
 
     # def evaluate_actions(self, x: dict, action: torch.Tensor):
@@ -409,10 +437,11 @@ class OpenVLAPPORes:
         hidden = torch.tensor(hidden).to(**self.tpdv)
         base_action = torch.tensor(base_action).to(self.tpdv["device"])
         action_untok = torch.tensor(action_untok).to(self.tpdv["device"])
+        instr_emb = self.policy.encode_instruction(instruct)
 
 
         # Policy loss
-        logprob, entropy, values = self.policy.evaluate_residual(hidden, base_action, action_untok)
+        logprob, entropy, values = self.policy.evaluate_residual(hidden, base_action, action_untok, instr_emb)
 
         ratio = torch.exp(logprob - old_logprob)
         surr1 = ratio * advantages
@@ -498,7 +527,8 @@ class OpenVLAPPORes:
         return info
 
 
-    def train_res_ppo(self, buffer):
+    def train_res_ppo(self, buffer, lr):
+        self.policy.residual_optimizer = AdamW(list(self.policy.residual_policy.parameters()) + list(self.policy.value_head_res.parameters()) + list(self.policy.text_encoder.parameters()), lr=lr)
         train_info = defaultdict(lambda: [])
 
         # buffer

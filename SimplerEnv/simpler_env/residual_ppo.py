@@ -248,7 +248,7 @@ class Args:
 
     steps_max: int = 99000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 1
+    interval_eval: int = 2
     interval_save: int = 20
 
     # buffer
@@ -363,6 +363,8 @@ class Runner:
 
 
         self.successed = [0] * self.args.num_envs 
+        # self.cur_episode = -1
+
 
     def _make_eval_env(self, num_eval_envs: int = 1):
         # 用目前 args 的其他設定，但把 num_envs 換成 1
@@ -417,12 +419,14 @@ class Runner:
             for j in range(self.args.buffer_inferbatch):
                 env_idx = i + j
                 actions = action[j]
+                instruction = obs_batch['task_description'][j]
+                instr_emb = self.policy.encode_instruction([instruction])
                 decoded_norm = self.action_tokenizer.decode_token_ids_to_actions(actions.detach().cpu().numpy())
                 actions = 0.5 * (decoded_norm + 1.0) * (self.action_high.cpu().numpy() - self.action_low.cpu().numpy()) + self.action_low.cpu().numpy()
                 a_base = torch.from_numpy(actions).to(dtype=torch.float32, device=self.device)
                 base_actions.append(a_base)
 
-                mu, std = self.policy.residual_policy(hidden_tensor[env_idx].unsqueeze(0), a_base)
+                mu, std = self.policy.residual_policy(instr_emb, hidden_tensor[env_idx].unsqueeze(0), a_base)
                 dist = torch.distributions.Normal(mu, std)
                 B = 1
                 delta_a = dist.mean.expand(B, *dist.mean.shape)
@@ -436,7 +440,7 @@ class Runner:
                 token_id_np = encode_actions_from_norm_openvla(normalized_actions, self.action_tokenizer) 
                 token_id = torch.tensor(token_id_np, device=self.device)
 
-                logp, ent, val = self.policy.evaluate_residual(hidden_tensor[env_idx].unsqueeze(0), a_base, a_candidates.unsqueeze(0))
+                logp, ent, val = self.policy.evaluate_residual(hidden_tensor[env_idx].unsqueeze(0), a_base, a_candidates.unsqueeze(0), instr_emb)
 
 
 
@@ -481,6 +485,9 @@ class Runner:
                 vis_img = obs_batch['image'][j]
                 final_candidates = []
 
+                instruction = obs_batch['task_description'][j]
+                instr_emb = self.policy.encode_instruction([instruction])
+
                 actions = batch_actions[j]
                 decoded_norm = action_tokenizer.decode_token_ids_to_actions(actions.detach().cpu().numpy())
                 actions = 0.5 * (decoded_norm + 1.0) * (action_high.cpu().numpy() - action_low.cpu().numpy()) + action_low.cpu().numpy()
@@ -491,14 +498,14 @@ class Runner:
                 
 
 
-                mu, std = self.policy.residual_policy(hidden_tensor[env_idx].unsqueeze(0), a_base)
+                mu, std = self.policy.residual_policy(instr_emb, hidden_tensor[env_idx].unsqueeze(0), a_base)
                 dist = torch.distributions.Normal(mu, std)
-                if self.successed[env_idx] > 0:
+                B = 70
+                topk = 10 
+                if self.cur_episode >= 30:
                     B = 1
                     topk = 1
-                else:
-                    B = 70
-                    topk = 10 
+
                 delta_a = dist.sample((B,))
                 # a_candidates = a_base + delta_a
                 base_last = a_base[:, 6:].expand(delta_a.shape[0], -1)  
@@ -577,7 +584,7 @@ class Runner:
                 final_actions_tok.append(selected_action_tok.unsqueeze(0))
                 final_costs.append(torch.tensor([selected_cost], device=self.device, dtype=torch.float32))  
 
-                logp, ent, val = self.policy.evaluate_residual(hidden_tensor[env_idx].unsqueeze(0), a_base, selected_action_tok.unsqueeze(0))
+                logp, ent, val = self.policy.evaluate_residual(hidden_tensor[env_idx].unsqueeze(0), a_base, selected_action_tok.unsqueeze(0), instr_emb)
                 final_values.append(val)
                 final_logprobs.append(logp)
 
@@ -677,7 +684,13 @@ class Runner:
             else:
                 self.buffer.cat_buffer(self.first_buffer)
                 self.first_buffer = tmp_buffer
-            train_info = self.alg.train_res_ppo(self.buffer)
+            # train_info = self.alg.train_res_ppo(self.buffer)
+            if episode <= 20:
+                train_info = self.alg.train_res_ppo(self.buffer, 7e-5)
+            elif episode <= 50:
+                train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
+            else:
+                train_info = self.alg.train_res_ppo(self.buffer, 1e-7)
             self.buffer = ResSeparatedReplayBuffer(
                 self.args,
                 obs_dim=(480, 640, 3),
@@ -1041,22 +1054,23 @@ class Runner:
 
     def run(self):
         max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
-        max_episodes = 100
+        max_episodes = 10000
         instruction_switch_interval = 80
         steps = 0
 
         num_envs = self.args.num_envs 
         group_size = num_envs // 4   
 
-        objects, receptacles = [], []
-        for i in range(4):
-            obj, recep = self.extract_obj_recep(self.task_list[i])
-            objects.extend([obj] * group_size)
-            receptacles.extend([recep] * group_size)
-        sval_stats = self.eval_old("train", objects, receptacles, -1)
-        wandb.log(sval_stats, step=steps)
+        # objects, receptacles = [], []
+        # for i in range(4):
+        #     obj, recep = self.extract_obj_recep(self.task_list[i])
+        #     objects.extend([obj] * group_size)
+        #     receptacles.extend([recep] * group_size)
+        # sval_stats = self.eval_old("train", objects, receptacles, -1)
+        # wandb.log(sval_stats, step=steps)
 
         for episode in range(max_episodes):
+            self.cur_episode = episode
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
 
@@ -1268,8 +1282,8 @@ class Runner:
                     torch.cuda.empty_cache()
                     self.args.alg_ppo_epoch = 10
 
-                    if episode >= 20:
-                        self.args.alg_ppo_epoch = 5
+                    # if episode >= 20:
+                    #     self.args.alg_ppo_epoch = 5
                         
                     if episode >= 50:
                         self.args.alg_ppo_epoch = 1
