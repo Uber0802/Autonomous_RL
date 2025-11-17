@@ -179,7 +179,7 @@ class SeparatedReplayBuffer(object):
             new_instruction (List[str]): 長度為 num_env 的新指令列表
         """
         assert isinstance(new_instruction, list)
-        assert len(new_instruction) == self.num_env
+        # assert len(new_instruction) == self.num_env
         self.instruction = new_instruction
 
 def create_memmap(filename, shape, dtype):
@@ -264,6 +264,7 @@ class FIFOReplayBuffer(SeparatedReplayBuffer):
         self.rewards = create_memmap('rewards.dat', (self.ep_len, max_num_envs, 1), np.float32)
         self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
+        
 
         self.instruction = [""] * max_num_envs
 
@@ -362,3 +363,155 @@ class FIFOReplayBuffer(SeparatedReplayBuffer):
                 obs_batch, instruct_batch, actions_batch, value_preds_batch,
                 return_batch, masks_batch, old_action_logits_batch, adv_targ
             )
+
+class FIFOReplayBufferRes(SeparatedReplayBuffer):
+    def __init__(self, all_args, obs_dim, act_dim, max_num_envs, cur_num_envs):
+        self.ep_len = all_args.episode_len
+        self.gamma = all_args.buffer_gamma
+        self.gae_lambda = all_args.buffer_lambda
+        self.buffer_minibatch = all_args.buffer_minibatch
+        self.alg_grpo_fix = all_args.alg_grpo_fix
+        self.max_num_envs = max_num_envs
+
+        self.obs = create_memmap('obs.dat', (self.ep_len + 1, max_num_envs, *obs_dim), np.uint8)
+        self.value_preds = create_memmap('value_preds.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
+        self.returns = create_memmap('returns.dat', (self.ep_len, max_num_envs, 1), np.float32)
+        self.actions = create_memmap('actions.dat', (self.ep_len, max_num_envs, act_dim), np.int32)
+        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+        self.rewards = create_memmap('rewards.dat', (self.ep_len, max_num_envs, 1), np.float32)
+        self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
+        self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
+
+        self.hidden = create_memmap('hidden.dat', (self.ep_len + 1, max_num_envs, 4096), np.float32)
+        self.base_action = create_memmap('base_actions.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+        self.action_untok = create_memmap('action_untok.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+
+        self.instruction = [""] * max_num_envs
+
+        self.env_ptr = 0       # points to next insertion index
+        self.num_env = cur_num_envs       # number of valid envs
+        self.step = 0
+    
+    def cat_buffer(self, buffer: 'FIFOReplayBufferRes'):
+        assert self.ep_len == buffer.ep_len, "Episode lengths must match"
+        assert self.obs.shape[2:] == buffer.obs.shape[2:], "Obs shape mismatch"
+
+        n_new = buffer.num_env
+        for i in range(n_new):
+            target_idx = (self.env_ptr + i) % self.max_num_envs
+
+            # Overwrite data in place
+            self.obs[:, target_idx] = buffer.obs[:, i]
+            self.value_preds[:, target_idx] = buffer.value_preds[:, i]
+            self.returns[:, target_idx] = buffer.returns[:, i]
+            self.actions[:, target_idx] = buffer.actions[:, i]
+            self.action_log_probs[:, target_idx] = buffer.action_log_probs[:, i]
+            self.rewards[:, target_idx] = buffer.rewards[:, i]
+            self.masks[:, target_idx] = buffer.masks[:, i]
+            self.advantages[:, target_idx] = buffer.advantages[:, i]
+            self.instruction[target_idx] = buffer.instruction[i]
+            self.hidden[:, target_idx] = buffer.hidden[:, i]
+            self.base_action[:, target_idx] = buffer.base_action[:, i]
+            self.action_untok[:, target_idx] = buffer.action_untok[:, i]
+
+        # Advance pointer
+        self.env_ptr = (self.env_ptr + n_new) % self.max_num_envs
+        self.num_env = min(self.num_env + n_new, self.max_num_envs)
+
+    def insert(self, obs, actions, action_log_probs, value_preds, rewards, masks, hidden, base_action, action_untok):
+        self.obs[self.step + 1] = obs.copy()
+        self.actions[self.step] = actions.copy()
+        self.action_log_probs[self.step] = action_log_probs.copy()
+        self.value_preds[self.step] = value_preds.copy()
+        self.rewards[self.step] = rewards.copy()
+        self.masks[self.step + 1] = masks.copy()
+        self.hidden[self.step + 1] = hidden.copy()
+        self.base_action[self.step] = base_action.copy()
+        self.action_untok[self.step] = action_untok.copy()
+
+        self.step = (self.step + 1) % self.ep_len
+
+    def warmup(self, obs_img, instruction, hidden_tensor):
+        self.obs[0] = obs_img.cpu().numpy()
+        self.instruction = instruction
+        self.masks[0] = 1.0
+
+        self.step = 0
+        self.hidden[0] = hidden_tensor.cpu().numpy()
+
+    def compute_returns_ppo(self):
+        gae = 0
+        for step in reversed(range(self.rewards.shape[0])):
+            vt1 = self.value_preds[step + 1, :self.num_env]
+            vt = self.value_preds[step, :self.num_env]
+            delta = self.rewards[step, :self.num_env] + self.gamma * vt1 * self.masks[step + 1, :self.num_env] - vt
+            gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1, :self.num_env] * gae
+            self.returns[step, :self.num_env] = gae + vt
+
+
+        advantages = self.returns[:, :self.num_env] - self.value_preds[:-1, :self.num_env]
+
+        mean_advantages = advantages.mean()
+        std_advantages = advantages.std() + 1e-8
+        self.advantages[:, :self.num_env] = (advantages - mean_advantages) / std_advantages
+
+    def get_minibatch_count(self):
+        episode_length = self.ep_len
+        n_rollout_threads = self.num_env
+        batch_size = episode_length * n_rollout_threads
+
+        if self.buffer_minibatch < 0:
+            num_mini_batch = 1
+        else:
+            assert batch_size % self.buffer_minibatch == 0, (
+                f"Batch size ({batch_size}) not divisible by minibatch size ({self.buffer_minibatch})"
+            )
+            num_mini_batch = batch_size // self.buffer_minibatch
+
+        return num_mini_batch
+
+    def feed_forward_generator(self):
+        episode_length = self.ep_len
+        n_rollout_threads = self.num_env
+        batch_size = episode_length * n_rollout_threads
+    
+        if self.buffer_minibatch < 0:
+            num_mini_batch = 1
+            mini_batch_size = batch_size
+        else:
+            assert batch_size % self.buffer_minibatch == 0
+            num_mini_batch = batch_size // self.buffer_minibatch
+            mini_batch_size = self.buffer_minibatch
+    
+        # Create a random permutation of environment-step indices
+        permuted_indices = np.random.permutation(batch_size)
+    
+        for i in range(num_mini_batch):
+            indices = permuted_indices[i * mini_batch_size : (i + 1) * mini_batch_size]
+    
+            # Convert flat indices to (step, env) pairs
+            step_idx = indices // n_rollout_threads
+            env_idx = indices % n_rollout_threads
+    
+            # Extract minibatch directly from memmaps (no full flatten)
+            obs_batch = np.stack([self.obs[step, env] for step, env in zip(step_idx, env_idx)])
+            actions_batch = np.stack([self.actions[step, env] for step, env in zip(step_idx, env_idx)])
+            value_preds_batch = np.stack([self.value_preds[step, env] for step, env in zip(step_idx, env_idx)])
+            return_batch = np.stack([self.returns[step, env] for step, env in zip(step_idx, env_idx)])
+            masks_batch = np.stack([self.masks[step, env] for step, env in zip(step_idx, env_idx)])
+            old_action_logits_batch = np.stack([self.action_log_probs[step, env] for step, env in zip(step_idx, env_idx)])
+            adv_targ = np.stack([self.advantages[step, env] for step, env in zip(step_idx, env_idx)])
+            reward_batch = np.stack([self.rewards[step, env] for step, env in zip(step_idx, env_idx)])
+            hidden_batch = np.stack([self.hidden[step, env] for step, env in zip(step_idx, env_idx)])
+            base_actions_batch = np.stack([self.base_action[step, env] for step, env in zip(step_idx, env_idx)])
+            actions_untok_batch = np.stack([self.action_untok[step, env] for step, env in zip(step_idx, env_idx)])
+    
+            # Instructions
+            instruct_batch = [self.instruction[env] for env in env_idx]
+    
+            yield (
+                obs_batch, instruct_batch, actions_batch, value_preds_batch,
+                return_batch, masks_batch, old_action_logits_batch, adv_targ, 
+                reward_batch, hidden_batch, base_actions_batch, actions_untok_batch
+            )
+

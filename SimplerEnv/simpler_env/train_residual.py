@@ -1,0 +1,883 @@
+import os
+import re
+import pprint
+import random
+import gc
+import signal
+from collections import defaultdict
+import time
+from pathlib import Path
+from typing import Annotated
+import torch
+import numpy as np
+import tyro
+import wandb
+from dataclasses import dataclass
+import yaml
+import itertools
+from tqdm import tqdm
+from mani_skill.utils import visualization
+from mani_skill.utils.visualization.misc import images_to_video
+
+from simpler_env.env.simpler_wrapper import SimlerWrapper
+from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer, FIFOReplayBuffer, FIFOReplayBufferRes
+import copy
+
+from prismatic.vla.action_tokenizer import ActionTokenizer
+import imageio
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+@dataclass
+class Args:
+    env_id: Annotated[str, tyro.conf.arg(aliases=["-e"])] = "PutCarrotOnPlateInScene-v1"
+    """The environment ID of the task you want to simulate. Can be one of
+    PutCarrotOnPlateInScene-v1, PutSpoonOnTableClothInScene-v1, StackGreenCubeOnYellowCubeBakedTexInScene-v1, PutEggplantInBasketScene-v1"""
+
+    """Number of environments to run. With more than 1 environment the environment will use the GPU backend 
+    which runs faster enabling faster large-scale evaluations. Note that the overall behavior of the simulation
+    will be slightly different between CPU and GPU backends."""
+
+    seed: Annotated[int, tyro.conf.arg(aliases=["-s"])] = 0
+    """Seed the model and environment. Default seed is 0"""
+
+    name: str = "PPO-test"
+    log: str = "/workspace/AutoRL/log.txt"
+
+    # env
+    num_envs: int = 64
+    episode_len: int = 80 # 80
+    training_len: int = 80
+    use_same_init: bool = True
+
+    steps_max: int = 2000000
+    steps_vh: int = 0  # episodes
+    interval_eval: int = 2
+    interval_save: int = 50
+    max_episodes: int = 100
+    instruction_switch_interval: int = 80
+    training_interval: int = 80
+    eval_at_start: bool = True
+
+    # buffer
+    buffer_inferbatch: int = 32
+    buffer_minibatch: int = 8
+    buffer_gamma: float = 0.99
+    buffer_lambda: float = 0.95
+
+    # vla
+    vla_path: str = "openvla/openvla-7b"
+    vla_unnorm_key: str = "bridge_orig"
+    vla_load_path: str = ""
+    vla_lora_rank: int = 32
+
+    vla_lr: float = 1e-4
+    vla_vhlr: float = 3e-3
+    vla_optim_beta1: float = 0.9
+    vla_optim_beta2: float = 0.999
+    vla_temperature: float = 1.0
+    vla_temperature_eval: float = 0.6
+
+    # ppo & grpo
+    alg_name: str = "ppo"  # ppo, grpo
+    alg_grpo_fix: bool = True
+    alg_gradient_accum: int = 20
+    alg_ppo_epoch: int = 10
+    alg_entropy_coef: float = 0.0
+    lambda_bc: float = 0.1
+
+    # other
+    wandb: bool = True
+    only_render: bool = False
+    only_render_seq: bool = False
+    render_info: bool = False
+
+def encode_actions_from_norm_openvla(norm_vec: np.ndarray, action_tokenizer) -> np.ndarray:
+    if isinstance(norm_vec, torch.Tensor):
+        norm_vec = norm_vec.detach().cpu().numpy()
+    discretized = np.digitize(norm_vec, action_tokenizer.bins)
+    token_ids = action_tokenizer.tokenizer.vocab_size - discretized
+    return token_ids.astype(np.int64)
+
+
+class Runner:
+    def __init__(self, all_args: Args):
+        self.args = all_args
+
+        # alg_name
+        assert self.args.alg_name in ["ppo", "grpo"]
+
+        # set seed
+        np.random.seed(self.args.seed)
+        random.seed(self.args.seed)
+        torch.manual_seed(self.args.seed)
+
+        # set wandb
+        wandb.init(
+            config=all_args.__dict__,
+            project="RLVLA_residual",
+            name=self.args.name,
+            mode="online" if self.args.wandb else "offline",
+        )
+        self.save_dir = Path(wandb.run.dir)
+        self.glob_dir = Path(wandb.run.dir) / ".." / "glob"
+        self.glob_dir.mkdir(parents=True, exist_ok=True)
+
+        yaml.dump(all_args.__dict__, open(self.glob_dir / "config.yaml", "w"))
+
+        # policy
+        from simpler_env.policies.openvla.openvla_train_residual import OpenVLAPolicy, OpenVLAPPORes
+        device_id = 0
+        device_id_other = 1 if torch.cuda.device_count() > 1 else 0
+        self.device = torch.device("cuda:" + str(device_id))
+        self.policy = OpenVLAPolicy(all_args, device_id_other)
+
+        self.alg = OpenVLAPPORes(all_args, self.policy)
+
+        # env
+        unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
+        self.env = SimlerWrapper(self.args, unnorm_state)
+
+        # buffer
+        #self.prealloc_buffer = PreallocReplayBuffer(
+        #    all_args,
+        #    obs_dim=(480, 640, 3),
+        #    act_dim=7,
+        #)
+        self.prealloc_buffer = FIFOReplayBufferRes(
+            all_args,
+            obs_dim=(480, 640, 3),
+            act_dim=7,
+            max_num_envs=64*2,
+            cur_num_envs=0,
+        )
+        self.buffer = FIFOReplayBufferRes(
+            all_args,
+            obs_dim=(480, 640, 3),
+            act_dim=7,
+            max_num_envs=64,
+            cur_num_envs=64
+        )
+        minibatch_count = self.buffer.get_minibatch_count()
+        print(f"Buffer minibatch count: {minibatch_count}")
+
+        # Task Switch
+        self.task_id = 0
+        self.task_list = self.env.get_task_pool()[0]
+        #self.task_list = [self.task_list[-1]]
+        
+
+    def extract_obj_recep(self, text_string):
+        pattern = r"put (.*?) on (.*)"
+        match = re.search(pattern, text_string)
+
+        if match:
+            obj = match.group(1)
+            recep = match.group(2)
+            return obj, recep
+        else:
+            return None, None
+
+    @torch.no_grad()
+    def _get_action(self, obs, hidden_tensor, deterministic=False):
+        total_batch = obs["image"].shape[0]
+
+        values = []
+        final_actions = []
+        logprobs = []
+        base_actions = []
+        actions_untok = []
+        self.unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
+        self.action_low = torch.tensor(self.unnorm_state["q01"], device=self.device).unsqueeze(0)
+        self.action_high = torch.tensor(self.unnorm_state["q99"], device=self.device).unsqueeze(0)
+        self.action_tokenizer = ActionTokenizer(self.policy.processor.tokenizer)
+
+        for i in range(0, total_batch, self.args.buffer_inferbatch):
+            obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
+            value, action, logprob = self.policy.get_action(obs_batch, deterministic)
+
+            for j in range(self.args.buffer_inferbatch):
+                env_idx = i + j
+                actions = action[j]
+                instruction = obs_batch['task_description'][j]
+                instr_emb = self.policy.encode_instruction([instruction])
+                decoded_norm = self.action_tokenizer.decode_token_ids_to_actions(actions.detach().cpu().numpy())
+                actions = 0.5 * (decoded_norm + 1.0) * (self.action_high.cpu().numpy() - self.action_low.cpu().numpy()) + self.action_low.cpu().numpy()
+                a_base = torch.from_numpy(actions).to(dtype=torch.float32, device=self.device)
+                base_actions.append(a_base)
+
+                mu, std = self.policy.residual_policy(instr_emb, hidden_tensor[env_idx].unsqueeze(0), a_base)
+                # dist = torch.distributions.Normal(mu, std)
+                B = 1
+                # delta_a = dist.sample((B,))
+                # a_candidates = a_base + delta_a
+                # a_candidates = torch.clamp(a_candidates, min=self.action_low, max=self.action_high)
+
+                dist_cont = torch.distributions.Normal(mu, std)
+                if not deterministic:
+                    delta_a_cont = dist_cont.sample((B,)).squeeze(1)
+                    a_candidates = torch.cat([a_base[..., :-1] + delta_a_cont, a_base[..., -1].unsqueeze(0)], dim=-1)  
+                else:
+                    delta_a = dist_cont.mean.expand(B, *dist_cont.mean.shape)
+                    # a_candidates = a_base + delta_a
+                    base_last = a_base[:, 6:].expand(delta_a.shape[0], -1)  
+                    a_candidates = torch.cat([a_base[:, :6] + delta_a.squeeze(0), base_last], dim=1)
+
+
+                # dist_disc = torch.distributions.Bernoulli(logits=logit)
+                # a_disc = dist_disc.sample((B,)).squeeze(1)
+  
+                a_candidates = torch.clamp(a_candidates, min=self.action_low, max=self.action_high)            
+
+                normalized_actions = 2 * (a_candidates - self.action_low) / (self.action_high - self.action_low) - 1.0
+                token_id_np = encode_actions_from_norm_openvla(normalized_actions, self.action_tokenizer) 
+                token_id = torch.tensor(token_id_np, device=self.device)
+
+                logp, ent, val = self.policy.evaluate_residual(hidden_tensor[env_idx].unsqueeze(0), a_base, a_candidates.unsqueeze(0), instr_emb)
+
+
+
+                values.append(val)
+                final_actions.append(token_id)
+                logprobs.append(logp.squeeze(0))
+                actions_untok.append(a_candidates)
+
+        values = torch.cat(values, dim=0).to(device=self.device)
+        final_actions = torch.cat(final_actions, dim=0).to(device=self.device)
+        logprobs = torch.cat(logprobs, dim=0).to(device=self.device)
+        actions_untok = torch.cat(actions_untok, dim=0).to(device=self.device)
+        base_actions = torch.cat(base_actions, dim=0).to(device=self.device)
+
+
+        return values, final_actions, logprobs, base_actions, actions_untok
+
+    def collect(self, hidden_tensor):
+        self.policy.prep_rollout()
+
+        obs_image = self.buffer.obs[self.buffer.step]
+        obs_image = torch.tensor(obs_image).to(self.device)
+        obs = dict(image=obs_image, task_description=self.buffer.instruction)
+        value, action, logprob, base_actions, actions_untok = self._get_action(obs, hidden_tensor)
+
+        return value, action, logprob, base_actions, actions_untok
+
+    def insert(self, data):
+        obs_img, actions, logprob, value_preds, rewards, done, hidden_tensor, base_action, action_untok = data
+        masks = 1.0 - done.to(torch.float32)
+
+        obs_img = obs_img.cpu().numpy()
+        actions = actions.to(torch.int32).cpu().numpy()
+        logprob = logprob.to(torch.float32).cpu().numpy()
+        value_preds = value_preds.to(torch.float32).cpu().numpy()
+        rewards = rewards.cpu().numpy()
+        masks = masks.cpu().numpy()
+        hidden = hidden_tensor.cpu().numpy()
+        base_action = base_action.cpu().numpy()
+        action_untok = action_untok.cpu().numpy()
+
+        self.buffer.insert(obs_img, actions, logprob, value_preds, rewards, masks, hidden, base_action, action_untok)
+
+    def compute_endup(self):
+        self.policy.prep_rollout()
+
+        obs_image = torch.tensor(self.buffer.obs[-1]).to(self.device)
+        obs = dict(image=obs_image, task_description=self.buffer.instruction)
+        all_hidden = []
+        batch_size = 1
+        with torch.inference_mode():
+            for s in range(0, self.args.num_envs, batch_size):
+                e = min(s + batch_size, self.args.num_envs)
+                obs_ = dict(
+                    image=obs_image[s:e].to(self.device),
+                    task_description=self.buffer.instruction[s:e],
+                )
+                features = self.policy._preprocess_obs(obs_)
+                hidden = self.policy.vla.get_hidden(**features)
+                hidden = hidden[:,0].to(torch.float32)
+                all_hidden.append(hidden)
+                del features, hidden, obs_
+                torch.cuda.empty_cache()
+
+        hidden_tensor = torch.cat(all_hidden, dim=0) 
+        with torch.no_grad():
+            next_value, _, _, _, _ = self._get_action(obs, hidden_tensor)
+        next_value = next_value.to(torch.float32).cpu().numpy()
+
+        self.buffer.endup(next_value)
+
+    def train(self):
+        self.policy.prep_training()
+        info = None
+        train_info = None
+
+        if self.args.alg_name == "ppo":
+            train_info = self.alg.train_res_ppo(self.prealloc_buffer)
+
+        elif self.args.alg_name == "grpo":
+            train_info = self.alg.train_grpo(self.buffer)
+        else:
+            raise ValueError(f"Unknown alg_name: {self.args.alg_name}")
+        if train_info:
+            info = {f"train/{k}": v for k, v in train_info.items()}
+            info["buffer/reward_mean"] = np.mean(self.buffer.rewards)
+            info["buffer/mask_mean"] = np.mean(1.0 - self.buffer.masks)
+
+        return info
+
+    @torch.no_grad()
+    def eval(self, obj_set: str, object: list[str], receptacle: list[str], episode: int) -> dict:
+        self.policy.prep_rollout()
+        env_infos = defaultdict(lambda: [])
+
+        
+
+        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        print("Evaluating:", instruction[0])
+        viz_writers = []
+        for i in range(self.args.num_envs):
+            viz_path = f"eval_video/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
+            os.makedirs(os.path.dirname(viz_path), exist_ok=True)
+            viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
+            viz_writers.append(viz_writer)
+            viz_writers[i].append_data(obs_img[i].cpu().numpy())
+
+        for _ in tqdm(range(self.args.episode_len), desc="eval"):
+            obs = dict(image=obs_img, task_description=instruction)
+            all_hidden = []
+            batch_size = 1
+            with torch.inference_mode():
+                for s in range(0, self.args.num_envs, batch_size):
+                    e = min(s + batch_size, self.args.num_envs)
+                    obs_ = dict(
+                        image=obs_img[s:e].to(self.device),
+                        task_description=instruction[s:e],
+                    )
+                    features = self.policy._preprocess_obs(obs_)
+                    hidden = self.policy.vla.get_hidden(**features)
+                    hidden = hidden[:,0].to(torch.float32)
+                    all_hidden.append(hidden)
+                    del features, hidden, obs_
+                    torch.cuda.empty_cache()
+
+            hidden_tensor = torch.cat(all_hidden, dim=0) 
+            value, action, logprob, _, _ = self._get_action(obs, hidden_tensor, deterministic=True)
+
+            obs_img, reward, done, env_info = self.env.step(action)
+
+            # info
+            # print({k: round(v.to(torch.float32).mean().tolist(), 4) for k, v in env_info.items() if k != "episode"})
+            if "episode" in env_info.keys():
+                for k, v in env_info["episode"].items():
+                    env_infos[f"{k}"] += v
+
+            for i in range(self.args.num_envs):
+                viz_writers[i].append_data(obs_img[i].cpu().numpy())
+
+        for i in range(self.args.num_envs):
+            viz_writers[i].close()
+
+        # infos
+        # env_stats = {k: np.mean(v) for k, v in env_infos.items()}
+        # env_stats = env_stats.copy()
+
+        # print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
+        # print(f"")
+        unique_instructions = sorted(list(set(instruction)))
+        per_instr_stats = {}
+
+        for instr in unique_instructions:
+            idxs = [i for i, ins in enumerate(instruction) if ins == instr]
+            instr_stats = {}
+            for k, v in env_infos.items():
+                values = [v[i] for i in idxs if i < len(v)]
+                if len(values) > 0:
+                    instr_stats[k] = float(np.mean(values))
+            per_instr_stats[instr] = instr_stats
+
+
+        print("=== Per-instruction stats ===")
+        print(pprint.pformat({
+            instr: {k: round(v, 4) for k, v in stats.items()}
+            for instr, stats in per_instr_stats.items()
+        }))
+
+        overall_stats = {k: np.mean(v) for k, v in env_infos.items()}
+
+        print("\n=== Overall mean (for reference) ===")
+        print(pprint.pformat({k: round(v, 4) for k, v in overall_stats.items()}))
+
+        return per_instr_stats
+
+    @torch.no_grad()
+    def eval_video(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
+        self.policy.prep_rollout()
+
+        env_infos = defaultdict(lambda: [])
+        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object,receptacle=receptacle)
+
+        data = {
+            "image": [],
+            "instruction": "",
+            "action": [],
+            "info": [],
+        }
+
+        print("Evaluating:", instruction[0])
+        data["instruction"] = instruction[0]
+
+        for _ in range(self.args.episode_len):
+            obs = dict(image=obs_img, task_description=instruction)
+            all_hidden = []
+            batch_size = 1
+            with torch.inference_mode():
+                for s in range(0, self.args.num_envs, batch_size):
+                    e = min(s + batch_size, self.args.num_envs)
+                    obs_ = dict(
+                        image=obs_img[s:e].to(self.device),
+                        task_description=instruction[s:e],
+                    )
+                    features = self.policy._preprocess_obs(obs_)
+                    hidden = self.policy.vla.get_hidden(**features)
+                    hidden = hidden[:,0].to(torch.float32)
+                    all_hidden.append(hidden)
+                    del features, hidden, obs_
+                    torch.cuda.empty_cache()
+
+            hidden_tensor = torch.cat(all_hidden, dim=0) 
+            value, action, logprob, _, _ = self._get_action(obs, hidden_tensor, deterministic=True)
+
+            obs_img_new, reward, done, env_info = self.env.step(action)
+
+            if "episode" in env_info.keys():
+                for k, v in env_info["episode"].items():
+                    value = v[0]
+                    if isinstance(value, bool):
+                        env_infos[k].append(value)
+                    else:
+                        env_infos[k].append(value.item())
+
+
+            post_action = self.env._process_action(action)
+            log_image = obs_img[0].cpu().numpy()
+            log_action = post_action[0].cpu().numpy().tolist()
+            log_info = {k: v[0].tolist() for k, v in env_info.items() if k != "episode"}
+
+            data["image"].append(log_image)
+            data["action"].append(log_action)
+            data["info"].append(log_info)
+
+            obs_img = obs_img_new
+
+        data["image"].append(obs_img[0].cpu().numpy())
+
+        exp_dir = Path(self.glob_dir) / f"eval_{epoch}_{obj_set}_{instruction[0]}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.args.render_info:
+            for j in range(len(data["info"])):
+                data["image"][j + 1] = visualization.put_info_on_image(
+                    data["image"][j + 1],
+                    data["info"][j],
+                    extras=[f"Ins: {data['instruction']}"]
+                )
+
+        success = int(data["info"][-1]["success"])
+        images_to_video(
+            data["image"],
+            str(exp_dir),
+            f"video_{object[0]}_{receptacle[0]}-s_{success}",
+            fps=10,
+            verbose=False
+        )
+
+        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
+        env_stats_ret = env_stats.copy()
+
+
+        save_stats = {
+            "env_name": self.args.env_id,
+            "ep_len": self.args.episode_len,
+            "epoch": epoch,
+            "stats": {k: float(v) for k, v in env_stats.items()},
+            "instruction": data["instruction"],
+            "last_info": data["info"][-1],
+        }
+        yaml.dump(save_stats, open(exp_dir / "stats.yaml", "w"))
+
+        return env_stats_ret
+
+    @torch.no_grad()
+    def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str], reset=True, exp_dir=None) -> dict:
+        if reset:
+            self.policy.prep_rollout()
+
+        # init logger
+        env_infos = defaultdict(lambda: [])
+        datas = [{
+            "image": [],  # obs_t: [0, T-1]
+            "instruction": "",
+            "action": [],  # a_t: [0, T-1]
+            "info": [],  # info after executing a_t: [1, T]
+        } for idx in range(self.args.num_envs)]
+        if reset:
+            obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
+        else:
+            self.env.set_task(object, receptacle)
+            obs_img = self.env.get_obs_image()
+            instruction = self.env.get_language_instruction()
+        print("Rendering:", instruction[0])
+
+        # data dump: instruction
+        for idx in range(self.args.num_envs):
+            datas[idx]["instruction"] = instruction[idx]
+
+        for idx in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
+            obs = dict(image=obs_img, task_description=instruction)
+            all_hidden = []
+            batch_size = 1
+            with torch.inference_mode():
+                for s in range(0, self.args.num_envs, batch_size):
+                    e = min(s + batch_size, self.args.num_envs)
+                    obs_ = dict(
+                        image=obs_img[s:e].to(self.device),
+                        task_description=instruction[s:e],
+                    )
+                    features = self.policy._preprocess_obs(obs_)
+                    hidden = self.policy.vla.get_hidden(**features)
+                    hidden = hidden[:,0].to(torch.float32)
+                    all_hidden.append(hidden)
+                    del features, hidden, obs_
+                    torch.cuda.empty_cache()
+
+            hidden_tensor = torch.cat(all_hidden, dim=0) 
+            value, action, logprob, _, _ = self._get_action(obs, hidden_tensor, deterministic=True)
+            #np_value = value.detach().cpu().to(torch.float32).numpy()
+            #filename = os.path.basename(self.args.vla_load_path)
+            #np.save(f"{filename}.npy", np_value)
+
+            obs_img_new, reward, done, env_info = self.env.step(action)
+
+            # info
+            #print({k: round(v.to(torch.float32).mean().tolist(), 4) for k, v in env_info.items() if k != "episode"})
+            if "episode" in env_info.keys():
+                for k, v in env_info["episode"].items():
+                    env_infos[f"{k}"] += v
+
+            for i in range(self.args.num_envs):
+                post_action = self.env._process_action(action)
+                log_image = obs_img[i].cpu().numpy()
+                log_action = post_action[i].cpu().numpy().tolist()
+                log_info = {k: v[i].tolist() for k, v in env_info.items() if k != "episode"}
+                datas[i]["image"].append(log_image)
+                datas[i]["action"].append(log_action)
+                datas[i]["info"].append(log_info)
+
+            # update obs_img
+            obs_img = obs_img_new
+
+        # data dump: last image
+        for i in range(self.args.num_envs):
+            log_image = obs_img[i].cpu().numpy()
+            datas[i]["image"].append(log_image)
+
+        # save video
+        if exp_dir:
+            exp_dir = Path(self.glob_dir) / exp_dir
+        else:
+            exp_dir = Path(self.glob_dir) / f"vis_{epoch}_{obj_set}"
+
+        print("exp_dir : ", exp_dir)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        for i in range(self.args.num_envs):
+            images = datas[i]["image"]
+            infos = datas[i]["info"]
+            assert len(images) == len(infos) + 1
+
+            if self.args.render_info:
+                for j in range(len(infos)):
+                    images[j + 1] = visualization.put_info_on_image(
+                        images[j + 1], infos[j],
+                        extras=[f"Ins: {instruction[i]}"]
+                    )
+
+            success = int(infos[-1]["success"])
+            images_to_video(images, str(exp_dir), f"video_{i}-{object[0]}_{receptacle[0]}-s_{success}",
+                            fps=10, verbose=False)
+
+        # infos
+        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
+        env_stats_ret = env_stats.copy()
+
+        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
+        print(f"")
+
+        # save stats
+        last_info = {
+            idx: {k: env_infos[k][idx] for k in env_infos.keys()}
+            for idx in range(self.args.num_envs)
+        }
+
+        save_stats = {}
+        save_stats["env_name"] = self.args.env_id
+        save_stats["ep_len"] = self.args.episode_len
+        save_stats["epoch"] = epoch
+        save_stats["stats"] = {k: v.item() for k, v in env_stats.items()}
+        save_stats["instruction"] = {idx: ins for idx, ins in enumerate(instruction)}
+        save_stats["last_info"] = last_info
+
+        yaml.dump(save_stats, open(exp_dir / "stats.yaml", "w"))
+
+        return env_stats_ret
+
+    @torch.no_grad()
+    def render_seq(self, obj_set: str, n = 4, eval_training_seq=True):
+        perms = list(itertools.permutations(self.task_list))
+        training_seq = perms.pop(0)
+        selected = random.sample(perms, n)
+        if eval_training_seq:
+            selected = [training_seq] + selected
+        
+        for i, task_lst in enumerate(tqdm(selected)):
+            print(task_lst)           
+            for j, task in enumerate(task_lst):
+                object, receptacle = self.extract_obj_recep(task)
+                if j == 0:
+                    reset = True
+                else:
+                    reset = False
+                stats = self.render(0, obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs, reset, f"{i}-{j}")
+
+    def run(self):
+
+        max_episodes = self.args.steps_max // self.args.episode_len // self.args.num_envs
+        max_episodes = self.args.max_episodes
+        instruction_switch_interval = self.args.instruction_switch_interval
+        steps = 0
+        num_envs = self.args.num_envs 
+        group_size = num_envs // 4 
+        if self.args.eval_at_start:
+            print(f"Evaluating at {steps}")
+            objects, receptacles = [], []
+            for i in range(4):
+                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                objects.extend([obj] * group_size)
+                receptacles.extend([recep] * group_size)
+            sval_stats = self.eval("test", objects, receptacles, -1)
+            wandb.log(sval_stats, step=steps)
+
+           
+
+        for episode in range(max_episodes):
+            env_infos = defaultdict(lambda: [])
+            ep_time = time.time()
+            #self.prealloc_buffer.reset()
+
+
+            objects, receptacles = [], []
+            for i in range(4):
+                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                objects.extend([obj] * group_size)
+                receptacles.extend([recep] * group_size)
+
+            obs_img, instruction, info = self.env.reset(
+                obj_set="test",
+                same_init=self.args.use_same_init,
+                object=objects,
+                receptacle=receptacles
+            )
+
+            task_id_map = []
+            for i in range(4):
+                task_id_map.extend([(self.task_id + i) % len(self.task_list)] * group_size)
+
+            all_hidden = []
+            batch_size = 1
+            with torch.inference_mode():
+                for s in range(0, self.args.num_envs, batch_size):
+                    e = min(s + batch_size, self.args.num_envs)
+                    obs = dict(
+                        image=obs_img[s:e].to(self.device),
+                        task_description=instruction[s:e],
+                    )
+                    features = self.policy._preprocess_obs(obs)
+                    hidden = self.policy.vla.get_hidden(**features)
+                    hidden = hidden[:,0].to(torch.float32)
+                    all_hidden.append(hidden)
+                    del features, hidden, obs
+                    torch.cuda.empty_cache()
+
+            hidden_tensor = torch.cat(all_hidden, dim=0) 
+
+
+            self.buffer.warmup(obs_img, instruction, hidden_tensor)
+
+            
+            # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+            # obs_img, instruction, info = self.env.reset(obj_set="train", same_init=self.args.use_same_init, object=[obj]*self.args.num_envs, receptacle=[recep]*self.args.num_envs)
+            # self.buffer.warmup(obs_img.cpu().numpy(), instruction)
+            rollout_images = [[] for _ in range(self.args.num_envs)]
+
+            print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+
+            # with open(self.args.log, "a") as f:
+            #     f.write(f"step : {steps}\n")
+            # Reset buffer for 0-79 step    
+            for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
+                value, action, logprob, base_action, action_untok = self.collect(hidden_tensor=hidden_tensor)
+                obs_img, reward, done, env_info = self.env.step(action)
+
+                all_hidden = []
+                batch_size = 1
+                with torch.inference_mode():
+                    for s in range(0, self.args.num_envs, batch_size):
+                        e = min(s + batch_size, self.args.num_envs)
+                        obs = dict(
+                            image = obs_img[s:e].to(self.device),
+                            task_description=instruction[s:e],
+                        )
+                        features = self.policy._preprocess_obs(obs)
+                        hidden = self.policy.vla.get_hidden(**features)
+                        hidden = hidden[:,0].to(torch.float32)
+                        all_hidden.append(hidden)
+                        del features, hidden, obs
+                        torch.cuda.empty_cache()
+
+                hidden_tensor = torch.cat(all_hidden, dim=0) 
+
+                for env_i in range(self.args.num_envs):
+                    rollout_images[env_i].append(obs_img[env_i].cpu().numpy())
+
+
+                data = (obs_img, action, logprob, value, reward, done, hidden_tensor, base_action, action_untok)
+                self.insert(data)
+
+                # info
+                if "episode" in env_info.keys():
+                    for k, v in env_info["episode"].items():
+                        env_infos[f"{k}"] += v
+
+                if (step_idx+1) % instruction_switch_interval == 0 and step_idx > 0:
+                    
+                    self.compute_endup()
+
+                    render_dir = Path(self.glob_dir) / f"rollout_ep{episode}_step{step_idx}"
+                    render_dir.mkdir(parents=True, exist_ok=True)
+
+                    for env_i in range(self.args.num_envs):
+                        images = rollout_images[env_i]
+                        images_to_video(images, str(render_dir), f"env{env_i}", fps=10, verbose=False)
+
+                    rollout_images = [[] for _ in range(self.args.num_envs)]
+
+                    del value, action, logprob, reward, done
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                    # train
+                    self.prealloc_buffer.cat_buffer(self.buffer)
+                    if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
+                        
+                        infos = self.train()
+                        #self.prealloc_buffer.reset()
+                    #print(f"Saving model at {steps}")
+                    #save_path = self.glob_dir / f"ep{episode}_step{step_idx}"
+                    #print(f"Saving model at {save_path}")
+                    #self.policy.save(save_path)
+
+                    #for k, v in env_infos.items():
+                    #    infos[f"env/{k}"] = np.mean(v)
+                    # wandb.log(infos, step=step_idx + episode * self.args.training_len)
+                    #self.buffer.warmup(obs_img.cpu().numpy(), instruction)
+
+                    #Switch Instruction
+                    self.task_id = (self.task_id + 1) % len(self.task_list)
+                    objects, receptacles = [], []
+                    for i in range(4):
+                        obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                        objects.extend([obj] * group_size)
+                        receptacles.extend([recep] * group_size)
+                    self.env.set_task(objects, receptacles)
+                    obs_img = self.env.reset_robot()
+
+                    # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
+                    # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
+                    instruction = self.env.get_language_instruction()
+                    print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+
+                    all_hidden = []
+                    batch_size = 1
+                    with torch.inference_mode():
+                        for s in range(0, self.args.num_envs, batch_size):
+                            e = min(s + batch_size, self.args.num_envs)
+                            obs = dict(
+                                image=obs_img[s:e].to(self.device),
+                                task_description=instruction[s:e],
+                            )
+                            features = self.policy._preprocess_obs(obs)
+                            hidden = self.policy.vla.get_hidden(**features)
+                            hidden = hidden[:,0].to(torch.float32)
+                            all_hidden.append(hidden)
+                            del features, hidden, obs
+                            torch.cuda.empty_cache()
+
+                    hidden_tensor = torch.cat(all_hidden, dim=0) 
+                    self.buffer.warmup(obs_img, instruction, hidden_tensor)
+                    self.buffer.update_instruction(instruction)
+
+            # steps
+            steps = (episode + 1) * self.args.training_len * self.args.num_envs
+            # print(pprint.pformat({k: round(np.mean(v), 4) for k, v in env_infos.items()}))
+
+            # eval
+            if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
+                print(f"Evaluating at {steps}")
+                objects, receptacles = [], []
+                for i in range(4):
+                    obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                    objects.extend([obj] * group_size)
+                    receptacles.extend([recep] * group_size)
+                sval_stats = self.eval("test", objects, receptacles, episode)
+                # sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                wandb.log(sval_stats, step=steps)
+
+            # save
+            # if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:
+            #     print(f"Saving model at {steps}")
+            #     save_path = self.glob_dir / f"steps_{episode:0>4d}"
+            #     self.policy.save(save_path)
+                
+            #     for task in self.task_list:
+            #         object, receptacle = self.extract_obj_recep(task)
+            #         self.render(episode, "test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+
+
+
+def main():
+    args = tyro.cli(Args)
+    runner = Runner(args)
+
+    if args.only_render:
+        ll = [
+            "OneObjectTwoReceptacle-v1",
+            "TwoObjectOneReceptacle-v1",
+            "TwoObjectTwoReceptacle-v1"
+        ]
+        if args.env_id not in ll:
+            runner.render(epoch=0, obj_set="train")
+        for task in runner.task_list:
+            object, receptacle = runner.extract_obj_recep(task)
+            runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
+            break
+
+    elif args.only_render_seq:
+        runner.render_seq("test", 4, True)
+    
+    else:
+        runner.run()
+
+
+if __name__ == "__main__":
+    main()
