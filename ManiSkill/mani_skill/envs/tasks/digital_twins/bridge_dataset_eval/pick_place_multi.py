@@ -374,6 +374,87 @@ class BasePickPlace(BaseEnv):
         # whether the current subtask is the final one, only meaningful for long-horizon tasks
         return True
 
+    def get_obj_pos(self):
+        return self.extra_stats["extra_pos_carrot"]
+
+    def get_recep_pos(self):    
+        return self.extra_stats["extra_pos_plate"]
+
+    def reset_unsuitable_envs(self, env_idx=[]):
+        xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
+        xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+
+        # Get unsuitable object, recep idx
+        obj_pos = self.get_obj_pos()
+        recep_pos = self.get_recep_pos()
+        obj_z = obj_pos[:, 2]
+        recep_z = recep_pos[:, 2]
+
+        # Find indices where obj_z < 0.7
+        obj_low_z_mask = obj_z < 0.7
+        obj_low_z_indices = torch.nonzero(obj_low_z_mask, as_tuple=False).squeeze()
+
+        # Convert to list of ints
+        if obj_low_z_indices.ndim == 0:
+            obj_low_z_list = [obj_low_z_indices.item()]
+        else:
+            obj_low_z_list = obj_low_z_indices.tolist()
+
+        # Find indices where recep_z < 0.7
+        recep_low_z_mask = recep_z < 0.7
+        recep_low_z_indices = torch.nonzero(recep_low_z_mask, as_tuple=False).squeeze()
+
+        # Convert to list of ints
+        if recep_low_z_indices.ndim == 0:
+            recep_low_z_list = [recep_low_z_indices.item()]
+        else:
+            recep_low_z_list = recep_low_z_indices.tolist()
+
+        # Generate position & quant samples
+        lc = 16
+        lo = len(self.overlay_images_numpy)
+        l1 = len(self.xyz_configs)
+        l2 = len(self.quat_configs)
+        ltt = lc * 1 * 16 * lo * l1 * l2
+        indices = np.random.choice(ltt, self.num_envs)
+        xyz_indices = (indices//l2) %l1
+        xyz_sample = torch.tensor(self.xyz_configs[xyz_indices], device=self.device)
+        quant_indices = indices % l2
+        quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
+
+        # loop over plate
+        for idx, a in enumerate(plate_actor):
+            if idx in recep_low_z_list:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[2], q=quant[1]))
+                a.scene._reset_mask = prev_mask
+
+        # loop over carrot
+        for idx, a in enumerate(carrot_actor):
+            if idx in obj_low_z_list:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                prev_mask = a.scene._reset_mask.clone()
+                a.scene._reset_mask[:] = False
+                a.scene._reset_mask[idx] = True
+                # set the pose in batched format
+                a.set_pose(Pose.create_from_pq(p=pos[0], q=quant[1]))
+                a.scene._reset_mask = prev_mask
+
+        self._settle(0.5)
+        print(f"Reset Unsuitable. Obj: {obj_low_z_list}, Recep: {recep_low_z_list}")
+        reset_env_count = len(obj_low_z_list) + len(recep_low_z_list)
+        return reset_env_count
+
     def get_language_instruction(self):
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
@@ -1330,6 +1411,60 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         print(f"xyz_configs: {xyz_configs.shape}")
         print(f"quat_configs: {quat_configs.shape}")
 
+    def _generate_OOD_init_pose(self):
+        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
+        half_edge_length = np.array([0.11, 0.15]).reshape(1, 2)
+        
+
+        grid_pos = np.array([
+            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
+            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
+            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
+            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
+            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
+            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
+        ]) * 2 - 1  # [36, 2]
+        grid_pos = grid_pos * half_edge_length + xy_center
+
+        xyz_configs = []
+        for i, p1 in enumerate(grid_pos):
+            for j, p2 in enumerate(grid_pos):
+                for k, p3 in enumerate(grid_pos):
+                    for l, p4 in enumerate(grid_pos):
+                        # Ensure all positions are spaced apart
+                        if (
+                            np.linalg.norm(p1 - p2) > 0.12 and
+                            np.linalg.norm(p1 - p3) > 0.12 and
+                            np.linalg.norm(p1 - p4) > 0.12 and
+                            np.linalg.norm(p2 - p3) > 0.12 and
+                            np.linalg.norm(p2 - p4) > 0.12 and
+                            np.linalg.norm(p3 - p4) > 0.12
+                        ):
+                            xyz_configs.append(
+                                np.array([
+                                    np.append(p1, 1.0),    # carrot 1
+                                    np.append(p2, 1.0),    # carrot 2
+                                    np.append(p3, 0.95),   # plate 1
+                                    np.append(p4, 0.95),   # plate 2
+                                ])
+                            )
+        xyz_configs = np.stack(xyz_configs)
+
+        quat_configs = np.stack(
+            [
+                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
+                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
+            ]
+        )
+
+        self.xyz_configs = xyz_configs
+        self.quat_configs = quat_configs
+
+        print(f"xyz_configs: {xyz_configs.shape}")
+        print(f"quat_configs: {quat_configs.shape}")
+
     def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized
         b = len(env_idx)
@@ -1346,6 +1481,12 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             lp_offset = 0
             le = 16
             le_mod = 17
+        elif obj_set == "test_ood":
+            lp = 1
+            lp_offset = 0
+            le = 16
+            le_mod = 17
+            self._generate_OOD_init_pose()
         elif obj_set == "all":
             lp = 17
             lp_offset = 0
@@ -1382,7 +1523,7 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
-        if obj_set == "test":
+        if obj_set != "train":
             rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1

@@ -51,7 +51,7 @@ class Args:
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
+    interval_eval: int = 4
     interval_save: int = 8
     max_episodes: int = 32
     instruction_switch_interval: int = 80
@@ -496,6 +496,7 @@ class Runner:
         for episode in range(max_episodes):
             self.env.set_forward()
             forward = True 
+            forward_count = 1
             env_infos = defaultdict(lambda: [])
             ep_time = time.time()
             self.prealloc_buffer.reset()
@@ -508,7 +509,7 @@ class Runner:
                 receptacles.extend([recep] * group_size)
 
             obs_img, instruction, info = self.env.reset(
-                obj_set="test",
+                obj_set="train",
                 same_init=self.args.use_same_init,
                 object=objects,
                 receptacle=receptacles
@@ -579,9 +580,10 @@ class Runner:
                     #self.buffer.warmup(obs_img.cpu().numpy(), instruction)
 
                     #Switch Instruction
-                    if forward:
+                    if forward_count < 1:
                         self.env.set_backward()
-                        forward = False
+                        forward_count = 0
+                        #forward = False
                     else:
                         self.task_id = (self.task_id + 1) % len(self.task_list)
                         objects, receptacles = [], []
@@ -591,7 +593,8 @@ class Runner:
                             receptacles.extend([recep] * group_size)
                         self.env.set_forward()
                         self.env.set_task(objects, receptacles)
-                        forward = True
+                        forward_count += 1
+                        #forward = True
                         
                     obs_img = self.env.reset_robot()
 
@@ -599,6 +602,8 @@ class Runner:
                     # self.env.set_task([obj]*self.args.num_envs, [recep]*self.args.num_envs)
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+                    #obs_img = self.env.reset_unsuitable_envs()
+                    obs_img = self.env.reset_robot()
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
 
@@ -608,11 +613,17 @@ class Runner:
 
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
-                print(f"Evaluating at {steps}")
+                print(f"Evaluating Random Scene at {steps}")
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
                     sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
                     sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    wandb.log(sval_stats, step=steps)
+                print(f"Evaluating Train Scene at {steps}")
+                for task in self.task_list:
+                    object, receptacle = self.extract_obj_recep(task)
+                    sval_stats = self.eval("train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    sval_stats = {f"eval_put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                     wandb.log(sval_stats, step=steps)
 
             # save
@@ -623,7 +634,7 @@ class Runner:
                 
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
-                    self.render(episode, "test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                    self.render(episode, "train", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
 
 
@@ -639,13 +650,13 @@ def main():
         ]
         if args.env_id not in ll:
             runner.render(epoch=0, obj_set="train")
-        for task in runner.task_list:
+        for idx, task in enumerate(runner.task_list):
             object, receptacle = runner.extract_obj_recep(task)
-            runner.render(0, "test", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs)
+            runner.render(0, "test_ood", [object]*runner.args.num_envs, [receptacle]*runner.args.num_envs, exp_dir=f"0-{idx}")
             #break
 
     elif args.only_render_seq:
-        runner.render_seq("test", 4, True)
+        runner.render_seq("test_ood", 4, True)
     
     else:
         runner.run()

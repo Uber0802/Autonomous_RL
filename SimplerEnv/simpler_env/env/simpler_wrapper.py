@@ -44,6 +44,9 @@ class SimlerWrapper:
         bins = np.linspace(-1, 1, 256)
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
 
+        # counter
+        self.reset_envs = 0
+
 
     def get_reward(self, info):
         reward = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(info["success"].device)  # [B, 1]
@@ -278,3 +281,10 @@ class SimlerWrapper:
         obs = self.env.unwrapped.get_obs(info)
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         return obs_image
+
+    def reset_unsuitable_envs(self):
+        self.reset_robot()
+        count = self.env.unwrapped.reset_unsuitable_envs()
+        self.reset_envs += count
+        print(f"Total unsuitable envs reset: {self.reset_envs}")
+        return self.get_obs_image()
