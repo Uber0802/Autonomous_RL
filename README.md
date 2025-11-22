@@ -1,5 +1,22 @@
 # Non-Episodic RL
 
+## Table of Contents
+- [Install](#install)
+- [Train](#train)
+  - [Basic Configs](#basic-configs)
+  - [Environment Configs](#environment-configs)
+  - [Training Configs](#training-configs)
+  - [Forward Backward](#forward-backward)
+  - [Reset Unsuitable](#reset-unsuitable)
+  - [FIFO Buffer](#fifo-buffer)
+  - [Example](#example)
+- [Evaluate](#evaluate)
+  - [Single Task](#single-task)
+  - [Sequential Task](#sequential-task)
+  - [Collect Results](#collect-results)
+- [Object List](#object-list)
+- [Plate List](#plate-list)
+
 ## Install
 1. Clone the repository
 2. Move into the repository directory.
