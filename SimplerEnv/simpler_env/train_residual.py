@@ -44,7 +44,7 @@ class Args:
     """Seed the model and environment. Default seed is 0"""
 
     name: str = "PPO-test"
-    log: str = "/workspace/AutoRL/log.txt"
+    log: str = "/home/exprl/Autonomous_RL/log.txt"
 
     # env
     num_envs: int = 64
@@ -56,7 +56,7 @@ class Args:
     steps_vh: int = 0  # episodes
     interval_eval: int = 2
     interval_save: int = 50
-    max_episodes: int = 100
+    max_episodes: int = 1000
     instruction_switch_interval: int = 80
     training_interval: int = 80
     eval_at_start: bool = True
@@ -294,10 +294,13 @@ class Runner:
                     task_description=self.buffer.instruction[s:e],
                 )
                 features = self.policy._preprocess_obs(obs_)
-                hidden = self.policy.vla.get_hidden(**features)
-                hidden = hidden[:,0].to(torch.float32)
-                all_hidden.append(hidden)
-                del features, hidden, obs_
+                hidden_vla = self.policy.vla.get_hidden(**features)              
+                hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
+                img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
+                hidden_vis = self.policy.visual_encoder(img)          
+                hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                all_hidden.append(hidden_aug)
+                del obs_, features, hidden_vla, hidden_vis, hidden_aug
                 torch.cuda.empty_cache()
 
         hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -337,7 +340,7 @@ class Runner:
         print("Evaluating:", instruction[0])
         viz_writers = []
         for i in range(self.args.num_envs):
-            viz_path = f"eval_video/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
+            viz_path = f"eval_video_visual/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
             os.makedirs(os.path.dirname(viz_path), exist_ok=True)
             viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
             viz_writers.append(viz_writer)
@@ -355,10 +358,13 @@ class Runner:
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs_)
-                    hidden = self.policy.vla.get_hidden(**features)
-                    hidden = hidden[:,0].to(torch.float32)
-                    all_hidden.append(hidden)
-                    del features, hidden, obs_
+                    hidden_vla = self.policy.vla.get_hidden(**features)              
+                    hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
+                    img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
+                    hidden_vis = self.policy.visual_encoder(img)          
+                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                    all_hidden.append(hidden_aug)
+                    del obs_, features, hidden_vla, hidden_vis, hidden_aug
                     torch.cuda.empty_cache()
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -439,10 +445,13 @@ class Runner:
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs_)
-                    hidden = self.policy.vla.get_hidden(**features)
-                    hidden = hidden[:,0].to(torch.float32)
-                    all_hidden.append(hidden)
-                    del features, hidden, obs_
+                    hidden_vla = self.policy.vla.get_hidden(**features)              
+                    hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
+                    img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
+                    hidden_vis = self.policy.visual_encoder(img)          
+                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                    all_hidden.append(hidden_aug)
+                    del obs_, features, hidden_vla, hidden_vis, hidden_aug
                     torch.cuda.empty_cache()
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -545,10 +554,13 @@ class Runner:
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs_)
-                    hidden = self.policy.vla.get_hidden(**features)
-                    hidden = hidden[:,0].to(torch.float32)
-                    all_hidden.append(hidden)
-                    del features, hidden, obs_
+                    hidden_vla = self.policy.vla.get_hidden(**features)              
+                    hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
+                    img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
+                    hidden_vis = self.policy.visual_encoder(img)          
+                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                    all_hidden.append(hidden_aug)
+                    del obs_, features, hidden_vla, hidden_vis, hidden_aug
                     torch.cuda.empty_cache()
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -703,10 +715,14 @@ class Runner:
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs)
-                    hidden = self.policy.vla.get_hidden(**features)
-                    hidden = hidden[:,0].to(torch.float32)
-                    all_hidden.append(hidden)
-                    del features, hidden, obs
+                    hidden_vla = self.policy.vla.get_hidden(**features)
+                    hidden_vla = hidden_vla[:, 0].to(torch.float32) 
+                    img = obs["image"].permute(0,3,1,2).to(self.device, dtype=torch.float32)/255.0                                              
+                    hidden_vis = self.policy.visual_encoder(img)       
+                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                    all_hidden.append(hidden_aug)
+
+                    del features, hidden_vla, hidden_vis, hidden_aug, obs
                     torch.cuda.empty_cache()
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -739,10 +755,14 @@ class Runner:
                             task_description=instruction[s:e],
                         )
                         features = self.policy._preprocess_obs(obs)
-                        hidden = self.policy.vla.get_hidden(**features)
-                        hidden = hidden[:,0].to(torch.float32)
-                        all_hidden.append(hidden)
-                        del features, hidden, obs
+                        hidden_vla = self.policy.vla.get_hidden(**features)
+                        hidden_vla = hidden_vla[:, 0].to(torch.float32) 
+                        img = obs["image"].permute(0,3,1,2).to(self.device, dtype=torch.float32)/255.0                                              
+                        hidden_vis = self.policy.visual_encoder(img)       
+                        hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                        all_hidden.append(hidden_aug)
+
+                        del features, hidden_vla, hidden_vis, hidden_aug, obs
                         torch.cuda.empty_cache()
 
                 hidden_tensor = torch.cat(all_hidden, dim=0) 
@@ -817,10 +837,14 @@ class Runner:
                                 task_description=instruction[s:e],
                             )
                             features = self.policy._preprocess_obs(obs)
-                            hidden = self.policy.vla.get_hidden(**features)
-                            hidden = hidden[:,0].to(torch.float32)
-                            all_hidden.append(hidden)
-                            del features, hidden, obs
+                            hidden_vla = self.policy.vla.get_hidden(**features)
+                            hidden_vla = hidden_vla[:, 0].to(torch.float32) 
+                            img = obs["image"].permute(0,3,1,2).to(self.device, dtype=torch.float32)/255.0                                              
+                            hidden_vis = self.policy.visual_encoder(img)       
+                            hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                            all_hidden.append(hidden_aug)
+
+                            del features, hidden_vla, hidden_vis, hidden_aug, obs
                             torch.cuda.empty_cache()
 
                     hidden_tensor = torch.cat(all_hidden, dim=0) 

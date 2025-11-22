@@ -382,7 +382,7 @@ class FIFOReplayBufferRes(SeparatedReplayBuffer):
         self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
 
-        self.hidden = create_memmap('hidden.dat', (self.ep_len + 1, max_num_envs, 4096), np.float32)
+        self.hidden = create_memmap('hidden.dat', (self.ep_len + 1, max_num_envs, 4096 + 512), np.float32)
         self.base_action = create_memmap('base_actions.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
         self.action_untok = create_memmap('action_untok.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
 
