@@ -1,325 +1,169 @@
-# VLA-RL-Study: What Can RL Bring to VLA Generalization? An Empirical Study
-
-[![arXiv](https://img.shields.io/badge/arXiv-2505.19789-red.svg)](http://arxiv.org/abs/2505.19789)
-[![Website](https://img.shields.io/badge/Website-RLVLA-green.svg)](https://rlvla.github.io)
-[![HuggingFace](https://img.shields.io/badge/HuggingFace-models-yellow.svg)](https://huggingface.co/collections/gen-robot/rlvla-684bc48aa6cf28bac37c57a2)
-
-## Introduction
-
-This repository contains the code for the paper [What Can RL Bring to VLA Generalization? An Empirical Study](https://arxiv.org/abs/2505.19789).
-The pretrained checkpoints are available at [HuggingFace](https://huggingface.co/collections/gen-robot/rlvla-684bc48aa6cf28bac37c57a2).
+# Non-Episodic RL
 
 ## Install
-
-### OpenVLA, Maniskill, Training Pipeline
-
-```bash
-# create conda env: rlvla_env
-conda create -n rlvla_env -y python=3.10
-conda activate rlvla_env
-
-# install dependencies
-pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
-cd openvla && pip install -e . && cd ..
-pip install -U tyro
-pip install datasets==3.3.2
-
-# special install for flash attention
-wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-pip install flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-rm flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-
-# install other dependencies
-cd ManiSkill && pip install -e . && cd ..
-cd SimplerEnv && pip install -e . && cd ..
-
-# optional: for ubuntu 2204
-# sudo apt-get install libglvnd-dev
-```
-
-### RLDS Dataset Maker
-
-Used for building VLA warm-up dataset and OpenVLA SFT datasets.
-
-```bash
-# create conda env: rlds_env
-cd openvla/rlds_dataset_builder
-conda env create -f environment_ubuntu.yml
-```
-
-### Octo Inference
-
-Used for collecting data with Octo-Small, when building VLA warm-up dataset.
-
-```bash
-conda create -n octo_env -y python=3.10
-conda activate octo_env
-
-git clone https://github.com/octo-models/octo.git
-
-cd ManiSkill && pip install -e . && cd ..
-
-cd octo && pip install -e . && pip install -r requirements.txt && cd ..
-pip install --upgrade "jax[cuda11_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 "nvidia-cudnn-cu11>=8.7,<9.0" --index-url https://download.pytorch.org/whl/cu118
-pip install -U tyro
-pip install scipy==1.12.0
-
-cd SimplerEnv && pip install -e . && cd ..
-```
+1. Clone the repository
+2. Move into the repository directory.
+    ```bash
+    cd Autonomous_RL
+    ```
+3. Create conda env: nerl_env.
+    ```bash
+    conda create -n nerl_env -y python=3.10
+    conda activate nerl_env
+    ```
+4. Run installation.
+    ```bash
+    chmod +x *.sh
+    ./setup.sh
+    ```
 
 ## Train
-
-### Warm-up OpenVLA
-
-#### Collect Data with Octo-Small
-
-Collect data with Octo-Small to build the warm-up dataset. Average Octo-Small success rate is about 14% on this task.
-
+All experiments are launched through `train.sh`.
+Modify the script as needed, then run:
 ```bash
-conda activate octo_env
-cd SimplerEnv
-cuda=0
-
-# for OpenVLA warm-up (extra 5 trajectories for performance evaluation)
-CUDA_VISIBLE_DEVICES=$cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-python simpler_env/eval_ms3_collect.py \
-  --env_id "PutCarrotOnPlateInScene-v1"\
-  --num-episodes 75 --num-envs 64 --seed 0
-
-# try to increase `num-episodes` if not enough successful trajectories is collected
+./train.sh
 ```
+### Basic Configs
+- `name`: WandB run name.
+- `log`: Path to a `.txt` log file for training output.
+- `vla_load_path`: Path to a pretrained VLA checkpoint. Use this to resume training from saved weights.
+- `seed`: Random seed for reproducibility.
+- `no_wandb`: Disable logging to Weights & Biases.
 
-#### Collect Data with motion planner
+### Environment Configs
+- `obj_set`: 
+    - "fixed": Use identical scene and object layout across all environments.
+    - "rand": Use random scene and object layout across all environments.
+    - "rand_ood": For evaluating OOD.
+- `obj1_index` and `obj2_index`: Choose an object using its index from the [Object List](#object-list). (Default: 7 and 2)
+- `plate1_index` and `plate2_index`: Choose an plate using its index from the [Plate List](#plate-list).(Default: 1 and 2)
 
-Collect data with motion planner to build the warm-up dataset and SFT dataset.
+### Training Configs
+- `max_episodes`: Total number of training episodes.
+- `training_len`: Rollout length (steps per episode). Examples: 80, 320, 1280, 2560.
+- `training_interval`: Number of rollout steps between VLA training updates. (Default: 160)
+- `instruction_switch_interval`: Number of rollout steps before switching to a new instruction. (Default: 80)
+- `interval_eval`: Number of episodes between evaluation.
+- `interval_save`: Number of episodes between saving model weights.
+- `eval_at_start`: Enable evaluation at step 0.
 
+### Forward Backward
+- `enable_backward`: Enable forward backward training.
+- `backward_interval`: Number of forward instructions between backward instruction. (Set to 1 for interleaved switch)
+
+### Reset Unsuitable
+- `reset_unsuitable`: Reset environments that fail to complete the current task after an instruction switch.
+
+### FIFO Buffer
+Online + Offline Training
+- `fifo_buffer`: Enable FIFO replay buffer.
+- `fifo_length`: Maximum number of trajectories the buffer can store.
+
+### Example
+Example for 1280 Forward Backward with Reset Unsuitable.
 ```bash
-conda activate rlvla_env
-cd ManiSkill
-cuda=0
-
-# for OpenVLA warm-up (extra 5 trajectories for performance evaluation)
-CUDA_VISIBLE_DEVICES=$cuda \
-python -m mani_skill.examples.motionplanning.widowx.collect_simpler \
-  -e "PutOnPlateInScene25Single-v1" \
-  --save_video --save_data --num_procs 1 --num_traj 75 --seed=0
-
-# for SFT (extra 16 trajectories for performance evaluation)
-CUDA_VISIBLE_DEVICES=$cuda \
-python -m mani_skill.examples.motionplanning.widowx.collect_simpler \
-  -e "PutOnPlateInScene25Main-v3" \
-  --save_video --save_data --num_procs 16 --num_traj 16400 --seed=100
-```
-
-#### Build VLA Warm-up Dataset
-
-```bash
-conda activate rlds_env
-
-cd openvla/rlds_dataset_builder/warmup_dataset
-tfds build --overwrite
-cd ../../../ # at the root dir of this project
-mkdir -p datasets
-mv -T ~/tensorflow_datasets/example_dataset datasets/warmup
-```
-
-#### Warm-up OpenVLA
-
-```bash
-conda activate rlvla_env
-cd openvla
-
-# 1. Train LoRA
-cuda="0,1,2,3"
-task_name="warmup"
-
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=$cuda \
-torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/finetune.py \
-  --vla_path "openvla/openvla-7b" \
-  --data_root_dir "../datasets" \
-  --dataset_name ${task_name} \
-  --run_root_dir checkpoints/${task_name} \
-  --lora_rank 32 \
-  --batch_size 8 \
-  --max_steps 2000 \
-  --eval_steps 50 \
-  --save_steps "0,500,1000,1500,2000" \
-  --grad_accumulation_steps 1 \
-  --learning_rate 5e-4 \
-  --image_aug True \
-  --unnorm_key="bridge_orig" \
-  --wandb_project "RLVLA_sft"
-
-# for 80G GPU, max batch size is 20
-# for 40G GPU, max batch size is 8
-
-# 2. Merge LoRA
-cuda="0"
-task_name="warmup"
-
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=$cuda \
-torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/merge_lora.py \
-  --vla_path "openvla/openvla-7b" \
-  --run_path "checkpoints/${task_name}/steps_2000" \
-  --lora_name "lora_002000"
-```
-
-### RL
-
-```bash
-conda activate rlvla_env
-cd SimplerEnv
-
-#cuda="0,1" # env on GPU-0, model on GPU-1 (for 40G GPU)
-cuda="0" # env and model on the same GPU (for 80G GPU)
-
-CUDA_VISIBLE_DEVICES=$cuda XLA_PYTHON_CLIENT_PREALLOCATE=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python simpler_env/train_ms3_ppo.py \
-  --name="PPO-pc25m_v3-warmup" \
-  --env_id="PutOnPlateInScene25Main-v3" \
+  --name="bottle_shovel-1280-rand_scene-FB-seed_0" \
+  --log="user/Autonomous_RL/bottle_shovel-1280-rand_scene-FB-seed_0.txt" \
+  --env_id="TwoObjectTwoReceptacle-v1" \
   --vla_path="openvla/openvla-7b" --vla_unnorm_key="bridge_orig" \
-  --vla_load_path="../openvla/checkpoints/warmup/steps_2000/lora_002000" \
-  --seed=0
-```
-
-- GRPO: add `--alg_name="grpo"`
-- GRPO (s): add `--alg_name="grpo"` and `--use_same_init`
-- PPO from scratch: remove `--vla_load_path` arg
-
-### SFT
-
-#### Build OpenVLA SFT Dataset
-
-```bash
-conda activate rlds_env
-
-# ulimit -n 17000 # avoid "too many open files" error
-
-cd openvla/rlds_dataset_builder/sft_dataset
-tfds build --overwrite
-cd ../../../
-mkdir -p datasets
-mv -T ~/tensorflow_datasets/example_dataset datasets/sft
-```
-
-#### SFT Train
-
-```bash
-conda activate rlvla_env
-cd openvla
-
-cuda="0,1,2,3"
-
-task_name="sft"
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=$cuda \
-torchrun --standalone --nnodes 1 --nproc-per-node 4 ../openvla/vla-scripts/finetune.py \
-  --vla_path "../openvla/checkpoints/warmup/steps_2000/merged_002000" \
-  --data_root_dir "../datasets" \
-  --dataset_name ${task_name} \
-  --run_root_dir checkpoints/${task_name} \
-  --lora_rank 32 \
-  --batch_size 8 \
-  --max_steps 60000 \
-  --eval_steps 200 \
-  --save_steps "0,2500,5000,7500,10000,15000,20000,25000,30000,35000,40000,45000,50000,55000,60000" \
-  --grad_accumulation_steps 1 \
-  --learning_rate 5e-4 \
-  --image_aug False \
-  --wandb_project "RLVLA_sft"
+  --training_len=1280 --max_episodes=8 \
+  --interval_eval=1 --interval_save=1 \
+  --enable_backward --backward_interval=1 \
+  --reset_unsuitable \
+  --seed=2 --obj_set="rand"
 ```
 
 ## Evaluate
-
-### Trained from scratch
-
+Modify the `vla_load_paths` in `eval_ood.sh` or `./eval_seq.sh` to point to your model weights.
 ```bash
-conda activate rlvla_env
-cd SimplerEnv
-
-# Warm-up
-ckpt_path="openvla/openvla-7b"
-unnorm_key="bridge_orig"
-vla_load_path="../openvla/checkpoints/warmup/steps_2000/lora_002000"
-
-# RL
-ckpt_path="openvla/openvla-7b"
-unnorm_key="bridge_orig"
-vla_load_path="../SimplerEnv/wandb/run-xxx-xxx/glob/steps_xxx" # replace with the actual path
-
-# SFT
-ckpt_path="../openvla/checkpoints/warmup/steps_2000/merged_002000"
-unnorm_key="sft"
-vla_load_path="../openvla/checkpoints/sft/steps_60000-no_aug/lora_060000"
-
-
-# start evaluation
-for seed in 0 1 2 ; do
-    for env_id in 
-      "PutOnPlateInScene25VisionImage-v1" "PutOnPlateInScene25VisionTexture03-v1" "PutOnPlateInScene25VisionTexture05-v1" \ 
-      "PutOnPlateInScene25VisionWhole03-v1"  "PutOnPlateInScene25VisionWhole05-v1" \ 
-      "PutOnPlateInScene25Carrot-v1" "PutOnPlateInScene25Plate-v1" "PutOnPlateInScene25Instruct-v1" \
-      "PutOnPlateInScene25MultiCarrot-v1" "PutOnPlateInScene25MultiPlate-v1" \ 
-      "PutOnPlateInScene25Position-v1" "PutOnPlateInScene25EEPose-v1" "PutOnPlateInScene25PositionChangeTo-v1" ; \ 
-    do
-    
-      CUDA_VISIBLE_DEVICES=$cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-      python simpler_env/train_ms3_ppo.py \
-        --vla_path="${ckpt_path}" --vla_unnorm_key="${unnorm_key}" \
-        --vla_load_path="${vla_load_path}" \
-        --env_id="${env_id}" \
-        --seed=${seed} \
-        --buffer_inferbatch=64 \
-        --no_wandb --only_render
-    done
-done
-
-# for 40G GPU, set `--buffer_inferbatch=16` to avoid OOM
+vla_load_paths=(
+/path/to/your/first/model/weights
+/path/to/your/second/model/weights
+...
+)
 ```
 
-### Pre-trained checkpoints
-
-The pretrained checkpoints (warm-upped, RL and SFT) are available at [HuggingFace](https://huggingface.co/collections/gen-robot/rlvla-684bc48aa6cf28bac37c57a2).
-Follow the evaluation scripts in the above section, and replace the environment variable with the pretrained checkpoint path.
-
+### Single Task
+Set the `seed` and `obj_set` in `eval_ood.sh`.
+Then run:
 ```bash
-# Warm-up (pretrained)
-ckpt_path="gen-robot/openvla-7b-rlvla-warmup"
-unnorm_key="bridge_orig"
-vla_load_path=""
-
-# RL (pretrained)
-ckpt_path="gen-robot/openvla-7b-rlvla-rl"
-unnorm_key="bridge_orig"
-vla_load_path=""
-
-# SFT (pretrained)
-ckpt_path="gen-robot/openvla-7b-rlvla-sft_16k"
-unnorm_key="sft"
-vla_load_path=""
+./eval_ood.sh
 ```
 
+### Sequential Task
+Set the `seed` and `obj_set` in `eval_seq.sh`.
+Then run:
+```bash
+./eval_seq.sh
+```
 
-### Gather results
+### Collect Rsults
+Collect success rates from evaluations.
+1. Modify the `paths` in `collect_success_rates.sh` to point to your evaluation runs.
+    ```bash
+    paths=(
+    /path/to/wandb/offline-run-1
+    /path/to/wandb/offline-run-2
+    ...
+    )
+    ```
+2. Modify the `output_file` in `collect_success_rates.sh` to point to summary output file.
+    ```bash
+    output_file="success_summary.txt"
+    ```
+3. Run:
+    ```bash
+    ./collect_success_rates.sh
+    ```
 
-1. Option 1: Manually check the results and visualization videos: at `SimplerEnv/wandb/offline-run-xxx-xxx/glob/`
-2. Option 2: Calculate statistics: at `SimplerEnv/scripts` run `python calc_statistics.py`, then check the results at `SimplerEnv/scripts/stats`
+## Object List
+| Index | Object Name       |
+|-------|-------------------|
+| 1     | carrot            |
+| 2     | kitchen shovel    |
+| 3     | bread             |
+| 4     | plastic bottle    |
+| 5     | 7up can           |
+| 6     | zuchinni          |
+| 7     | ketchup bottle    |
+| 8     | watering can      |
+| 9     | pipe              |
+| 10    | toy bear          |
+| 11    | fast food cup     |
+| 12    | plant             |
+| 13    | banana            |
+| 14    | hamburger         |
+| 15    | golf ball         |
+| 16    | BBQ sauce         |
+| 17    | travel cup        |
+| 18    | pepper            |
+| 19    | nonstop can       |
+| 20    | potato            |
+| 21    | baguette          |
+| 22    | champagne glass   |
+| 23    | kitchen spoon     |
+| 24    | onion             |
+| 25    | cup               |
 
-Task definition:
-
-1. `PutOnPlateInScene25VisionImage-v1`-`test`: unseen table
-2. `PutOnPlateInScene25VisionTexture03-v1`-`test`: dynamic texture (weak)
-3. `PutOnPlateInScene25VisionTexture05-v1`-`test`: dynamic texture (strong)
-4. `PutOnPlateInScene25VisionWhole03-v1`-`test`: dynamic noise (weak)
-5. `PutOnPlateInScene25VisionWhole05-v1`-`test`: dynamic noise (strong)
-6. `PutOnPlateInScene25Carrot-v1`-`train`: similar to training setting
-7. `PutOnPlateInScene25Carrot-v1`-`test`: unseen objects
-8. `PutOnPlateInScene25Plate-v1`-`test`: unseen receptacles
-9. `PutOnPlateInScene25Instruct-v1`-`test`: unseen instructions
-10. `PutOnPlateInScene25MultiCarrot-v1`-`train`: multi-object (both seen)
-11. `PutOnPlateInScene25MultiCarrot-v1`-`test`: multi-object (both unseen)
-12. `PutOnPlateInScene25MultiPlate-v1`-`train`: distractive receptacle
-13. `PutOnPlateInScene25MultiPlate-v1`-`test`: multi-receptacle (both unseen)
-14. `PutOnPlateInScene25Position-v1`-`test`: unseen position (object & receptacle)
-15. `PutOnPlateInScene25EEPose-v1`-`test`: unseen robot init pose
-16. `PutOnPlateInScene25PositionChangeTo-v1`-`test`: mid-episode object reposition
+## Plate List
+| Index | Plate Name       |
+|-------|-------------------|
+| 1     | yellow_plate      |
+| 2     | cloth             |
+| 3     | carpet            |
+| 4     | newspaper         |
+| 5     | sheet metal       |
+| 6     | drawing tablet    |
+| 7     | tomato slice      |
+| 8     | pizza             |
+| 9     | flat bowl         |
+| 10    | gramophone disk   |
+| 11    | frying pan        |
+| 12    | mouse pad         |
+| 13    | cutting board     |
+| 14    | chess board       |
+| 15    | manhole cover     |
+| 16    | envelope          |
+| 17    | notepad           |
+| 18    | black_plate       |

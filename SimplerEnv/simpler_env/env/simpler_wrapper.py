@@ -46,6 +46,7 @@ class SimlerWrapper:
 
         # counter
         self.reset_envs = 0
+        self.unsuitable_envs = 0
 
 
     def get_reward(self, info):
@@ -288,3 +289,22 @@ class SimlerWrapper:
         self.reset_envs += count
         print(f"Total unsuitable envs reset: {self.reset_envs}")
         return self.get_obs_image()
+
+    def get_unsuitable_envs(self):
+        # Extract z-values
+        obj_pos = self.env.unwrapped.get_obj_pos()
+        recep_pos = self.env.unwrapped.get_recep_pos()
+        obj_z = obj_pos[:, 2]
+        recep_z = recep_pos[:, 2]
+
+        # Find indices where either z is less than 0.7
+        low_z_mask = (obj_z < 0.7) | (recep_z < 0.7)
+        env_indices = torch.nonzero(low_z_mask, as_tuple=False).squeeze()
+
+        # Ensure result is a list of ints
+        if env_indices.ndim == 0:
+            env_indices_list = [env_indices.item()]
+        else:
+            env_indices_list = env_indices.tolist()
+        self.unsuitable_envs += len(env_indices_list)
+        return env_indices_list

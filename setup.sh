@@ -17,4 +17,5 @@ cd ManiSkill && pip install -e . && cd ..
 cd SimplerEnv && pip install -e . && cd ..
 
 # optional: for ubuntu 2204
+apt-get update
 apt-get install libglvnd-dev

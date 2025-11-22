@@ -452,7 +452,7 @@ class BasePickPlace(BaseEnv):
 
         self._settle(0.5)
         print(f"Reset Unsuitable. Obj: {obj_low_z_list}, Recep: {recep_low_z_list}")
-        reset_env_count = len(obj_low_z_list) + len(recep_low_z_list)
+        reset_env_count = len(set(obj_low_z_list) | set(recep_low_z_list))
         return reset_env_count
 
     def get_language_instruction(self):
@@ -715,11 +715,11 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "train")
-        if obj_set == "train":
+        obj_set = options.get("obj_set", "fixed")
+        if obj_set == "fixed":
             lc = 16
             lc_offset = 0
-        elif obj_set == "test":
+        elif obj_set == "rand":
             lc = 9
             lc_offset = 16
         elif obj_set == "all":
@@ -1055,13 +1055,13 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "train")
-        if obj_set == "train":
+        obj_set = options.get("obj_set", "rand")
+        if obj_set == "fixed":
             lp = 1
             lp_offset = 0
             le = 16
             le_mod = 17
-        elif obj_set == "test":
+        elif obj_set == "rand":
             lp = 1
             lp_offset = 0
             le = 16
@@ -1099,7 +1099,7 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
-        if obj_set == "test":
+        if obj_set == "fixed":
             rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1
@@ -1470,28 +1470,25 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "train")
-        if obj_set == "train":
+        obj_set = options.get("obj_set", "rand")
+        if obj_set == "fixed":
             lp = 1
             lp_offset = 0
             le = 16
             le_mod = 17
-        elif obj_set == "test":
+            self._generate_init_pose()
+        elif obj_set == "rand":
             lp = 1
             lp_offset = 0
             le = 16
             le_mod = 17
-        elif obj_set == "test_ood":
+            self._generate_init_pose()
+        elif obj_set == "rand_ood":
             lp = 1
             lp_offset = 0
             le = 16
             le_mod = 17
             self._generate_OOD_init_pose()
-        elif obj_set == "all":
-            lp = 17
-            lp_offset = 0
-            le = 16
-            le_mod = 17
         else:
             raise ValueError(f"Unknown obj_set: {obj_set}")
 
@@ -1510,20 +1507,20 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        self.select_carrot1_ids = episode_id // (lp * le * lo * l1 * l2) + 6 # [b]
-        self.select_carrot2_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
-        self.select_carrot2_ids = (self.select_carrot1_ids + self.select_carrot2_ids -5) % lc + lp_offset  # [b]
+        obj1_index = options.get("obj1_index", 7) - 1
+        obj2_index = options.get("obj2_index", 2) - 1
+        self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
+        self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
 
-        self.select_plate1_ids = (episode_id // (le * lo * l1 * l2)) % lp
-        self.select_plate2_ids = (episode_id // (lo * l1 * l2)) % le
-        self.select_plate2_ids = (self.select_plate1_ids + self.select_plate2_ids + 1) % le_mod
-        self.select_plate1_ids += lp_offset
-        self.select_plate2_ids += lp_offset
+        plate1_index = options.get("plate1_index", 1) - 1
+        plate2_index = options.get("plate2_index", 2) - 1
+        self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
+        self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
 
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
-        if obj_set != "train":
+        if obj_set != "fixed":
             rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1
