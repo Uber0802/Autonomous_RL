@@ -206,7 +206,7 @@ class ResSeparatedReplayBuffer(object):
         self.masks = np.ones((self.ep_len + 1, self.num_env, 1), dtype=np.float32)
 
         self.advantages = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
-        self.hidden = np.zeros((self.ep_len + 1, self.num_env, 4096), dtype=np.float32)
+        self.hidden = np.zeros((self.ep_len + 1, self.num_env, 4096 + 512), dtype=np.float32)
         self.base_action = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.float32)
         self.action_untok = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.float32)
 

@@ -27,6 +27,32 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class VisualEncoder(nn.Module):
+    def __init__(self, out_dim=512):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=7, stride=2, padding=3),
+            nn.ReLU(),
+            nn.MaxPool2d(3, stride=2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+
+        self.fc = nn.Linear(128, out_dim)
+
+    def forward(self, img):
+        x = self.cnn(img)
+        x = x.flatten(1)
+        x = self.fc(x)
+        return x
+
+
 class ResidualPolicyNet(nn.Module):
     def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
         super().__init__()
@@ -148,19 +174,17 @@ class OpenVLAPolicy:
         self.action_low = torch.tensor(self.unnorm_state["q01"], device=self.tpdv["device"]).unsqueeze(0)
         self.action_high = torch.tensor(self.unnorm_state["q99"], device=self.tpdv["device"]).unsqueeze(0)
         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer)
-        self.residual_policy = ResidualPolicyNet(384, 4096, 7, self.action_high, self.action_low).to(self.tpdv["device"])
+        self.residual_policy = ResidualPolicyNet(384, 4096 + 512, 7, self.action_high, self.action_low).to(self.tpdv["device"])
         self.value_head_res = nn.Sequential(
-            nn.Linear(384+ 4096 + 7, 1024),
+            nn.Linear(384 + 4096 + 512 + 7, 1024),
             nn.ReLU(),
             nn.Linear(1024, 1)
         ).to(self.tpdv["device"])
 
         self.text_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
         self.text_encoder = AutoModel.from_pretrained(
             "sentence-transformers/all-MiniLM-L6-v2"
         ).to(self.tpdv["device"])
-
         lora_cfg = LoraConfig(
             r=8,
             lora_alpha=32,
@@ -170,8 +194,11 @@ class OpenVLAPolicy:
         )
         self.text_encoder = get_peft_model(self.text_encoder, lora_cfg)
 
+        self.visual_encoder = VisualEncoder(out_dim=512).to(self.tpdv["device"])
 
-        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()), lr=7e-5)
+
+
+        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()) + list(self.visual_encoder.parameters()), lr=7e-5)
 
         
 
