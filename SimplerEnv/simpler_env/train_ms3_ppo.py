@@ -57,6 +57,7 @@ class Args:
     instruction_switch_interval: int = 80
     training_interval: int = 160
     max_episodes: int = 32
+    max_reset: int = 8192
 
     # evaluaiton
     interval_eval: int = 4
@@ -182,6 +183,11 @@ class Runner:
         # Task Switch
         self.task_id = 0
         self.task_list = self.env.get_task_pool()[0]
+
+        # Reset Counter
+        self.exceed_reset_limit = False
+        self.hard_reset_count = 0   # Fixed reset at the start of each episode
+        self.soft_reset_count = 0   # Reset unsuitable envs
 
     def extract_obj_recep(self, text_string):
         pattern = r"put (.*?) on (.*)"
@@ -521,7 +527,6 @@ class Runner:
             ep_time = time.time()
             self.prealloc_buffer.reset()
 
-
             objects, receptacles = [], []
             for i in range(4):
                 obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
@@ -534,6 +539,8 @@ class Runner:
                 object=objects,
                 receptacle=receptacles
             )
+            self.hard_reset_count += self.args.num_envs
+            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count}")
 
             task_id_map = []
             for i in range(4):
@@ -598,20 +605,31 @@ class Runner:
                         
                     instruction = self.env.get_language_instruction()
                     print(step_idx, "switch instruction to ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
-                    print("Unsuitable Envs: ", self.env.get_unsuitable_envs())
-                    print("Total Unsuitable Envs: ", self.env.unsuitable_envs)
                     if self.args.reset_unsuitable:
                         obs_img = self.env.reset_unsuitable_envs()
+                        self.soft_reset_count = self.env.reset_unsuitable_envs_count
+                        print(f"Total unsuitable envs reset: {self.soft_reset_count}")
+                        print(f"Total reset: {self.hard_reset_count + self.soft_reset_count}")
                     if self.args.reset_robot:
                         obs_img = self.env.reset_robot()
+                    # Check if exceed total resets
+                    if self.hard_reset_count + self.soft_reset_count > self.args.max_reset:
+                        self.exceed_reset_limit = True
+                        break
+                    print("Rollouts in Unsuitable Envs: ", self.env.get_unsuitable_envs())
+                    print("Total Rollouts in Unsuitable Envs: ", self.env.unsuitable_envs)
                     self.buffer.warmup(obs_img.cpu().numpy(), instruction)
                     self.buffer.update_instruction(instruction)
 
             # steps
             steps = (episode + 1) * self.args.training_len * self.args.num_envs
+            # Check if exceed total resets
+            if self.hard_reset_count + self.soft_reset_count > self.args.max_reset - self.args.num_envs:
+                self.exceed_reset_limit = True
+                break
            
             # eval
-            if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
+            if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1 or self.exceed_reset_limit:
                 print(f"Evaluating Random Scene at {steps}")
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
@@ -626,7 +644,7 @@ class Runner:
                     wandb.log(sval_stats, step=steps)
 
             # save
-            if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:
+            if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1 or self.exceed_reset_limit:
                 print(f"Saving model at {steps}")
                 save_path = self.glob_dir / f"steps_{episode:0>4d}"
                 self.policy.save(save_path)
@@ -635,7 +653,9 @@ class Runner:
                     object, receptacle = self.extract_obj_recep(task)
                     self.render(episode, self.args.obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
 
-
+            if self.exceed_reset_limit:
+                print(f"Total reset: {self.hard_reset_count + self.soft_reset_count} exceed reset limit: {self.args.max_reset}")
+                break
 
 def main():
     args = tyro.cli(Args)

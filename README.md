@@ -14,6 +14,7 @@
   - [Single Task](#single-task)
   - [Sequential Task](#sequential-task)
   - [Collect Results](#collect-results)
+- [Code Structure](#code-structure)
 - [Object List](#object-list)
 - [Plate List](#plate-list)
 
@@ -32,6 +33,11 @@
     ```bash
     chmod +x *.sh
     ./setup.sh
+    ```
+5. Optional: For ubuntu 2204
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y libglvnd-dev
     ```
 
 ## Train
@@ -57,6 +63,7 @@ Modify the script as needed, then run:
 
 ### Training Configs
 - `max_episodes`: Total number of training episodes.
+- `max_reset`: Total number of resets. (Default: 8192 = 128 episodes * 64 environments, 655360 steps for training_len=80)
 - `training_len`: Rollout length (steps per episode). Examples: 80, 320, 1280, 2560.
 - `training_interval`: Number of rollout steps between VLA training updates. (Default: 160)
 - `instruction_switch_interval`: Number of rollout steps before switching to a new instruction. (Default: 80)
@@ -80,8 +87,8 @@ Online + Offline Training
 Example for 1280 Forward Backward with Reset Unsuitable.
 ```bash
 python simpler_env/train_ms3_ppo.py \
-  --name="bottle_shovel-1280-rand_scene-FB-seed_0" \
-  --log="user/Autonomous_RL/bottle_shovel-1280-rand_scene-FB-seed_0.txt" \
+  --name="bottle_shovel-1280-rand_scene-FB-seed_2" \
+  --log="user/Autonomous_RL/bottle_shovel-1280-rand_scene-FB-seed_2.txt" \
   --env_id="TwoObjectTwoReceptacle-v1" \
   --vla_path="openvla/openvla-7b" --vla_unnorm_key="bridge_orig" \
   --training_len=1280 --max_episodes=8 \
@@ -134,7 +141,20 @@ Collect success rates from evaluations.
     ./collect_success_rates.sh
     ```
 
+## Code Structure
+### Autonomous_RL/ManiSkill/mani_skill/envs/tasks/digital_twins/
+- bridge_dataset_eval/pick_place_multi.py: All environment implemented here.
+
+### Autonomous_RL/SimplerEnv/simpler_env/
+- train_ms3_ppo.py: All training and evaluation code.
+- env/simpler_wrapper.py: Agent interact with the environment through here. 
+- policies/openvla/openvla_train.py: PPO training algorithm.
+- utils/replay_buffer.py: Replay buffer.
+
+
 ## Object List
+Bridge dataset: carrot, plastic bottle, 7up can, kitchen spoon, cup
+
 | Index | Object Name       |
 |-------|-------------------|
 | 1     | carrot            |
@@ -164,6 +184,8 @@ Collect success rates from evaluations.
 | 25    | cup               |
 
 ## Plate List
+Bridge dataset: yellow_plate, cloth
+
 | Index | Plate Name       |
 |-------|-------------------|
 | 1     | yellow_plate      |

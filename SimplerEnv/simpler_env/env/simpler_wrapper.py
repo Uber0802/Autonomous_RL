@@ -45,7 +45,7 @@ class SimlerWrapper:
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
 
         # counter
-        self.reset_envs = 0
+        self.reset_unsuitable_envs_count = 0
         self.unsuitable_envs = 0
 
 
@@ -147,7 +147,6 @@ class SimlerWrapper:
         instruction = self.get_language_instruction()
 
         self.reward_old = torch.zeros(self.num_envs, 1, dtype=torch.float32).to(obs_image.device)  # [B, 1]
-
         return obs_image, instruction, info
 
     def step(self, raw_action):
@@ -286,8 +285,7 @@ class SimlerWrapper:
     def reset_unsuitable_envs(self):
         self.reset_robot()
         count = self.env.unwrapped.reset_unsuitable_envs()
-        self.reset_envs += count
-        print(f"Total unsuitable envs reset: {self.reset_envs}")
+        self.reset_unsuitable_envs_count += count
         return self.get_obs_image()
 
     def get_unsuitable_envs(self):
