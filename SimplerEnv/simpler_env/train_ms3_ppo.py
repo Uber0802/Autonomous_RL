@@ -656,7 +656,7 @@ class Runner:
                 print(f"Total reset: {self.hard_reset_count + self.soft_reset_count} exceed reset limit: {self.args.max_reset}")
                 break
                 
-            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count}
+            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count})
 
 def main():
     args = tyro.cli(Args)
