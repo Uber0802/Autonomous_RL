@@ -626,7 +626,6 @@ class Runner:
             # Check if exceed total resets
             if self.hard_reset_count + self.soft_reset_count > self.args.max_reset - self.args.num_envs:
                 self.exceed_reset_limit = True
-                break
            
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1 or self.exceed_reset_limit:
@@ -656,6 +655,8 @@ class Runner:
             if self.exceed_reset_limit:
                 print(f"Total reset: {self.hard_reset_count + self.soft_reset_count} exceed reset limit: {self.args.max_reset}")
                 break
+                
+            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count}
 
 def main():
     args = tyro.cli(Args)
