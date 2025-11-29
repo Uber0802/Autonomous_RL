@@ -20,7 +20,8 @@ from mani_skill.utils import visualization
 from mani_skill.utils.visualization.misc import images_to_video
 
 from simpler_env.env.simpler_wrapper import SimlerWrapper
-from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer, FIFOReplayBuffer, FIFOReplayBufferRes
+from simpler_env.utils.replay_buffer import SeparatedReplayBuffer, PreallocReplayBuffer, FIFOReplayBuffer, FIFOReplayBufferRes, ResSeparatedReplayBuffer
+
 import copy
 
 from prismatic.vla.action_tokenizer import ActionTokenizer
@@ -44,7 +45,7 @@ class Args:
     """Seed the model and environment. Default seed is 0"""
 
     name: str = "PPO-test"
-    log: str = "/home/exprl/Autonomous_RL/log.txt"
+    log: str = "/mnt/home/uber/Autonomous_RL/log.txt"
 
     # env
     num_envs: int = 64
@@ -54,7 +55,7 @@ class Args:
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 2
+    interval_eval: int = 4
     interval_save: int = 50
     max_episodes: int = 1000
     instruction_switch_interval: int = 80
@@ -146,19 +147,12 @@ class Runner:
         #    obs_dim=(480, 640, 3),
         #    act_dim=7,
         #)
-        self.prealloc_buffer = FIFOReplayBufferRes(
+        self.first_buffer = None
+        self.second_buffer = None
+        self.buffer = ResSeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
             act_dim=7,
-            max_num_envs=64*2,
-            cur_num_envs=0,
-        )
-        self.buffer = FIFOReplayBufferRes(
-            all_args,
-            obs_dim=(480, 640, 3),
-            act_dim=7,
-            max_num_envs=64,
-            cur_num_envs=64
         )
         minibatch_count = self.buffer.get_minibatch_count()
         print(f"Buffer minibatch count: {minibatch_count}")
@@ -209,27 +203,15 @@ class Runner:
                 base_actions.append(a_base)
 
                 mu, std = self.policy.residual_policy(instr_emb, hidden_tensor[env_idx].unsqueeze(0), a_base)
-                # dist = torch.distributions.Normal(mu, std)
+                dist = torch.distributions.Normal(mu, std)
                 B = 1
-                # delta_a = dist.sample((B,))
+                delta_a = dist.mean.expand(B, *dist.mean.shape) if deterministic else dist.sample((B,))
+
                 # a_candidates = a_base + delta_a
-                # a_candidates = torch.clamp(a_candidates, min=self.action_low, max=self.action_high)
-
-                dist_cont = torch.distributions.Normal(mu, std)
-                if not deterministic:
-                    delta_a_cont = dist_cont.sample((B,)).squeeze(1)
-                    a_candidates = torch.cat([a_base[..., :-1] + delta_a_cont, a_base[..., -1].unsqueeze(0)], dim=-1)  
-                else:
-                    delta_a = dist_cont.mean.expand(B, *dist_cont.mean.shape)
-                    # a_candidates = a_base + delta_a
-                    base_last = a_base[:, 6:].expand(delta_a.shape[0], -1)  
-                    a_candidates = torch.cat([a_base[:, :6] + delta_a.squeeze(0), base_last], dim=1)
-
-
-                # dist_disc = torch.distributions.Bernoulli(logits=logit)
-                # a_disc = dist_disc.sample((B,)).squeeze(1)
-  
-                a_candidates = torch.clamp(a_candidates, min=self.action_low, max=self.action_high)            
+                base_last = a_base[:, 6:].expand(delta_a.shape[0], -1)  
+                a_candidates = torch.cat([a_base[:, :6] + delta_a, base_last], dim=1)
+                a_candidates = torch.clamp(a_candidates, min=self.action_low, max=self.action_high)
+                
 
                 normalized_actions = 2 * (a_candidates - self.action_low) / (self.action_high - self.action_low) - 1.0
                 token_id_np = encode_actions_from_norm_openvla(normalized_actions, self.action_tokenizer) 
@@ -250,8 +232,9 @@ class Runner:
         actions_untok = torch.cat(actions_untok, dim=0).to(device=self.device)
         base_actions = torch.cat(base_actions, dim=0).to(device=self.device)
 
-
         return values, final_actions, logprobs, base_actions, actions_untok
+
+    
 
     def collect(self, hidden_tensor):
         self.policy.prep_rollout()
@@ -259,9 +242,10 @@ class Runner:
         obs_image = self.buffer.obs[self.buffer.step]
         obs_image = torch.tensor(obs_image).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
-        value, action, logprob, base_actions, actions_untok = self._get_action(obs, hidden_tensor)
+        value, action, logprob, base_action, action_untok = self._get_action(obs, hidden_tensor)
 
-        return value, action, logprob, base_actions, actions_untok
+        return value, action, logprob, base_action, action_untok
+
 
     def insert(self, data):
         obs_img, actions, logprob, value_preds, rewards, done, hidden_tensor, base_action, action_untok = data
@@ -278,54 +262,69 @@ class Runner:
         action_untok = action_untok.cpu().numpy()
 
         self.buffer.insert(obs_img, actions, logprob, value_preds, rewards, masks, hidden, base_action, action_untok)
-
+    
     def compute_endup(self):
         self.policy.prep_rollout()
 
         obs_image = torch.tensor(self.buffer.obs[-1]).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
-        all_hidden = []
-        batch_size = 1
-        with torch.inference_mode():
-            for s in range(0, self.args.num_envs, batch_size):
-                e = min(s + batch_size, self.args.num_envs)
-                obs_ = dict(
-                    image=obs_image[s:e].to(self.device),
-                    task_description=self.buffer.instruction[s:e],
-                )
-                features = self.policy._preprocess_obs(obs_)
-                hidden_vla = self.policy.vla.get_hidden(**features)              
-                hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
-                img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
-                hidden_vis = self.policy.visual_encoder(img)          
-                hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
-                all_hidden.append(hidden_aug)
-                del obs_, features, hidden_vla, hidden_vis, hidden_aug
-                torch.cuda.empty_cache()
-
-        hidden_tensor = torch.cat(all_hidden, dim=0) 
         with torch.no_grad():
+            all_hidden = []
+            batch_size = 1
+            with torch.inference_mode():
+                for s in range(0, self.args.num_envs, batch_size):
+                    e = min(s + batch_size, self.args.num_envs)
+                    obs_ = dict(
+                        image=torch.tensor(obs_image[s:e]).to(self.device),
+                        task_description=self.buffer.instruction[s:e],
+                    )
+                    features = self.policy._preprocess_obs(obs_)
+                    hidden_vla = self.policy.vla.get_hidden(**features)              
+                    hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
+                    img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
+                    hidden_vis = self.policy.visual_encoder(img)          
+                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
+                    all_hidden.append(hidden_aug)
+                    del obs_, features, hidden_vla, hidden_vis, hidden_aug
+                    torch.cuda.empty_cache()
+
+            hidden_tensor = torch.cat(all_hidden, dim=0) 
             next_value, _, _, _, _ = self._get_action(obs, hidden_tensor)
         next_value = next_value.to(torch.float32).cpu().numpy()
 
         self.buffer.endup(next_value)
 
-    def train(self):
-        self.policy.prep_training()
-        info = None
-        train_info = None
+    def train(self, episode):
+        # self.policy.prep_training()
 
         if self.args.alg_name == "ppo":
-            train_info = self.alg.train_res_ppo(self.prealloc_buffer)
-
+            print("train residual !!!!")
+            tmp_buffer = copy.deepcopy(self.buffer)
+            if self.first_buffer == None:
+                self.first_buffer = copy.deepcopy(self.buffer)
+            else:
+                self.buffer.cat_buffer(self.first_buffer)
+                self.first_buffer = tmp_buffer
+            # train_info = self.alg.train_res_ppo(self.buffer)
+            if episode <= 20:
+                train_info = self.alg.train_res_ppo(self.buffer, 7e-5)
+            elif episode <= 50:
+                train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
+            else:
+                train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
+            self.buffer = ResSeparatedReplayBuffer(
+                self.args,
+                obs_dim=(480, 640, 3),
+                act_dim=7,
+            )
         elif self.args.alg_name == "grpo":
             train_info = self.alg.train_grpo(self.buffer)
         else:
             raise ValueError(f"Unknown alg_name: {self.args.alg_name}")
-        if train_info:
-            info = {f"train/{k}": v for k, v in train_info.items()}
-            info["buffer/reward_mean"] = np.mean(self.buffer.rewards)
-            info["buffer/mask_mean"] = np.mean(1.0 - self.buffer.masks)
+
+        info = {f"train/{k}": v for k, v in train_info.items()}
+        info["buffer/reward_mean"] = np.mean(self.buffer.rewards)
+        info["buffer/mask_mean"] = np.mean(1.0 - self.buffer.masks)
 
         return info
 
@@ -338,13 +337,13 @@ class Runner:
 
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
-        viz_writers = []
-        for i in range(self.args.num_envs):
-            viz_path = f"eval_video_visual/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
-            os.makedirs(os.path.dirname(viz_path), exist_ok=True)
-            viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
-            viz_writers.append(viz_writer)
-            viz_writers[i].append_data(obs_img[i].cpu().numpy())
+        # viz_writers = []
+        # for i in range(self.args.num_envs):
+        #     viz_path = f"eval_video_160/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
+        #     os.makedirs(os.path.dirname(viz_path), exist_ok=True)
+        #     viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
+        #     viz_writers.append(viz_writer)
+        #     viz_writers[i].append_data(obs_img[i].cpu().numpy())
 
         for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
@@ -354,7 +353,7 @@ class Runner:
                 for s in range(0, self.args.num_envs, batch_size):
                     e = min(s + batch_size, self.args.num_envs)
                     obs_ = dict(
-                        image=obs_img[s:e].to(self.device),
+                        image=torch.tensor(obs_img[s:e]).to(self.device),
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs_)
@@ -372,150 +371,25 @@ class Runner:
 
             obs_img, reward, done, env_info = self.env.step(action)
 
-            # info
-            # print({k: round(v.to(torch.float32).mean().tolist(), 4) for k, v in env_info.items() if k != "episode"})
             if "episode" in env_info.keys():
                 for k, v in env_info["episode"].items():
                     env_infos[f"{k}"] += v
 
-            for i in range(self.args.num_envs):
-                viz_writers[i].append_data(obs_img[i].cpu().numpy())
+        #     for i in range(self.args.num_envs):
+        #         viz_writers[i].append_data(obs_img[i].cpu().numpy())
 
-        for i in range(self.args.num_envs):
-            viz_writers[i].close()
+        # for i in range(self.args.num_envs):
+        #     viz_writers[i].close()
 
         # infos
-        # env_stats = {k: np.mean(v) for k, v in env_infos.items()}
-        # env_stats = env_stats.copy()
-
-        # print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
-        # print(f"")
-        unique_instructions = sorted(list(set(instruction)))
-        per_instr_stats = {}
-
-        for instr in unique_instructions:
-            idxs = [i for i, ins in enumerate(instruction) if ins == instr]
-            instr_stats = {}
-            for k, v in env_infos.items():
-                values = [v[i] for i in idxs if i < len(v)]
-                if len(values) > 0:
-                    instr_stats[k] = float(np.mean(values))
-            per_instr_stats[instr] = instr_stats
-
-
-        print("=== Per-instruction stats ===")
-        print(pprint.pformat({
-            instr: {k: round(v, 4) for k, v in stats.items()}
-            for instr, stats in per_instr_stats.items()
-        }))
-
-        overall_stats = {k: np.mean(v) for k, v in env_infos.items()}
-
-        print("\n=== Overall mean (for reference) ===")
-        print(pprint.pformat({k: round(v, 4) for k, v in overall_stats.items()}))
-
-        return per_instr_stats
-
-    @torch.no_grad()
-    def eval_video(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str]) -> dict:
-        self.policy.prep_rollout()
-
-        env_infos = defaultdict(lambda: [])
-        obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object,receptacle=receptacle)
-
-        data = {
-            "image": [],
-            "instruction": "",
-            "action": [],
-            "info": [],
-        }
-
-        print("Evaluating:", instruction[0])
-        data["instruction"] = instruction[0]
-
-        for _ in range(self.args.episode_len):
-            obs = dict(image=obs_img, task_description=instruction)
-            all_hidden = []
-            batch_size = 1
-            with torch.inference_mode():
-                for s in range(0, self.args.num_envs, batch_size):
-                    e = min(s + batch_size, self.args.num_envs)
-                    obs_ = dict(
-                        image=obs_img[s:e].to(self.device),
-                        task_description=instruction[s:e],
-                    )
-                    features = self.policy._preprocess_obs(obs_)
-                    hidden_vla = self.policy.vla.get_hidden(**features)              
-                    hidden_vla = hidden_vla[:, 0].to(torch.float32)                 
-                    img = obs_["image"].permute(0, 3, 1, 2).to(self.device, dtype=torch.float32) / 255.0                                                      
-                    hidden_vis = self.policy.visual_encoder(img)          
-                    hidden_aug = torch.cat([hidden_vla, hidden_vis], dim=-1) 
-                    all_hidden.append(hidden_aug)
-                    del obs_, features, hidden_vla, hidden_vis, hidden_aug
-                    torch.cuda.empty_cache()
-
-            hidden_tensor = torch.cat(all_hidden, dim=0) 
-            value, action, logprob, _, _ = self._get_action(obs, hidden_tensor, deterministic=True)
-
-            obs_img_new, reward, done, env_info = self.env.step(action)
-
-            if "episode" in env_info.keys():
-                for k, v in env_info["episode"].items():
-                    value = v[0]
-                    if isinstance(value, bool):
-                        env_infos[k].append(value)
-                    else:
-                        env_infos[k].append(value.item())
-
-
-            post_action = self.env._process_action(action)
-            log_image = obs_img[0].cpu().numpy()
-            log_action = post_action[0].cpu().numpy().tolist()
-            log_info = {k: v[0].tolist() for k, v in env_info.items() if k != "episode"}
-
-            data["image"].append(log_image)
-            data["action"].append(log_action)
-            data["info"].append(log_info)
-
-            obs_img = obs_img_new
-
-        data["image"].append(obs_img[0].cpu().numpy())
-
-        exp_dir = Path(self.glob_dir) / f"eval_{epoch}_{obj_set}_{instruction[0]}"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.args.render_info:
-            for j in range(len(data["info"])):
-                data["image"][j + 1] = visualization.put_info_on_image(
-                    data["image"][j + 1],
-                    data["info"][j],
-                    extras=[f"Ins: {data['instruction']}"]
-                )
-
-        success = int(data["info"][-1]["success"])
-        images_to_video(
-            data["image"],
-            str(exp_dir),
-            f"video_{object[0]}_{receptacle[0]}-s_{success}",
-            fps=10,
-            verbose=False
-        )
-
         env_stats = {k: np.mean(v) for k, v in env_infos.items()}
-        env_stats_ret = env_stats.copy()
+        env_stats = env_stats.copy()
 
+        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
+        print(f"")
+        
 
-        save_stats = {
-            "env_name": self.args.env_id,
-            "ep_len": self.args.episode_len,
-            "epoch": epoch,
-            "stats": {k: float(v) for k, v in env_stats.items()},
-            "instruction": data["instruction"],
-            "last_info": data["info"][-1],
-        }
-        yaml.dump(save_stats, open(exp_dir / "stats.yaml", "w"))
-
-        return env_stats_ret
+        return env_stats
 
     @torch.no_grad()
     def render(self, epoch: int, obj_set: str, object: list[str], receptacle: list[str], reset=True, exp_dir=None) -> dict:
@@ -550,7 +424,7 @@ class Runner:
                 for s in range(0, self.args.num_envs, batch_size):
                     e = min(s + batch_size, self.args.num_envs)
                     obs_ = dict(
-                        image=obs_img[s:e].to(self.device),
+                        image=torch.tensor(obs_img[s:e]).to(self.device),
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs_)
@@ -565,9 +439,6 @@ class Runner:
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
             value, action, logprob, _, _ = self._get_action(obs, hidden_tensor, deterministic=True)
-            #np_value = value.detach().cpu().to(torch.float32).numpy()
-            #filename = os.path.basename(self.args.vla_load_path)
-            #np.save(f"{filename}.npy", np_value)
 
             obs_img_new, reward, done, env_info = self.env.step(action)
 
@@ -672,13 +543,11 @@ class Runner:
         group_size = num_envs // 4 
         if self.args.eval_at_start:
             print(f"Evaluating at {steps}")
-            objects, receptacles = [], []
-            for i in range(4):
-                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                objects.extend([obj] * group_size)
-                receptacles.extend([recep] * group_size)
-            sval_stats = self.eval("test", objects, receptacles, -1)
-            wandb.log(sval_stats, step=steps)
+            for task in self.task_list:
+                object, receptacle = self.extract_obj_recep(task)
+                sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs, -1)
+                sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                wandb.log(sval_stats, step=steps)
 
            
 
@@ -711,7 +580,7 @@ class Runner:
                 for s in range(0, self.args.num_envs, batch_size):
                     e = min(s + batch_size, self.args.num_envs)
                     obs = dict(
-                        image=obs_img[s:e].to(self.device),
+                        image=torch.tensor(obs_img[s:e]).to(self.device),
                         task_description=instruction[s:e],
                     )
                     features = self.policy._preprocess_obs(obs)
@@ -726,7 +595,6 @@ class Runner:
                     torch.cuda.empty_cache()
 
             hidden_tensor = torch.cat(all_hidden, dim=0) 
-
 
             self.buffer.warmup(obs_img, instruction, hidden_tensor)
 
@@ -797,10 +665,9 @@ class Runner:
                     torch.cuda.empty_cache()
 
                     # train
-                    self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
                         
-                        infos = self.train()
+                        infos = self.train(episode)
                         #self.prealloc_buffer.reset()
                     #print(f"Saving model at {steps}")
                     #save_path = self.glob_dir / f"ep{episode}_step{step_idx}"
@@ -833,7 +700,7 @@ class Runner:
                         for s in range(0, self.args.num_envs, batch_size):
                             e = min(s + batch_size, self.args.num_envs)
                             obs = dict(
-                                image=obs_img[s:e].to(self.device),
+                                image=torch.tensor(obs_img[s:e]).to(self.device),
                                 task_description=instruction[s:e],
                             )
                             features = self.policy._preprocess_obs(obs)
@@ -858,14 +725,11 @@ class Runner:
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1:
                 print(f"Evaluating at {steps}")
-                objects, receptacles = [], []
-                for i in range(4):
-                    obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                    objects.extend([obj] * group_size)
-                    receptacles.extend([recep] * group_size)
-                sval_stats = self.eval("test", objects, receptacles, episode)
-                # sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
-                wandb.log(sval_stats, step=steps)
+                for task in self.task_list:
+                    object, receptacle = self.extract_obj_recep(task)
+                    sval_stats = self.eval("test", [object]*self.args.num_envs, [receptacle]*self.args.num_envs, episode)
+                    sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    wandb.log(sval_stats, step=steps)
 
             # save
             # if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1:

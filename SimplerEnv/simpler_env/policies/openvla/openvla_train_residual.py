@@ -21,12 +21,8 @@ def huber_loss(e, d):
     b = (abs(e) > d).to(torch.float32)
     return a * e ** 2 / 2 + b * d * (abs(e) - d / 2)
 
-import torch
-from torch import nn
-import numpy as np
-
-def layer_init(layer, bias_const=0.0):
-    torch.nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
@@ -55,42 +51,33 @@ class VisualEncoder(nn.Module):
         x = self.fc(x)
         return x
 
+
 class ResidualPolicyNet(nn.Module):
     def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
         super().__init__()
-        self.action_dim = action_dim
-        self.cont_dim = action_dim - 1
         input_dim = hidden_dim + action_dim + instr_dim
-
         self.fc = nn.Sequential(
             layer_init(nn.Linear(input_dim, 512)),
             nn.ReLU(),
             layer_init(nn.Linear(512, 512)),
             nn.ReLU(),
+            nn.Linear(512, action_dim - 1)
         )
 
-        self.fc_mu = nn.Linear(512, self.cont_dim)
-        # self.fc_logit = nn.Linear(512, 1)
+        nn.init.zeros_(self.fc[-1].weight)
+        nn.init.zeros_(self.fc[-1].bias)
 
-        nn.init.zeros_(self.fc_mu.weight)
-        nn.init.zeros_(self.fc_mu.bias)
-        # nn.init.zeros_(self.fc_logit.weight)
-        # nn.init.zeros_(self.fc_logit.bias)
-
-        action_range = action_high[:, :self.cont_dim] - action_low[:, :self.cont_dim]
-        init_std = (action_range / 10.0).clamp(min=1e-3)
-        self.log_std = nn.Parameter(torch.log(init_std.squeeze(0)))
+        action_range = action_high - action_low
+        init_std = (action_range / 5.0).clamp(min=1e-3)
+        self.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
 
     def forward(self, instr, hidden, a_base):
-        hx = torch.cat([instr, hidden, a_base], dim=-1)
-        hh = self.fc(hx)
-        mu = self.fc_mu(hh)
+        ax = torch.cat([instr, hidden, a_base], dim=-1)
+        mu = self.fc(ax.squeeze(0))
         mu = torch.tanh(mu) * 0.1
-        std = self.log_std.exp().clamp(1e-4, 0.2).expand_as(mu)
+        std = self.log_std.exp().clamp(1e-4, 0.1).expand_as(mu)
 
         return mu, std
-
-
 
 
 
@@ -194,11 +181,9 @@ class OpenVLAPolicy:
         ).to(self.tpdv["device"])
 
         self.text_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
         self.text_encoder = AutoModel.from_pretrained(
             "sentence-transformers/all-MiniLM-L6-v2"
         ).to(self.tpdv["device"])
-
         lora_cfg = LoraConfig(
             r=8,
             lora_alpha=32,
@@ -207,9 +192,12 @@ class OpenVLAPolicy:
             bias="none",
         )
         self.text_encoder = get_peft_model(self.text_encoder, lora_cfg)
+
         self.visual_encoder = VisualEncoder(out_dim=512).to(self.tpdv["device"])
 
-        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()) + list(self.visual_encoder.parameters()), lr=1e-5)
+
+
+        self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()) + list(self.visual_encoder.parameters()), lr=7e-5)
 
         
 
@@ -366,38 +354,34 @@ class OpenVLAPolicy:
 
         return logprobs, entropy, values
 
-    # def evaluate_residual(self, hidden, a_base, a_final):
-    #     mu, std = self.residual_policy(hidden, a_base)
-    #     dist = torch.distributions.Normal(mu, std)
-    #     a_res = a_final - a_base
-    #     logprob = dist.log_prob(a_res)
-    #     entropy = dist.entropy()
-    #     values = self.value_head_res(torch.cat([hidden, a_base], dim=-1))
-    #     return logprob, entropy, values
-
     def evaluate_residual(self, hidden, a_base, a_final, instr_emb):
         mu, std = self.residual_policy(instr_emb, hidden, a_base)
-
-        # split
-        a_res_cont = a_final[..., :-1] - a_base[..., :-1]
-
-        # continuous part
-        dist_cont = torch.distributions.Normal(mu, std)
-        logprob_cont = dist_cont.log_prob(a_res_cont).sum(dim=-1, keepdim=True)
-        entropy_cont = dist_cont.entropy().sum(dim=-1, keepdim=True)
-
-        # discrete part
-        # dist_disc = torch.distributions.Bernoulli(logits=logit)
-        # logprob_disc = dist_disc.log_prob(a_res_disc).sum(dim=-1, keepdim=True)
-        # entropy_disc = dist_disc.entropy().sum(dim=-1, keepdim=True)
-
-        # combine
-        logprob = logprob_cont 
-        entropy = entropy_cont 
-
-        # value head uses both continuous + discrete inputs
+        dist = torch.distributions.Normal(mu, std)
+        a_res = a_final - a_base
+        logprob = dist.log_prob(a_res[...,:-1]).sum(dim=-1, keepdim=True)
+        entropy = dist.entropy().sum(dim=-1, keepdim=True)
         values = self.value_head_res(torch.cat([instr_emb, hidden, a_base], dim=-1))
         return logprob, entropy, values
+
+    # def evaluate_actions(self, x: dict, action: torch.Tensor):
+    #     features = self._preprocess_obs(x, action)
+    #     hidden = self.vla.get_hidden(**features).to(torch.float32)
+    #     if hidden.ndim > 2:
+    #         hidden = hidden.mean(dim=1)
+
+    #     a_res = self.residual_policy(hidden)
+    #     a_vla_pred = self.vla.predict_action_batch(
+    #         **features,
+    #         unnorm_key=self.args.vla_unnorm_key,
+    #         do_sample=False,
+    #         temperature=0.0,
+    #     )[1]
+
+    #     action_pred = a_vla_pred + a_res
+    #     logprob = -((action_pred - action) ** 2).mean(dim=-1, keepdim=True)  # continuous proxy
+    #     entropy = torch.zeros_like(logprob)
+    #     values = self.vla.get_value(**features).to(torch.float32)
+    #     return logprob, entropy, values
 
 
     def prep_rollout(self):
@@ -569,15 +553,16 @@ class OpenVLAPPORes:
         return info
 
 
-    def train_res_ppo(self, buffer):
-        print("train residual")
+    def train_res_ppo(self, buffer, lr):
+        self.policy.residual_optimizer = AdamW(list(self.policy.residual_policy.parameters()) + list(self.policy.value_head_res.parameters()) + list(self.policy.text_encoder.parameters()) + list(self.policy.visual_encoder.parameters()), lr=lr)
         train_info = defaultdict(lambda: [])
 
         # buffer
         buffer.compute_returns_ppo()
         minibatch_count = buffer.get_minibatch_count()
 
-        for i in range(self.args.alg_ppo_epoch):
+        from tqdm import trange
+        for _ in trange(self.args.alg_ppo_epoch):
             data_generator = buffer.feed_forward_generator()
 
             for idx, batch in tqdm(enumerate(data_generator), total=minibatch_count, desc="train"):
