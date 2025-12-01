@@ -121,6 +121,7 @@ Then run:
 ```bash
 ./eval_seq.sh
 ```
+IMPORTANT!!! Use the same seed to ensure all evaluation use the same object locaiton,
 
 ### Collect Rsults
 Collect success rates from evaluations.
@@ -205,4 +206,5 @@ Bridge dataset: yellow_plate, cloth
 | 15    | manhole cover     |
 | 16    | envelope          |
 | 17    | notepad           |
+
 | 18    | black_plate       |
