@@ -52,30 +52,64 @@ class VisualEncoder(nn.Module):
         return x
 
 
+# class ResidualPolicyNet(nn.Module):
+#     def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
+#         super().__init__()
+#         input_dim = hidden_dim + action_dim + instr_dim
+#         self.fc = nn.Sequential(
+#             layer_init(nn.Linear(input_dim, 512)),
+#             nn.ReLU(),
+#             layer_init(nn.Linear(512, 512)),
+#             nn.ReLU(),
+#             nn.Linear(512, action_dim - 1)
+#         )
+
+#         nn.init.zeros_(self.fc[-1].weight)
+#         nn.init.zeros_(self.fc[-1].bias)
+
+#         action_range = action_high - action_low
+#         init_std = (action_range / 10.0).clamp(min=1e-3)
+#         self.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
+
+#     def forward(self, instr, hidden, a_base):
+#         ax = torch.cat([instr, hidden, a_base], dim=-1)
+#         mu = self.fc(ax.squeeze(0))
+#         mu = mu * 0.1
+#         std = self.log_std.exp().clamp(1e-4, 0.1).expand_as(mu)
+
+#         return mu, std
+
 class ResidualPolicyNet(nn.Module):
     def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
         super().__init__()
         input_dim = hidden_dim + action_dim + instr_dim
+        act_dim = action_dim - 1
         self.fc = nn.Sequential(
             layer_init(nn.Linear(input_dim, 512)),
             nn.ReLU(),
             layer_init(nn.Linear(512, 512)),
             nn.ReLU(),
-            nn.Linear(512, action_dim - 1)
         )
 
-        nn.init.zeros_(self.fc[-1].weight)
-        nn.init.zeros_(self.fc[-1].bias)
+        self.mu_head = nn.Linear(512, act_dim)
+        self.logstd_head = nn.Linear(512, act_dim)
 
-        action_range = action_high - action_low
-        init_std = (action_range / 5.0).clamp(min=1e-3)
-        self.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
+        with torch.no_grad():
+            self.mu_head.weight.zero_()
+            self.mu_head.bias.zero_()
+
+            self.logstd_head.weight.zero_()
+            self.logstd_head.bias.fill_(-4)
+
 
     def forward(self, instr, hidden, a_base):
         ax = torch.cat([instr, hidden, a_base], dim=-1)
-        mu = self.fc(ax.squeeze(0))
-        mu = torch.tanh(mu) * 0.1
-        std = self.log_std.exp().clamp(1e-4, 0.1).expand_as(mu)
+        h = self.fc(ax)  
+
+        mu = self.mu_head(h).squeeze(0) * 0.1
+        log_std = self.logstd_head(h)      
+        log_std = torch.clamp(log_std, -10.0, -1.0)  
+        std = log_std.exp().squeeze(0)  
 
         return mu, std
 
@@ -194,8 +228,6 @@ class OpenVLAPolicy:
         self.text_encoder = get_peft_model(self.text_encoder, lora_cfg)
 
         self.visual_encoder = VisualEncoder(out_dim=512).to(self.tpdv["device"])
-
-
 
         self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()) + list(self.visual_encoder.parameters()), lr=7e-5)
 

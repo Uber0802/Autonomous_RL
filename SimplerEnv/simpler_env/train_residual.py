@@ -26,6 +26,8 @@ import copy
 
 from prismatic.vla.action_tokenizer import ActionTokenizer
 import imageio
+from torch import nn
+
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -50,17 +52,17 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 80
+    training_len: int = 160
     use_same_init: bool = True
 
     steps_max: int = 2000000
     steps_vh: int = 0  # episodes
-    interval_eval: int = 4
+    interval_eval: int = 5
     interval_save: int = 50
     max_episodes: int = 1000
     instruction_switch_interval: int = 80
     training_interval: int = 80
-    eval_at_start: bool = True
+    eval_at_start: bool = False
 
     # buffer
     buffer_inferbatch: int = 32
@@ -118,7 +120,7 @@ class Runner:
         # set wandb
         wandb.init(
             config=all_args.__dict__,
-            project="RLVLA_residual",
+            project="RLVLA_residual_baseline",
             name=self.args.name,
             mode="online" if self.args.wandb else "offline",
         )
@@ -139,6 +141,7 @@ class Runner:
 
         # env
         unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
+        self.unnorm_state = unnorm_state
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
@@ -306,12 +309,11 @@ class Runner:
                 self.buffer.cat_buffer(self.first_buffer)
                 self.first_buffer = tmp_buffer
             # train_info = self.alg.train_res_ppo(self.buffer)
-            if episode <= 20:
-                train_info = self.alg.train_res_ppo(self.buffer, 7e-5)
-            elif episode <= 50:
-                train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
-            else:
-                train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
+            # if episode <= 30:
+            #     train_info = self.alg.train_res_ppo(self.buffer, 7e-5, 10)
+            # else:
+            #     train_info = self.alg.train_res_ppo(self.buffer, 1e-6, 50)
+            train_info = self.alg.train_res_ppo(self.buffer, 1e-6)
             self.buffer = ResSeparatedReplayBuffer(
                 self.args,
                 obs_dim=(480, 640, 3),
@@ -339,7 +341,7 @@ class Runner:
         print("Evaluating:", instruction[0])
         # viz_writers = []
         # for i in range(self.args.num_envs):
-        #     viz_path = f"eval_video_160/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
+        #     viz_path = f"eval_video_ood/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
         #     os.makedirs(os.path.dirname(viz_path), exist_ok=True)
         #     viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
         #     viz_writers.append(viz_writer)
@@ -549,6 +551,8 @@ class Runner:
                 sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                 wandb.log(sval_stats, step=steps)
 
+        self.action_low = torch.tensor(self.unnorm_state["q01"], device=self.device).unsqueeze(0)
+        self.action_high = torch.tensor(self.unnorm_state["q99"], device=self.device).unsqueeze(0)
            
 
         for episode in range(max_episodes):
@@ -605,6 +609,11 @@ class Runner:
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
             print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
+
+            # if episode == 30:
+            #     action_range = self.action_high - self.action_low
+            #     init_std = action_range / 50.0
+            #     self.policy.residual_policy.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
 
             # with open(self.args.log, "a") as f:
             #     f.write(f"step : {steps}\n")
@@ -687,6 +696,7 @@ class Runner:
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)
+                    obs_img = self.env.reset_unsuitable_envs()
                     obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])
