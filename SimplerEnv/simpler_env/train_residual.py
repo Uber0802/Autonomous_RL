@@ -26,8 +26,6 @@ import copy
 
 from prismatic.vla.action_tokenizer import ActionTokenizer
 import imageio
-from torch import nn
-
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -52,7 +50,7 @@ class Args:
     # env
     num_envs: int = 64
     episode_len: int = 80 # 80
-    training_len: int = 160
+    training_len: int = 80
     use_same_init: bool = True
 
     steps_max: int = 2000000
@@ -141,7 +139,6 @@ class Runner:
 
         # env
         unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
-        self.unnorm_state = unnorm_state
         self.env = SimlerWrapper(self.args, unnorm_state)
 
         # buffer
@@ -339,13 +336,13 @@ class Runner:
 
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
-        # viz_writers = []
-        # for i in range(self.args.num_envs):
-        #     viz_path = f"eval_video_ood/{episode}/costmap_vis_{i:04d}_{instruction[i]}.mp4"
-        #     os.makedirs(os.path.dirname(viz_path), exist_ok=True)
-        #     viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
-        #     viz_writers.append(viz_writer)
-        #     viz_writers[i].append_data(obs_img[i].cpu().numpy())
+        viz_writers = []
+        for i in range(self.args.num_envs):
+            viz_path = f"eval_video_ood/{episode}/{instruction[i]}_costmap_vis_{i:04d}.mp4"
+            os.makedirs(os.path.dirname(viz_path), exist_ok=True)
+            viz_writer = imageio.get_writer(viz_path, fps=10, codec="libx264")
+            viz_writers.append(viz_writer)
+            viz_writers[i].append_data(obs_img[i].cpu().numpy())
 
         for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
@@ -377,11 +374,11 @@ class Runner:
                 for k, v in env_info["episode"].items():
                     env_infos[f"{k}"] += v
 
-        #     for i in range(self.args.num_envs):
-        #         viz_writers[i].append_data(obs_img[i].cpu().numpy())
+            for i in range(self.args.num_envs):
+                viz_writers[i].append_data(obs_img[i].cpu().numpy())
 
-        # for i in range(self.args.num_envs):
-        #     viz_writers[i].close()
+        for i in range(self.args.num_envs):
+            viz_writers[i].close()
 
         # infos
         env_stats = {k: np.mean(v) for k, v in env_infos.items()}
@@ -551,8 +548,6 @@ class Runner:
                 sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                 wandb.log(sval_stats, step=steps)
 
-        self.action_low = torch.tensor(self.unnorm_state["q01"], device=self.device).unsqueeze(0)
-        self.action_high = torch.tensor(self.unnorm_state["q99"], device=self.device).unsqueeze(0)
            
 
         for episode in range(max_episodes):
@@ -609,11 +604,6 @@ class Runner:
             rollout_images = [[] for _ in range(self.args.num_envs)]
 
             print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
-
-            # if episode == 30:
-            #     action_range = self.action_high - self.action_low
-            #     init_std = action_range / 50.0
-            #     self.policy.residual_policy.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
 
             # with open(self.args.log, "a") as f:
             #     f.write(f"step : {steps}\n")
@@ -696,7 +686,6 @@ class Runner:
                         objects.extend([obj] * group_size)
                         receptacles.extend([recep] * group_size)
                     self.env.set_task(objects, receptacles)
-                    obs_img = self.env.reset_unsuitable_envs()
                     obs_img = self.env.reset_robot()
 
                     # obj, recep = self.extract_obj_recep(self.task_list[self.task_id])

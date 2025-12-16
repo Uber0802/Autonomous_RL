@@ -68,7 +68,7 @@ class VisualEncoder(nn.Module):
 #         nn.init.zeros_(self.fc[-1].bias)
 
 #         action_range = action_high - action_low
-#         init_std = (action_range / 10.0).clamp(min=1e-3)
+#         init_std = (action_range / 5.0).clamp(min=1e-3)
 #         self.log_std = nn.Parameter(torch.log(init_std[...,:-1].squeeze(0)))
 
 #     def forward(self, instr, hidden, a_base):
@@ -78,6 +78,7 @@ class VisualEncoder(nn.Module):
 #         std = self.log_std.exp().clamp(1e-4, 0.1).expand_as(mu)
 
 #         return mu, std
+
 
 class ResidualPolicyNet(nn.Module):
     def __init__(self, instr_dim, hidden_dim, action_dim, action_high, action_low):
@@ -106,15 +107,13 @@ class ResidualPolicyNet(nn.Module):
         ax = torch.cat([instr, hidden, a_base], dim=-1)
         h = self.fc(ax)  
 
-        mu = self.mu_head(h).squeeze(0) * 0.1
+        mu = self.mu_head(h).squeeze(0)
+        mu = torch.tanh(mu) * 0.1
         log_std = self.logstd_head(h)      
         log_std = torch.clamp(log_std, -10.0, -1.0)  
         std = log_std.exp().squeeze(0)  
 
         return mu, std
-
-
-
 
 
 class OpenVLAPolicy:
@@ -228,6 +227,8 @@ class OpenVLAPolicy:
         self.text_encoder = get_peft_model(self.text_encoder, lora_cfg)
 
         self.visual_encoder = VisualEncoder(out_dim=512).to(self.tpdv["device"])
+
+
 
         self.residual_optimizer = AdamW(list(self.residual_policy.parameters()) + list(self.value_head_res.parameters()) + list(self.text_encoder.parameters()) + list(self.visual_encoder.parameters()), lr=7e-5)
 
@@ -588,6 +589,8 @@ class OpenVLAPPORes:
     def train_res_ppo(self, buffer, lr):
         self.policy.residual_optimizer = AdamW(list(self.policy.residual_policy.parameters()) + list(self.policy.value_head_res.parameters()) + list(self.policy.text_encoder.parameters()) + list(self.policy.visual_encoder.parameters()), lr=lr)
         train_info = defaultdict(lambda: [])
+
+        # print("std : ", self.policy.residual_policy.log_std)
 
         # buffer
         buffer.compute_returns_ppo()
