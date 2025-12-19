@@ -136,6 +136,7 @@ class SeparatedReplayBuffer(object):
     def feed_forward_generator(self):
         episode_length, n_rollout_threads = self.rewards.shape[:2]
         batch_size = episode_length * n_rollout_threads
+        #print(f"Instruction in Buffer:{self.instruction}")
 
         if self.buffer_minibatch < 0:
             num_mini_batch = 1
@@ -183,9 +184,16 @@ class SeparatedReplayBuffer(object):
         self.instruction = new_instruction
 
 def create_memmap(filename, shape, dtype):
-    if os.path.exists(filename):
-        os.remove(filename)  # overwrite existing file
-    return np.memmap(filename, dtype=dtype, mode='w+', shape=shape)
+    pid = os.getpid()
+    pid_dir = os.path.join(os.getcwd(), str(pid))
+    os.makedirs(pid_dir, exist_ok=True)
+
+    filepath = os.path.join(pid_dir, filename)
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    return np.memmap(filepath, dtype=dtype, mode='w+', shape=shape)
 
 class PreallocReplayBuffer(SeparatedReplayBuffer):
     def __init__(self, all_args, obs_dim, act_dim):

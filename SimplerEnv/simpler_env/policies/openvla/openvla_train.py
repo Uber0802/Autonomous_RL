@@ -232,7 +232,7 @@ class OpenVLAPolicy:
         self.vla.eval()
 
     def prep_training(self):
-        self.vla.eval()
+        self.vla.train()
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)

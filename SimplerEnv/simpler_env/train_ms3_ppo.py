@@ -4,6 +4,7 @@ import pprint
 import random
 import gc
 import signal
+import shutil 
 from collections import defaultdict
 import time
 from pathlib import Path
@@ -656,7 +657,7 @@ class Runner:
                 print(f"Total reset: {self.hard_reset_count + self.soft_reset_count} exceed reset limit: {self.args.max_reset}")
                 break
                 
-            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count})
+            print(f"Total reset: {self.hard_reset_count + self.soft_reset_count}")
 
 def main():
     args = tyro.cli(Args)
@@ -679,6 +680,12 @@ def main():
     
     else:
         runner.run()
+
+    # Remove Directory for buffer memmap data
+    pid = os.getpid()
+    pid_dir = os.path.join(os.getcwd(), str(pid))
+    if os.path.exists(pid_dir):
+            shutil.rmtree(pid_dir)
 
 
 if __name__ == "__main__":
