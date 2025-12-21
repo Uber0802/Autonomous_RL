@@ -5,6 +5,7 @@ import random
 import re
 from mani_skill.envs.sapien_env import BaseEnv
 
+from tqdm import tqdm
 
 class SimlerWrapper:
     def __init__(self, all_args, unnorm_state, extra_seed=0):
@@ -55,10 +56,10 @@ class SimlerWrapper:
 
         reward += info["is_src_obj_grasped"].reshape(-1, 1) * 0.1
         reward += info["consecutive_grasp"].reshape(-1, 1) * 0.1
+        # RS:
         reward += torch.where(
-            backward_mask,
-            (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 1.0,  # if backward, only src_on_table counts
-            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 1.0  # else, success & grasped
+            (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["succes_count"]),  # if backward, only src_on_table counts
+            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["succes_count"]) # else, success & grasped
         )
         #print(f"Reward: {reward.squeeze().cpu().tolist()}")
 
@@ -151,8 +152,10 @@ class SimlerWrapper:
 
     def step(self, raw_action):
         action = self._process_action(raw_action)
-
+        # tqdm.write("[Debug] before step")
         obs, _reward, _terminated, truncated, info = self.env.step(action)
+        # tqdm.write(f"[Debug] INFO {info}")
+        # tqdm.write("[Debug] after step")
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
         truncated = truncated.reshape(-1, 1)  # [B, 1]
 
@@ -162,7 +165,7 @@ class SimlerWrapper:
         # process episode info
         if truncated.any():
             info["episode"] = {}
-            for k in ["is_src_obj_grasped", "consecutive_grasp", "success"]:
+            for k in ["is_src_obj_grasped", "consecutive_grasp", "success_count", "success_value", "success"]:
                 v = [info[k][idx].item() for idx in range(self.num_envs)]
                 info["episode"][k] = v
 

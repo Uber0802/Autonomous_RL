@@ -111,6 +111,7 @@ class Args:
 
     # other
     wandb: bool = True
+    wandb_dir: str = ""
     only_render: bool = False
     only_render_seq: bool = False
     render_info: bool = False
@@ -137,6 +138,7 @@ class Runner:
             config=all_args.__dict__,
             project="RLVLA",
             name=self.args.name,
+            dir=self.args.wandb_dir,
             mode="online" if self.args.wandb else "offline",
         )
         self.save_dir = Path(wandb.run.dir)
@@ -515,7 +517,7 @@ class Runner:
             for task in self.task_list:
                 object, receptacle = self.extract_obj_recep(task)
                 sval_stats = self.eval(self.args.obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                sval_stats = {f"eval_ood_put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                 wandb.log(sval_stats, step=steps)
 
         num_envs = self.args.num_envs 
@@ -634,7 +636,7 @@ class Runner:
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
                     sval_stats = self.eval(self.args.obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
-                    sval_stats = {f"eval_ood＿put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
+                    sval_stats = {f"eval_ood_put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                     wandb.log(sval_stats, step=steps)
                 print(f"Evaluating Train Scene at {steps}")
                 for task in self.task_list:

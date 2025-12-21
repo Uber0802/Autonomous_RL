@@ -219,9 +219,14 @@ class BasePickPlace(BaseEnv):
         self.consecutive_grasp.zero_()
         self.episode_stats["is_src_obj_grasped"].zero_()
         self.episode_stats["consecutive_grasp"].zero_()
+        self.episode_stats["success_count"].zero_()
+        self.episode_stats["success_value"].zero_()
         print("reset Grasp Stats")
 
     def evaluate(self, success_require_src_completely_on_target=True):
+
+        # tqdm.write(f"[Debug] evaluate")
+
         xy_flag_required_offset = 0.01
         z_flag_required_offset = 0.05
         netforce_flag_required_offset = 0.03
@@ -357,6 +362,9 @@ class BasePickPlace(BaseEnv):
         self.episode_stats["src_on_table"] = src_on_table
         self.episode_stats["is_src_obj_grasped"] = self.episode_stats["is_src_obj_grasped"] | is_src_obj_grasped
         self.episode_stats["consecutive_grasp"] = self.episode_stats["consecutive_grasp"] | consecutive_grasp
+        self.episode_stats["success_count"] = self.episode_stats["success_count"] + (int)success
+        # RS:
+        self.episode_stats["success_value"] = success * 1.05 * np.exp(self.episode_stats["succes_count"])
         self.episode_stats["gripper_carrot_dist"] = gripper_carrot_dist
         self.episode_stats["gripper_plate_dist"] = gripper_plate_dist
         self.episode_stats["carrot_plate_dist"] = carrot_plate_dist
@@ -367,6 +375,8 @@ class BasePickPlace(BaseEnv):
         self.extra_stats["extra_q_plate"] = plate_q
         self.extra_stats["extra_pos_gripper"] = gripper_p
         self.extra_stats["extra_q_gripper"] = gripper_q
+
+        # tqdm.write(f"[Debug] EPISODE STATS {self.episode_stats}")
 
         return dict(**self.episode_stats, success=success)
 
@@ -949,8 +959,9 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
             is_src_obj_grasped=torch.zeros((b,), dtype=torch.bool, device=self.device),
             # is_closest_to_tgt=torch.zeros((b,), dtype=torch.bool),
             consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            success_count=torch.zeros((b,), dtype=torch.int, device=self.device),
+            success_value=torch.zeros((b,), dtype=torch.float32, device=self.device),
             src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
-
             gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
             gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
             carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
