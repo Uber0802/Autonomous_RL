@@ -57,9 +57,10 @@ class SimlerWrapper:
         reward += info["is_src_obj_grasped"].reshape(-1, 1) * 0.1
         reward += info["consecutive_grasp"].reshape(-1, 1) * 0.1
         # RS:
-        reward += torch.where(
-            (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["succes_count"]),  # if backward, only src_on_table counts
-            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["succes_count"]) # else, success & grasped
+        reward += torch.where(backward_mask,
+            (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * (1.05 ** info["success_count"].float()).reshape(-1, 1),  # if backward, only src_on_table counts
+            # (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["success_count"]) # else, success & grasped
+            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0
         )
         #print(f"Reward: {reward.squeeze().cpu().tolist()}")
 
