@@ -60,7 +60,7 @@ class SimlerWrapper:
         reward += torch.where(backward_mask,
             (info["src_on_table"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * (1.05 ** info["success_count"].float()).reshape(-1, 1),  # if backward, only src_on_table counts
             # (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * 1.05 * np.exp(info["success_count"]) # else, success & grasped
-            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0
+            (info["success"].reshape(-1, 1) & info["is_src_obj_grasped"].reshape(-1, 1)) * 10.0 * torch.exp(info["success_count"].float().reshape(-1, 1)) 
         )
         #print(f"Reward: {reward.squeeze().cpu().tolist()}")
 
@@ -166,7 +166,7 @@ class SimlerWrapper:
         # process episode info
         if truncated.any():
             info["episode"] = {}
-            for k in ["is_src_obj_grasped", "consecutive_grasp", "success_count", "success_value", "success"]:
+            for k in ["is_src_obj_grasped", "consecutive_grasp", "success"]:
                 v = [info[k][idx].item() for idx in range(self.num_envs)]
                 info["episode"][k] = v
 
