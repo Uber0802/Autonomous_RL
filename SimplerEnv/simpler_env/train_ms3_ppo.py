@@ -111,6 +111,7 @@ class Args:
 
     # other
     wandb: bool = True
+    wandb_dir: str = ""
     only_render: bool = False
     only_render_seq: bool = False
     render_info: bool = False
@@ -137,6 +138,7 @@ class Runner:
             config=all_args.__dict__,
             project="RLVLA",
             name=self.args.name,
+            dir=self.args.wandb_dir,
             mode="online" if self.args.wandb else "offline",
         )
         self.save_dir = Path(wandb.run.dir)
