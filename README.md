@@ -2,104 +2,129 @@
 
 ## Table of Contents
 - [Install](#install)
-- [Train](#train)
-  - [Basic Configs](#basic-configs)
-  - [Environment Configs](#environment-configs)
-  - [Training Configs](#training-configs)
-  - [Forward Backward](#forward-backward)
-  - [Reset Unsuitable](#reset-unsuitable)
-  - [FIFO Buffer](#fifo-buffer)
-  - [Example](#example)
-- [Evaluate](#evaluate)
-  - [Single Task](#single-task)
-  - [Sequential Task](#sequential-task)
-  - [Collect Results](#collect-results)
-- [Code Structure](#code-structure)
-- [Object List](#object-list)
-- [Plate List](#plate-list)
+- [Training](#training)
+  - [Configs](#basic-configs)
+  - [Tools](#tools)
+- [Evaluation](#evaluation)
+  - [Configs](#configs)
+  - [Tools](#tools)
+- [Others](#others)
+  - [Code Structure](#code-structure)
+  - [Object List](#object-list)
+  - [Plate List](#plate-list)
 
 ## Install
-1. Clone the repository
-2. Move into the repository directory.
+1. Clone the repository.
     ```bash
+    git clone git@github.com:Uber0802/Autonomous_RL.git
     cd Autonomous_RL
     ```
-3. Create conda env: nerl_env.
+2. Create conda env: nerl_env.
     ```bash
     conda create -n nerl_env -y python=3.10
     conda activate nerl_env
     ```
-4. Run installation.
+3. Run installation.
     ```bash
     chmod +x *.sh
     ./setup.sh
     ```
-5. Optional: For ubuntu 2204
+4. Optional: For ubuntu 2204
     ```bash
     sudo apt-get update
     sudo apt-get install -y libglvnd-dev
     ```
 
-## Train
-All experiments are launched through `train.sh`.
-Modify the script as needed, then run:
+## Training
+To train a nerl baseline models, run the following command:
+<!--TODO: DEFAULT ARGS-->
 ```bash
-./train.sh
+python train_ms3_ppo.py
 ```
 ### Basic Configs
-- `name`: WandB run name.
-- `log`: Path to a `.txt` log file for training output.
-- `vla_load_path`: Path to a pretrained VLA checkpoint. Use this to resume training from saved weights.
-- `seed`: Random seed for reproducibility.
-- `no_wandb`: Disable logging to Weights & Biases.
+- `--seed`: Random seed for reproducibility.
+- `--vla-path`: (Default: "openvla/openvla-7b")
+- `--vla-unnorm-key`: (Default: "bridge_orig")
+- `--vla-load-path`: Path to a pretrained VLA checkpoint. Use this to resume training from saved weights.
+
+### Logging Configs
+<!--TODO: RENAME-->
+- `--name`: WandB run name.
+- `--log`: Path to a `.txt` log file for PPO training output.
+- `--wandb`: Enable logging to Weights & Biases. (Default: True)
 
 ### Environment Configs
-- `obj_set`: 
+- `--obj-set`: <!--TODO: RENAME-->
     - "fixed": Use identical scene and object layout across all environments.
     - "rand": Use random scene and object layout across all environments.
     - "rand_ood": For evaluating OOD.
-- `obj1_index` and `obj2_index`: Choose an object using its index from the [Object List](#object-list). (Default: 7 and 2)
-- `plate1_index` and `plate2_index`: Choose an plate using its index from the [Plate List](#plate-list).(Default: 1 and 2)
+- `--obj1-index` and `--obj2-index`: Choose an object using its index from the [Object List](#object-list). (Default: 7 and 2)
+- `--plate1-index` and `--plate2-index`: Choose an plate using its index from the [Plate List](#plate-list).(Default: 1 and 2)
 
 ### Training Configs
-- `max_episodes`: Total number of training episodes.
-- `max_reset`: Total number of resets. (Default: 8192 = 128 episodes * 64 environments, 655360 steps for training_len=80)
-- `training_len`: Rollout length (steps per episode). Examples: 80, 320, 1280, 2560.
-- `training_interval`: Number of rollout steps between VLA training updates. (Default: 160)
-- `instruction_switch_interval`: Number of rollout steps before switching to a new instruction. (Default: 80)
-- `interval_eval`: Number of episodes between evaluation.
-- `interval_save`: Number of episodes between saving model weights.
-- `eval_at_start`: Enable evaluation at step 0.
+<!--TODO: RENAME-->
+- `--max-episodes`: Total number of training episodes.
+- `--max-reset`: Total number of resets. (Default: 8192 = 128 episodes * 64 environments, 655360 steps for training_len=80)
+- `--training-len`: Rollout length (steps per episode). (Default: 320)
+- `--training-interval`: Number of rollout steps between VLA training updates. (Default: 160)
+- `--instruction-switch-interval`: Number of rollout steps before switching to a new instruction. (Default: 80)
+- `--interval-eval`: Number of episodes between evaluation.
+- `--interval-save`: Number of episodes between saving model weights.
+- `--eval-at-start`: Enable evaluation at step 0.
+
+### Reset Gripper
+- `--reset-robot` : Reset robot every 80 steps. (Default: `False`)
 
 ### Forward Backward
-- `enable_backward`: Enable forward backward training.
-- `backward_interval`: Number of forward instructions between backward instruction. (Set to 1 for interleaved switch)
+<!--TODO: RENAME-->
+- `enable-backward`: Enable forward backward training. (Default: False)
+- `backward-interval`: Number of forward instructions between backward instruction. Set to 1 for interleaved switch. (Default: 1)
 
 ### Reset Unsuitable
-- `reset_unsuitable`: Reset environments that fail to complete the current task after an instruction switch.
+- `reset-unsuitable`: Reset environments that fail to complete the current task after an instruction switch. (Default: False)
 
 ### FIFO Buffer
+<!--TODO: DEBUG (deleting dir)-->
 Online + Offline Training
 - `fifo_buffer`: Enable FIFO replay buffer.
 - `fifo_length`: Maximum number of trajectories the buffer can store.
 
-### Example
+```
+### Tools
+We have provided a bash script, you can modify the script as needed.
+#### Bash Script
+#### Example
 Example for 1280 Forward Backward with Reset Unsuitable.
 ```bash
 python simpler_env/train_ms3_ppo.py \
   --name="bottle_shovel-1280-rand_scene-FB-seed_2" \
   --log="user/Autonomous_RL/bottle_shovel-1280-rand_scene-FB-seed_2.txt" \
-  --env_id="TwoObjectTwoReceptacle-v1" \
-  --vla_path="openvla/openvla-7b" --vla_unnorm_key="bridge_orig" \
-  --training_len=1280 --max_episodes=8 \
-  --interval_eval=1 --interval_save=1 \
-  --enable_backward --backward_interval=1 \
-  --reset_unsuitable \
+  --env-id="TwoObjectTwoReceptacle-v1" \
+  --vla-path="openvla/openvla-7b" --vla-unnorm-key="bridge_orig" \
+  --training-len=1280 --max-episodes=8 \
+  --interval-eval=1 --interval-save=1 \
+  --enable-backward --backward-interval=1 \
+  --reset-unsuitable \
   --seed=2 --obj_set="rand"
 ```
 
-## Evaluate
-Modify the `vla_load_paths` in `eval_ood.sh` or `./eval_seq.sh` to point to your model weights.
+## Evaluation
+To evaluate a trained nerl baseline agent, run the following command:
+```bash
+python eval_nerl_baseline.py
+```
+<!--TODO: ANOTHER FUNCTION-->
+### Configs
+- `--only_render` : For evaluating single task.
+- `--only_render_seq` : For evaluating sequential task.
+- `--task_order_config` : Path to task order config file for sequential task. <!--TODO: ADD THIS PARAMETER-->
+- `--obj-set`: <!--TODO: RENAME-->
+  - "rand": For evaluating ID.
+  - "rand_ood": For evaluating OOD.
+### Tools
+We have provided a bash script, you can modify the script as needed.
+<!--TODO: REFACTOR or REMOVE-->
+Modify the `vla_load_paths` in `eval_single.sh` or `eval_seq.sh` to point to your model weights.
 ```bash
 vla_load_paths=(
 /path/to/your/first/model/weights
@@ -107,23 +132,9 @@ vla_load_paths=(
 ...
 )
 ```
-
-### Single Task
-Set the `seed` and `obj_set` in `eval_ood.sh`.
-Then run:
-```bash
-./eval_ood.sh
-```
-
-### Sequential Task
-Set the `seed` and `obj_set` in `eval_seq.sh`.
-Then run:
-```bash
-./eval_seq.sh
-```
-IMPORTANT!!! Use the same seed to ensure all evaluation use the same object locaiton,
-
-### Collect Rsults
+Make sure `seed` and `obj_set` in `./eval_ood.sh` or `./eval_seq.sh` are consistent with the training settings.
+#### Collect Results
+<!--TODO: REFACTOR-->
 Collect success rates from evaluations.
 1. Modify the `paths` in `collect_success_rates.sh` to point to your evaluation runs.
     ```bash
@@ -139,23 +150,21 @@ Collect success rates from evaluations.
     ```
 3. Run:
     ```bash
-    ./collect_success_rates.sh
+    bash collect_success_rates.sh
     ```
 
-## Code Structure
-### Autonomous_RL/ManiSkill/mani_skill/envs/tasks/digital_twins/
+## Others
+### Code Structure
+#### Autonomous_RL/ManiSkill/mani_skill/envs/tasks/digital_twins/
 - bridge_dataset_eval/pick_place_multi.py: All environment implemented here.
-
-### Autonomous_RL/SimplerEnv/simpler_env/
+#### Autonomous_RL/SimplerEnv/simpler_env/
 - train_ms3_ppo.py: All training and evaluation code.
 - env/simpler_wrapper.py: Agent interact with the environment through here. 
 - policies/openvla/openvla_train.py: PPO training algorithm.
 - utils/replay_buffer.py: Replay buffer.
 
-
-## Object List
+### Object List
 Bridge dataset: carrot, plastic bottle, 7up can, kitchen spoon, cup
-
 | Index | Object Name       |
 |-------|-------------------|
 | 1     | carrot            |
@@ -184,7 +193,7 @@ Bridge dataset: carrot, plastic bottle, 7up can, kitchen spoon, cup
 | 24    | onion             |
 | 25    | cup               |
 
-## Plate List
+### Plate List
 Bridge dataset: yellow_plate, cloth
 
 | Index | Plate Name       |
@@ -206,5 +215,4 @@ Bridge dataset: yellow_plate, cloth
 | 15    | manhole cover     |
 | 16    | envelope          |
 | 17    | notepad           |
-
 | 18    | black_plate       |
