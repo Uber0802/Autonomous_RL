@@ -45,7 +45,7 @@ class Args:
     log: str = "/workspace/Autonomous_RL/two_buffer_160_seed2.txt"
 
     # Environment
-    obj_set: str = "rand"   # "fixed" "rand" "rand_ood"
+    obj_set: str = "rand"   # "fixed" "rand" "rand_ood" "rand_8"
     obj1_index: int = 7     # ketchup bottle
     obj2_index: int = 2     # shovel
     plate1_index: int = 1   # plate
@@ -74,6 +74,11 @@ class Args:
 
     # reset robot
     reset_robot: bool = True
+
+    # random task order
+    random_task_order: bool = False
+
+    few_position: bool = False
 
     # other env settings
     use_same_init: bool = True
@@ -111,6 +116,7 @@ class Args:
 
     # other
     wandb: bool = True
+    wandb_dir: str = ""
     only_render: bool = False
     only_render_seq: bool = False
     render_info: bool = False
@@ -137,6 +143,7 @@ class Runner:
             config=all_args.__dict__,
             project="RLVLA",
             name=self.args.name,
+            dir=self.args.wandb_dir,
             mode="online" if self.args.wandb else "offline",
         )
         self.save_dir = Path(wandb.run.dir)
@@ -189,6 +196,9 @@ class Runner:
         self.exceed_reset_limit = False
         self.hard_reset_count = 0   # Fixed reset at the start of each episode
         self.soft_reset_count = 0   # Reset unsuitable envs
+
+        if self.args.few_position:
+            self.args.obj_set = "fixed"
 
     def extract_obj_recep(self, text_string):
         pattern = r"put (.*?) on (.*)"
@@ -529,10 +539,17 @@ class Runner:
             self.prealloc_buffer.reset()
 
             objects, receptacles = [], []
-            for i in range(4):
-                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                objects.extend([obj] * group_size)
-                receptacles.extend([recep] * group_size)
+            if not self.args.random_task_order:
+                for i in range(4):
+                    obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                    objects.extend([obj] * group_size)
+                    receptacles.extend([recep] * group_size)
+            else:
+                for i in range(self.args.num_envs):
+                    rand = random.randint(0, 3)
+                    obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + rand) % len(self.task_list)])
+                    objects.extend([obj])
+                    receptacles.extend([recep])
 
             obs_img, instruction, info = self.env.reset(
                 obj_set=self.args.obj_set,
@@ -596,10 +613,17 @@ class Runner:
                     else:
                         self.task_id = (self.task_id + 1) % len(self.task_list)
                         objects, receptacles = [], []
-                        for i in range(4):
-                            obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
-                            objects.extend([obj] * group_size)
-                            receptacles.extend([recep] * group_size)
+                        if not self.args.random_task_order:
+                            for i in range(4):
+                                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + i) % len(self.task_list)])
+                                objects.extend([obj] * group_size)
+                                receptacles.extend([recep] * group_size)
+                        else:
+                            for i in range(self.args.num_envs):
+                                rand = random.randint(0, 3)
+                                obj, recep = self.extract_obj_recep(self.task_list[(self.task_id + rand) % len(self.task_list)])
+                                objects.extend([obj])
+                                receptacles.extend([recep])
                         self.env.set_forward()
                         self.env.set_task(objects, receptacles)
                         forward_count += 1

@@ -134,7 +134,6 @@ class SimlerWrapper:
             options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.env.device)
 
 
-        #import ipdb; ipdb.set_trace()
 
         obs, info = self.env.reset(options=options)
 

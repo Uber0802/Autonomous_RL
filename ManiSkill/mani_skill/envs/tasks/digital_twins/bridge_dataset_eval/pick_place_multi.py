@@ -1483,6 +1483,12 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             le = 16
             le_mod = 17
             self._generate_init_pose()
+        elif obj_set == "rand_8":
+            lp = 1
+            lp_offset = 0
+            le = 16
+            le_mod = 17
+            self._generate_init_pose()
         elif obj_set == "rand_ood":
             lp = 1
             lp_offset = 0
@@ -1521,10 +1527,15 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
         if obj_set != "fixed":
-            rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+            if obj_set != "rand_8":
+                rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+            else:
+                rand_id = torch.randint(low=0, high=ltt, size=(b // 8,), device=self.device)
+                rand_id = rand_id.repeat(8)
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1
             self.select_quat_ids = rand_id % l2
+
 
     def set_current_task(self, object: list[str], receptacle: list[str]):
         select_carrot1 = [self.carrot_names[idx] for idx in self.select_carrot1_ids]
