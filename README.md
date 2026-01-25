@@ -1,4 +1,5 @@
-# Non-Episodic RL
+# Reset-Free RL
+This repository contains the code for the paper _. An Empirical Study. The pretrained checkpoints are available at HuggingFace.
 
 ## Table of Contents
 - [Install](#install)
@@ -20,14 +21,18 @@
 
 ## Install
 1. Clone the repository
+    ```bash
+    git clone git@github.com:Uber0802/Autonomous_RL.git
+    ```
 2. Move into the repository directory.
     ```bash
-    cd Autonomous_RL
+    export RFRL_ROOT=$(pwd)/Autonomous_RL
+    cd $RFRL_ROOT
     ```
-3. Create conda env: nerl_env.
+3. Create conda environment: rfrl_env.
     ```bash
-    conda create -n nerl_env -y python=3.10
-    conda activate nerl_env
+    conda create -n rfrl_env -y python=3.10
+    conda activate rfrl_env
     ```
 4. Run installation.
     ```bash
@@ -57,26 +62,30 @@ Modify the script as needed, then run:
 - `obj_set`: 
     - "fixed": Use identical scene and object layout across all environments.
     - "rand": Use random scene and object layout across all environments.
+    - "rand_8": Use 8 different scenes and objects layout across all environments.
     - "rand_ood": For evaluating OOD.
 - `obj1_index` and `obj2_index`: Choose an object using its index from the [Object List](#object-list). (Default: 7 and 2)
 - `plate1_index` and `plate2_index`: Choose an plate using its index from the [Plate List](#plate-list).(Default: 1 and 2)
 
 ### Training Configs
-- `max_episodes`: Total number of training episodes.
-- `max_reset`: Total number of resets. (Default: 8192 = 128 episodes * 64 environments, 655360 steps for training_len=80)
-- `training_len`: Rollout length (steps per episode). Examples: 80, 320, 1280, 2560.
-- `training_interval`: Number of rollout steps between VLA training updates. (Default: 160)
-- `instruction_switch_interval`: Number of rollout steps before switching to a new instruction. (Default: 80)
-- `interval_eval`: Number of episodes between evaluation.
-- `interval_save`: Number of episodes between saving model weights.
-- `eval_at_start`: Enable evaluation at step 0.
+- `max_episodes` : Total number of training episodes.
+- `max_reset` : Total number of resets. (Default: 8192 = 128 episodes * 64 environments, 655360 steps for training_len=80)
+- `training_len` : Rollout length (steps per episode). Examples: 80, 320, 1280, 2560.
+- `training_interval` : Number of rollout steps between VLA training updates. (Default: 160)
+- `instruction_switch_interval` : Number of rollout steps before switching to a new instruction. (Default: 80)
+- `interval_eval` : Number of episodes between evaluation.
+- `interval_save` : Number of episodes between saving model weights.
+- `eval_at_start` : Enable evaluation at step 0.
 
 ### Forward Backward
-- `enable_backward`: Enable forward backward training.
-- `backward_interval`: Number of forward instructions between backward instruction. (Set to 1 for interleaved switch)
+- `enable_backward` : Enable forward backward training.
+- `backward_interval` : Number of forward instructions between backward instruction. (Set to 1 for interleaved switch)
+
+### Reset Gripper
+- `no-reset-robot` : Disable reset gripper at every instruction switch.
 
 ### Reset Unsuitable
-- `reset_unsuitable`: Reset environments that fail to complete the current task after an instruction switch.
+- `reset_unsuitable` : Reset environments that fail to complete the current task after an instruction switch.
 
 ### FIFO Buffer
 Online + Offline Training
@@ -206,5 +215,4 @@ Bridge dataset: yellow_plate, cloth
 | 15    | manhole cover     |
 | 16    | envelope          |
 | 17    | notepad           |
-
 | 18    | black_plate       |
