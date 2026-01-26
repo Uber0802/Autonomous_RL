@@ -3,6 +3,8 @@ This repository contains the code for the paper _. An Empirical Study. The pretr
 
 ## Table of Contents
 - [Install](#install)
+- [Sensory Observations](#sensory-observations)
+- [Action Space](#action-space)
 - [Train](#train)
   - [Basic Configs](#basic-configs)
   - [Environment Configs](#environment-configs)
@@ -44,6 +46,21 @@ This repository contains the code for the paper _. An Empirical Study. The pretr
     sudo apt-get update
     sudo apt-get install -y libglvnd-dev
     ```
+
+
+## Sensory Observations
+This project uses ManiSkill digital-twin environments with `obs_mode="rgb+segmentation"`. Observations include:
+1. **3rd-view RGB camera** — resolution `640x480` from `3rd_view_camera` (Logitech C920 intrinsics).
+2. **3rd-view segmentation** — pixel-wise segmentation aligned with the RGB camera.
+
+Note: the training/eval wrapper currently consumes the RGB image only (see `SimplerEnv/simpler_env/env/simpler_wrapper.py`).
+
+## Action Space
+The environment uses the control mode `arm_pd_ee_target_delta_pose_align2_gripper_pd_joint_pos`, exposed as a 7-DoF continuous action:
+1. **Delta translation** — end-effector displacement in xyz (3).
+2. **Delta rotation** — axis-angle rotation delta (3).
+3. **Gripper command** — open/close (1), mapped to `-1` (close) or `+1` (open) in the wrapper.
+
 
 ## Train
 All experiments are launched through `train.sh`.
