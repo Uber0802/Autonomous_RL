@@ -104,6 +104,12 @@ Modify the script as needed, then run:
 ### Reset Unsuitable
 - `reset_unsuitable` : Reset environments that fail to complete the current task after an instruction switch.
 
+### Task Order
+- `random_task_order` : Randomize the task instruction order during training.
+
+### Few Position
+- `few_position` : Restrict to a single object position for training and in-domain evaluation.
+
 ### FIFO Buffer
 Online + Offline Training
 - `fifo_buffer`: Enable FIFO replay buffer.
