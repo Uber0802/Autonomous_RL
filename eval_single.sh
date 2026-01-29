@@ -12,5 +12,5 @@ for vla_load_path in "${vla_load_paths[@]}"; do
       --vla_path="openvla/openvla-7b" --vla_unnorm_key="bridge_orig" \
       --vla_load_path="${vla_load_path}" \
       --seed=0 --obj_set="rand" \
-      --no_wandb --only_render_seq
+      --no_wandb --only_render
 done
