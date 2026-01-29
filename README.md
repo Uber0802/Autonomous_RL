@@ -26,9 +26,6 @@ This repository contains the code for the paper "CRONOS : Benchmarking Multi-Tas
 
 ## Install
 1. Clone the repository
-    ```bash
-    git clone git@github.com:Uber0802/Autonomous_RL.git
-    ```
 2. Move into the repository directory.
     ```bash
     export RFRL_ROOT=$(pwd)/Autonomous_RL
@@ -242,3 +239,4 @@ Bridge dataset: yellow_plate, cloth
 | 16    | envelope          |
 | 17    | notepad           |
 | 18    | black_plate       |
+
