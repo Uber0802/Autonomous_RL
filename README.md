@@ -25,23 +25,30 @@ This repository contains the code for the paper "CRONOS : Benchmarking Multi-Tas
 - [Plate List](#plate-list)
 
 ## Install
-1. Clone the repository
+1. Clone or download the repository
 2. Move into the repository directory.
     ```bash
     export RFRL_ROOT=$(pwd)/Autonomous_RL
     cd $RFRL_ROOT
     ```
-3. Create conda environment: cronos_env.
+3. (For Anonymous Repository)
+    ```bash
+    mkdir Autonomous_RL
+    # mv XXX.zip Autonomous_RL
+    cd Autonomous_RL
+    # unzip XXX.zip
+    ```
+4. Create conda environment: cronos_env.
     ```bash
     conda create -n cronos_env -y python=3.10
     conda activate cronos_env
     ```
-4. Run installation.
+5. Run installation.
     ```bash
     chmod +x *.sh
     ./setup.sh
     ```
-5. Optional: For ubuntu 2204
+6. Optional: For ubuntu 2204
     ```bash
     sudo apt-get update
     sudo apt-get install -y libglvnd-dev
@@ -239,4 +246,5 @@ Bridge dataset: yellow_plate, cloth
 | 16    | envelope          |
 | 17    | notepad           |
 | 18    | black_plate       |
+
 
