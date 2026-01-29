@@ -31,10 +31,10 @@ This repository contains the code for the paper "CRONOS : Benchmarking Multi-Tas
     export RFRL_ROOT=$(pwd)/Autonomous_RL
     cd $RFRL_ROOT
     ```
-3. Create conda environment: rfrl_env.
+3. Create conda environment: cronos_env.
     ```bash
-    conda create -n rfrl_env -y python=3.10
-    conda activate rfrl_env
+    conda create -n cronos_env -y python=3.10
+    conda activate cronos_env
     ```
 4. Run installation.
     ```bash
