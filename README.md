@@ -1,5 +1,5 @@
 # Reset-Free RL
-This repository contains the code for the paper _. An Empirical Study. The pretrained checkpoints are available at HuggingFace.
+This repository contains the code for the paper "CRONOS : Benchmarking Multi-Task Robotic Manipulation for Reset-Free Reinforcement Learning". CRONOS introduces a large-scale benchmark for studying multi-task robotic manipulation under a reset-free training protocol, and provides an empirical evaluation of representative reinforcement learning methods. The pretrained checkpoints are available at HuggingFace.
 
 ## Table of Contents
 - [Install](#install)
