@@ -1,0 +1,6 @@
+__pycache__/
+CRONOS/wandb
+CRONOS/test_checkpoints/
+CRONOS/test_alignment.py
+CRONOS/test_vla_limits.py
+CRONOS/cronos_mmap_*
