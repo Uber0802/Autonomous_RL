@@ -1,5 +1,37 @@
-import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # Silence fork warnings
+
+def configure_vulkan():
+    from pathlib import Path
+    import subprocess
+    
+    # 1. Find ICD
+    vulkan_paths = [
+        "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        "/etc/vulkan/icd.d/nvidia_icd.json",
+        "/usr/lib/x86_64-linux-gnu/nvidia/vulkan/icd.d/nvidia_icd.json"
+    ]
+    for path in vulkan_paths:
+        if Path(path).exists():
+            os.environ["VK_ICD_FILENAMES"] = path
+            break
+            
+    # 2. Find Lib Path (Fixes IncompatibleDriver)
+    try:
+        # Try to find where libnvidia-glcore lives
+        result = subprocess.run(
+            ["find", "/usr/lib", "-name", "libnvidia-glcore.so*", "-print", "-quit"],
+            capture_output=True, text=True, timeout=5
+        )
+        lib_file = result.stdout.strip()
+        if lib_file:
+            lib_dir = str(Path(lib_file).parent)
+            old_ld = os.environ.get("LD_LIBRARY_PATH", "")
+            if lib_dir not in old_ld:
+                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{old_ld}" if old_ld else lib_dir
+    except Exception:
+        pass
+
+configure_vulkan()
 import logging
 
 # Suppress ManiSkill agent registration warnings
