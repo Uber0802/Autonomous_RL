@@ -16,20 +16,4 @@ pip install -e ../ManiSkill
 pip install -e ../SimplerEnv
 pip install -e ../openvla
 
-# 3. NVIDIA Vulkan ICD (Fixes IncompatibleDriver)
-FOUND_VULKAN=$(find /usr/share/vulkan/icd.d -name "nvidia_icd.json" -print -quit 2>/dev/null)
-if [ -n "$FOUND_VULKAN" ]; then
-    export VK_ICD_FILENAMES="$FOUND_VULKAN"
-    echo "Vulkan ICD found and configured: $FOUND_VULKAN"
-else
-    echo "WARNING: NVIDIA Vulkan ICD not found in common paths."
-fi
-
-# 4. Library Path (Fixes IncompatibleDriver)
-NVIDIA_LIB_PATH=$(find /usr/lib -name "libnvidia-glcore.so*" -print -quit 2>/dev/null | xargs dirname)
-if [ -n "$NVIDIA_LIB_PATH" ]; then
-    export LD_LIBRARY_PATH="$NVIDIA_LIB_PATH:$LD_LIBRARY_PATH"
-    echo "NVIDIA Library Path added: $NVIDIA_LIB_PATH"
-fi
-
 echo "CRONOS environment setup complete."
