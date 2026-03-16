@@ -107,16 +107,6 @@ class RewardShaper:
             "target_receptacle_pose": plate_p
         }
         
-        # Add episode metrics
-        info["episode"] = {
-            "success": src_on_target.float().tolist(),
-            "is_src_obj_grasped": self.is_src_obj_grasped_ever.float().tolist(),
-            "consecutive_grasp": self.consecutive_grasp_ever.float().tolist(),
-            "src_on_table": src_on_table.float().tolist(),
-            "dist_tcp_to_obj": dist_tcp_to_obj.tolist(),
-            "dist_obj_to_recep": dist_obj_to_recep.tolist()
-        }
-        
         return info
 
     def reset_reward_stats(self):

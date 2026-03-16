@@ -55,4 +55,6 @@ def inspect_memmap(mmap_dir):
     print(f"Found {total_valid} populated trajectories out of {max_envs}.")
 
 if __name__ == "__main__":
-    inspect_memmap("/mnt/home/ChengDian/workspace/Benchmark/CRONOS/cronos_mmap_4064452")
+    # Example usage with relative path to a mmap directory
+    # inspect_memmap("cronos_mmap_PID")
+    pass

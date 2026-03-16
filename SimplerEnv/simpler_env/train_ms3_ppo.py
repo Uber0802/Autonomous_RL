@@ -71,7 +71,7 @@ class Args:
     # ppo & grpo
     alg_name: str = "ppo"  # ppo, grpo
     alg_grpo_fix: bool = True
-    alg_gradient_accum: int = 20
+    alg_gradient_accum: int = 1
     alg_ppo_epoch: int = 1
     alg_entropy_coef: float = 0.0
 

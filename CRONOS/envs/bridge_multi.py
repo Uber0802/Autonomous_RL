@@ -833,11 +833,11 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
     def object_name(self):
@@ -903,11 +903,11 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
         extra_actor = [self.objs_carrot[n] for n in select_extra]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -1218,11 +1218,11 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
     def object_name(self):
@@ -1288,11 +1288,11 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         extra_actor = [self.objs_plate[n] for n in select_extra]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -2236,11 +2236,11 @@ class ThreeObjectThreeReceptacle(BaseMultiPickPlace):
         select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
     def object_name(self):
@@ -2326,11 +2326,11 @@ class ThreeObjectThreeReceptacle(BaseMultiPickPlace):
         extra4_actor = [self.objs_plate[n] for n in select_extra4]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
         # import ipdb; ipdb.set_trace()
         # set pose for robot

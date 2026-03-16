@@ -15,7 +15,7 @@ class SeparatedReplayBuffer(object):
         self.value_preds = np.zeros((self.ep_len + 1, self.num_env, 1), dtype=np.float32)
         self.returns = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
         self.actions = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.int32)
-        self.action_log_probs = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.float32)
+        self.action_log_probs = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
         self.rewards = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
         self.masks = np.ones((self.ep_len + 1, self.num_env, 1), dtype=np.float32)
 
@@ -125,3 +125,4 @@ class SeparatedReplayBuffer(object):
 
             yield (obs_batch, instruct_batch, actions_batch, value_preds_batch, return_batch, masks_batch,
                    old_action_logits_batch, adv_targ)
+ 

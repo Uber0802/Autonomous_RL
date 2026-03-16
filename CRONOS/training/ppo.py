@@ -11,7 +11,7 @@ class CronosPPO:
         self.clip_param = 0.2
         self.entropy_coef = args.alg_entropy_coef
         self.max_grad_norm = getattr(args, "vla_grad_norm", 10.0)
-        self.gradient_accum = getattr(args, "alg_gradient_accum", 20)
+        self.gradient_accum = getattr(args, "alg_gradient_accum", 1)
         
     def train_epoch(self, buffer):
         """Runs one Epoch of PPO training on the provided buffer with gradient accumulation."""
@@ -36,6 +36,9 @@ class CronosPPO:
             values_old = torch.tensor(batch["values"]).to(device)
             
             # 2. Forward Pass & Evaluate
+            # if idx == 0:
+            #     print(f"[DEBUG MINIBATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values_old: {values_old.mean().item():.6f}/{values_old.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs_old: {logprobs_old.mean().item():.6f}/{logprobs_old.std().item():.6f}", flush=True)
+
             logprobs, entropy, values = self.policy.evaluate_actions(obs_dict, actions)
             
             # 3. Policy Loss (Clipped Surrogate)

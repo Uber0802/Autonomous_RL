@@ -57,7 +57,7 @@ class Args:
     buffer_minibatch: int = 8
     buffer_inferbatch: int = 32
     alg_ppo_epoch: int = 1
-    alg_gradient_accum: int = 20
+    alg_gradient_accum: int = 1
     vla_grad_norm: float = 10.0
     alg_entropy_coef: float = 0.0
     vla_path: str = "openvla/openvla-7b"

@@ -25,7 +25,7 @@ from mani_skill.utils.structs.types import SimConfig
 
 BRIDGE_DATASET_ASSET_PATH = ASSET_DIR / "tasks/bridge_v2_real2sim_dataset/"
 # Real2Sim tuned WidowX250S robot
-@register_agent(asset_download_ids=["widowx250s"])
+@register_agent(asset_download_ids=["widowx250s"], override=True)
 class WidowX250SBridgeDatasetFlatTable(WidowX250S):
     uid = "widowx250s_bridgedataset_flat_table"
     arm_joint_names = [
@@ -127,7 +127,7 @@ class WidowX250SBridgeDatasetFlatTable(WidowX250S):
 
 
 # Tuned for the sink setup
-@register_agent(asset_download_ids=["widowx250s"])
+@register_agent(asset_download_ids=["widowx250s"], override=True)
 class WidowX250SBridgeDatasetSink(WidowX250SBridgeDatasetFlatTable):
     uid = "widowx250s_bridgedataset_sink"
 

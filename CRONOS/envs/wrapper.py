@@ -72,7 +72,18 @@ class CronosWrapper:
         info = self.reward_shaper.compute_info(self.env)
         reward = self.reward_shaper.compute_reward(info)
         
-        return obs_image, reward, truncated.reshape(-1, 1), info
+        truncated_reshaped = truncated.reshape(-1, 1)
+        if truncated_reshaped.any():
+            info["episode"] = {
+                "success": info["success"].float().tolist(),
+                "is_src_obj_grasped": self.reward_shaper.is_src_obj_grasped_ever.float().tolist(),
+                "consecutive_grasp": self.reward_shaper.consecutive_grasp_ever.float().tolist(),
+                "src_on_table": info["src_on_table"].float().tolist(),
+                "dist_tcp_to_obj": info["gripper_carrot_dist"].tolist(),
+                "dist_obj_to_recep": info["dist_obj_to_recep"].tolist()
+            }
+            
+        return obs_image, reward, truncated_reshaped, info
 
     def reset(self, same_init=True, obj_set_override=None, **kwargs):
         """Unified reset function using suite and reset strategy."""

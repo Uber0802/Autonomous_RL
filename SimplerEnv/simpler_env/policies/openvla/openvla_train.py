@@ -272,6 +272,9 @@ class OpenVLAPPO:
 
     def train_ppo_step(self, idx, total, batch):
         obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
+        
+        # if idx == 0:
+        #     print(f"[DEBUG MINIBATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values_old: {value_preds.mean().item():.6f}/{value_preds.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs_old: {old_logprob.mean().item():.6f}/{old_logprob.std().item():.6f}", flush=True)
 
         obs = dict(image=torch.tensor(obs_image).to(self.tpdv["device"]), task_description=instruct)  # uint8
         actions = torch.tensor(actions).to(self.tpdv["device"])  # int32
@@ -288,7 +291,7 @@ class OpenVLAPPO:
         ratio = torch.exp(logprob - old_logprob)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
-        policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         # Value loss
         value_pred_clipped = value_preds + (values - value_preds).clamp(-self.ppo_clip, self.ppo_clip)
@@ -359,7 +362,7 @@ class OpenVLAPPO:
         ratio = torch.exp(logprob - old_logprob)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.ppo_clip, 1 + self.ppo_clip) * advantages
-        policy_loss = -torch.min(surr1, surr2).sum(dim=-1, keepdim=True).mean()
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         # Entropy loss
         entropy_loss = entropy.mean()

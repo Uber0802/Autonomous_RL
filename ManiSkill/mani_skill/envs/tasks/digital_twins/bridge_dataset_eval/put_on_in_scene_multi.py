@@ -19,7 +19,7 @@ from mani_skill.utils.structs.pose import Pose
 from mani_skill.utils.structs.types import SimConfig
 from mani_skill.utils.registration import register_env
 
-CARROT_DATASET_DIR = Path(__file__).parent / ".." / ".." / ".." / ".." / "assets" / "carrot"
+CARROT_DATASET_DIR = Path(__file__).resolve().parents[4] / "assets" / "carrot"
 
 
 def masks_to_boxes_pytorch(masks):
@@ -258,11 +258,11 @@ class PutOnPlateInScene25(BaseEnv):
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -1051,11 +1051,11 @@ class PutOnPlateInScene25VisionTexture03(PutOnPlateInScene25MainV3):
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -1326,11 +1326,11 @@ class PutOnPlateInScene25VisionWhole03(PutOnPlateInScene25MainV3):
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -1809,11 +1809,11 @@ class PutOnPlateInScene25MultiCarrot(PutOnPlateInScene25MainV3):
         extra_actor = [self.objs_carrot[n] for n in select_extra]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -2081,11 +2081,11 @@ class PutOnPlateInScene25MultiPlate(PutOnPlateInScene25MainV3):
         extra_actor = [self.objs_plate[n] for n in select_extra]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
@@ -2452,11 +2452,11 @@ class PutOnPlateInScene25EEPose(PutOnPlateInScene25MainV3):
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
         # for motion planning capability
-        self.source_obj_name = select_carrot[0]
-        self.target_obj_name = select_plate[0]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
         self.objs = {
-            self.source_obj_name: carrot_actor[0],
-            self.target_obj_name: plate_actor[0]
+            self.source_obj_name[0]: carrot_actor[0],
+            self.target_obj_name[0]: plate_actor[0]
         }
 
         # set pose for robot
