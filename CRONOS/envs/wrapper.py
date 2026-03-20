@@ -26,6 +26,15 @@ class CronosWrapper:
         )
         self.env = gym.make(**env_config)
         
+        import random
+        random.seed(self.args.seed)
+        self.rand_episode_id = random.randint(0, 1000)
+        
+        # AutoRL compatibility: Explicitly seed the env with an initial reset
+        options = {}
+        options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device)
+        self.env.reset(seed=[self.args.seed * 1000 + i for i in range(self.args.num_envs)], options=options)
+        
         # Integrated Modules
         self.suite = task_suite
         self.scheduler = task_scheduler
@@ -97,7 +106,7 @@ class CronosWrapper:
             "plate3_index": getattr(self.args, "plate3_index", 3),
         }
         if same_init:
-            options["episode_id"] = torch.full((self.num_envs,), self.args.seed, dtype=torch.long, device=self.device)
+            options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
             
         obs, info = self.env.reset(options=options)
         
@@ -168,3 +177,10 @@ class CronosWrapper:
     def set_scheduler(self, scheduler):
         """Assigns a TaskScheduler to the wrapper."""
         self.scheduler = scheduler
+
+    def get_obs_instruct_info(self):
+        """Returns current obs, instructions, and info without resetting the env."""
+        obs = self.get_obs_image()
+        instruct = self.get_language_instructions()
+        info = self.reward_shaper.compute_info(self.env)
+        return obs, instruct, info

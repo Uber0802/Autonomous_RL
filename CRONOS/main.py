@@ -29,6 +29,9 @@ from mani_skill.utils.visualization.misc import images_to_video, put_info_on_ima
 # Standard Args from train_ms3_ppo.py
 from dataclasses import dataclass
 from typing import Annotated
+from collections import defaultdict
+import pprint
+import numpy as np
 
 @dataclass
 class Args:
@@ -57,7 +60,7 @@ class Args:
     buffer_minibatch: int = 8
     buffer_inferbatch: int = 32
     alg_ppo_epoch: int = 1
-    alg_gradient_accum: int = 1
+    alg_gradient_accum: int = 20
     vla_grad_norm: float = 10.0
     alg_entropy_coef: float = 0.0
     vla_path: str = "openvla/openvla-7b"
@@ -79,6 +82,9 @@ class Args:
     vla_checkpoint_interval: int = 8
     vla_save_path: str = "checkpoints"
     resume_iteration: int = 0
+    only_render: bool = False
+    only_render_seq: bool = False
+    eval_sequences: int = 5  # number of permutation sequences (1 training order + N-1 random)
 
 class CronosRunner:
     """Coordinates the CRONOS training workflow."""
@@ -86,6 +92,14 @@ class CronosRunner:
     def __init__(self, args):
         self.args = args
         self.iteration = args.resume_iteration
+        
+        # Set Seed for deterministic alignment (matching AutoRL exactly)
+        import numpy as np
+        import random
+        import torch
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
         
         # Initialize WandB
         run = wandb.init(
@@ -102,17 +116,17 @@ class CronosRunner:
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
         self.device = torch.device(f"cuda:{device_id}")
         
-        # Initialize Modular Components
-        self.suite = TaskSuite()
-        self.env = CronosWrapper(args, None, self.suite, device=self.device)
-        
-        # Initialize Policy
+        # Initialize Policy FIRST (matching AutoRL order: policy before env)
         from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy
         self.policy = OpenVLAPolicy(args, device_id=device_id_other)
-        self.env.unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
-        
-        # Get task pool from env after a synchronized reset and initialize scheduler
-        self.env.reset() 
+        self.ppo = CronosPPO(args, self.policy)
+
+        # Initialize Env AFTER policy (matching AutoRL order)
+        unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
+        self.suite = TaskSuite()
+        self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
+
+        # Get task pool from env (CronosWrapper.__init__ already performs a seeded reset)
         task_pool = self.env.get_task_pool()
         self.scheduler = TaskScheduler(
             task_pool=task_pool,
@@ -120,8 +134,7 @@ class CronosRunner:
             num_envs=args.num_envs
         )
         self.env.set_scheduler(self.scheduler)
-        
-        self.ppo = CronosPPO(args, self.policy)
+
         self.buffer = CronosReplayBuffer(args)
         
         # Register cleanup for memmap files
@@ -150,50 +163,66 @@ class CronosRunner:
 
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
-    def eval(self, iteration, task_idx, obj_set, envs_object, envs_recep, prefix="ood"):
-        """Runs a sequential robust evaluation sequence akin to eval.py out of distribution"""
+    def eval(self, iteration, task_idx, obj_set, envs_object, envs_recep, prefix="ood", reset=True):
+        """Evaluates one task episode, matching AutoRL's eval() behavior."""
         self.policy.prep_rollout()
-        
-        # Reset specific targets across all envs for evaluation segment
-        self.env.set_task(envs_object, envs_recep)
-        obs, instruct, info = self.env.reset(obj_set_override=obj_set)
-        print(f"Evaluating: {instruct[0]}")
-        
-        episode_success = torch.zeros(self.args.num_envs, dtype=torch.bool, device=self.device)
-        
+
+        if reset:
+            obs, _, info = self.env.reset(obj_set_override=obj_set)
+            # Re-apply eval task: wrapper.reset() may override via scheduler
+            self.env.set_task(envs_object, envs_recep)
+            instruct = self.env.get_language_instructions()
+        else:
+            self.env.set_task(envs_object, envs_recep)
+            obs, instruct, info = self.env.get_obs_instruct_info()
+
+        print("Evaluating:", instruct[0])
+
+        env_infos = defaultdict(list)
+
         if self.args.record_video:
             video_frames = [[] for _ in range(self.args.num_envs)]
             for i in range(self.args.num_envs):
                 video_frames[i].append(obs[i].cpu().numpy().copy())
-        
+
         for _ in tqdm(range(self.args.episode_len), desc="eval", leave=False):
             with torch.no_grad():
                 val, action, logp = self._get_action(obs, instruct, deterministic=True)
-                
+
             obs, reward, truncated, env_info = self.env.step(action)
-            episode_success |= env_info["success"]
-            
+
+            # Collect terminal episode stats (fires when any env truncates)
+            if "episode" in env_info:
+                for k, v in env_info["episode"].items():
+                    env_infos[k] += v  # v is a list of per-env values
+
             if self.args.record_video:
                 for i in range(self.args.num_envs):
                     video_frames[i].append(obs[i].cpu().numpy().copy())
-                    
+
+        env_stats = {k: float(np.mean(v)) for k, v in env_infos.items()}
+        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
+        print()
+
         if self.args.record_video:
             render_dir = self.glob_dir / f"eval_{prefix}_ep{iteration}_task{task_idx}"
             render_dir.mkdir(parents=True, exist_ok=True)
             obj = envs_object[0]
             recep = envs_recep[0]
             for i in range(self.args.num_envs):
-                success_val = int(episode_success[i].item())
+                success_val = int(env_infos["success"][i]) if "success" in env_infos and i < len(env_infos["success"]) else 0
                 video_name = f"video_{i}-{obj}_{recep}-s_{success_val}"
                 images_to_video(video_frames[i], str(render_dir), video_name, fps=10, verbose=False)
-                
-        return episode_success.float().mean().item()
+
+        return env_stats
 
     def run_rollout(self):
         """Executes a non-episodic rollout with instruction switching and partial resets."""
         self.policy.prep_rollout()
         obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
+        
+        print(f"[DEBUG INIT CRONOS] obs: {obs.float().mean().item():.6f}, instr: {instruct[0][:30]}...", flush=True)
         
         self.video_frames = [[] for _ in range(self.args.num_envs)]
         
@@ -215,6 +244,9 @@ class CronosRunner:
 
             # 2. Environment Step
             next_obs, reward, truncated, info = self.env.step(action)
+
+            if getattr(self, 'iteration', 0) == 0:
+                print(f"[DEBUG STEP] step: {step_idx}, reward: {reward.mean().item():.6f}, value: {value.mean().item():.6f}, logprob: {logprob.mean().item():.6f}, action: {action.float().mean().item():.6f}, obs: {obs.float().mean().item():.6f}", flush=True)
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
             
@@ -284,20 +316,24 @@ class CronosRunner:
             if train_results:
                 wandb.log(train_results[-1], step=iteration)
             
-            # 4. In-Training Evaluation
-            if (iteration + 1) % self.args.eval_interval == 0 or (iteration + 1) == self.args.max_episodes:
-                print(f"Running periodic evaluation at iteration {iteration}...")
+            # 4. In-Training Evaluation (matching AutoRL interval_eval logic)
+            steps = (iteration + 1) * self.args.training_len * self.args.num_envs
+            if iteration % self.args.eval_interval == self.args.eval_interval - 1 or iteration == self.args.max_episodes - 1:
                 task_pool = self.env.get_task_pool()
-                for task_idx, task in enumerate(task_pool):
+
+                # In-domain eval — matches AutoRL "Evaluating Random Scene"
+                print(f"Evaluating Random Scene at {steps}")
+                for task in task_pool:
                     obj, recep = TaskScheduler._extract_obj_recep(task)
-                    
-                    # 1. In-Domain Evaluation ("rand")
-                    success_rate_id = self.eval(iteration, task_idx, "rand", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix="in_domain")
-                    wandb.log({f"eval_in_domain/{task}_success": success_rate_id}, step=iteration)
-                    
-                    # 2. Out-Of-Domain Evaluation ("rand_ood")
-                    success_rate_ood = self.eval(iteration, task_idx, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix="ood")
-                    wandb.log({f"eval_ood/{task}_success": success_rate_ood}, step=iteration)
+                    sval_stats = self.eval(iteration, 0, self.args.obj_set, [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"in_domain_{obj}_{recep}")
+                    wandb.log({f"eval_in_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()}, step=steps)
+
+                # OOD eval — matches AutoRL "Evaluating Train Scene" (AutoRL's confusing label kept for parity)
+                print(f"Evaluating Train Scene at {steps}")
+                for task in task_pool:
+                    obj, recep = TaskScheduler._extract_obj_recep(task)
+                    sval_stats = self.eval(iteration, 0, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"ood_{obj}_{recep}")
+                    wandb.log({f"eval_out_of_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()}, step=steps)
             
             if (iteration + 1) % self.args.vla_checkpoint_interval == 0:
                 ckpt_path = self.glob_dir / f"steps_{iteration + 1:04d}"
@@ -321,12 +357,38 @@ def main():
     args = tyro.cli(Args)
     runner = CronosRunner(args)
     
-    try:
+    if args.only_render:
+        # Standard Single/All Task Evaluation
+        task_pool = runner.env.get_task_pool()
+        for task_idx, task in enumerate(task_pool):
+            obj, recep = TaskScheduler._extract_obj_recep(task)
+            runner.eval(0, task_idx, args.obj_set, [obj]*args.num_envs, [recep]*args.num_envs, prefix="eval")
+            
+    elif args.only_render_seq:
+        # Multi-sequence permutation eval matching eval.py CronosEvaluator.evaluate()
+        import random as _random
+        runner.env.reset()
+        task_pool = runner.env.get_task_pool()
+        print(f"Task Pool: {task_pool}")
+
+        perms = list(itertools.permutations(task_pool))
+        training_seq = perms.pop(0)  # first permutation = training order
+
+        _random.seed(args.seed)
+        selected_perms = _random.sample(perms, min(args.eval_sequences - 1, len(perms)))
+        all_sequences = [training_seq] + selected_perms
+
+        print(f"Running Sequential Evaluation across {len(all_sequences)} sequences...")
+        for seq_idx, task_list in enumerate(all_sequences):
+            print(f"Sequence {seq_idx}: {task_list}")
+            for task_idx, task_str in enumerate(task_list):
+                obj, recep = TaskScheduler._extract_obj_recep(task_str)
+                reset = (task_idx == 0)
+                sval_stats = runner.eval(seq_idx, task_idx, args.obj_set, [obj]*args.num_envs, [recep]*args.num_envs, prefix=f"seq{seq_idx}_task{task_idx}", reset=reset)
+                wandb.log({f"eval/seq{seq_idx}_task{task_idx}_{k}": v for k, v in sval_stats.items()})
+
+    else:
         runner.train()
-    finally:
-        # Robust cleanup on exit or interrupt
-        if hasattr(runner, "buffer"):
-            runner.buffer.cleanup()
 
 if __name__ == "__main__":
     main()

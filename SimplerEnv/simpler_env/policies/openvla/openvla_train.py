@@ -46,8 +46,17 @@ class OpenVLAPolicy:
             vh_mode="a0",
         )
 
+        # Deterministic value head init: from_pretrained uses internal HF init (not seeded);
+        # re-init explicitly so both CRONOS and AutoRL produce identical value head weights.
+        torch.manual_seed(self.args.seed)
+        torch.cuda.manual_seed_all(self.args.seed)
+        self.vla.value_head._init_weights()
+
         # openvla: lora
         if not self.args.vla_load_path:
+            # Deterministic LoRA init: seed before get_peft_model so lora_A weights are identical
+            torch.manual_seed(self.args.seed)
+            torch.cuda.manual_seed_all(self.args.seed)
             lora_config = LoraConfig(
                 r=self.args.vla_lora_rank,
                 lora_alpha=min(self.args.vla_lora_rank, 16),
@@ -273,8 +282,8 @@ class OpenVLAPPO:
     def train_ppo_step(self, idx, total, batch):
         obs_image, instruct, actions, value_preds, returns, masks, old_logprob, advantages = batch
         
-        # if idx == 0:
-        #     print(f"[DEBUG MINIBATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values_old: {value_preds.mean().item():.6f}/{value_preds.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs_old: {old_logprob.mean().item():.6f}/{old_logprob.std().item():.6f}", flush=True)
+        if idx == 0:
+            print(f"[DEBUG MINIBATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values_old: {value_preds.mean().item():.6f}/{value_preds.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs_old: {old_logprob.mean().item():.6f}/{old_logprob.std().item():.6f}", flush=True)
 
         obs = dict(image=torch.tensor(obs_image).to(self.tpdv["device"]), task_description=instruct)  # uint8
         actions = torch.tensor(actions).to(self.tpdv["device"])  # int32
