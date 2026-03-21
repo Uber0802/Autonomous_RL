@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 class ResetStrategy:
     """Manages environment reset logic (robot, objects, unsuitable states)."""

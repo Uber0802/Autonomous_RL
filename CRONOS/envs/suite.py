@@ -65,7 +65,3 @@ class TaskSuite:
             np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
         ]), device=self.device)
 
-    def get_task_params(self, env_id, obj_set="rand"):
-        """Returns parameters specific to a task environment."""
-        # This will contain the logic from _initialize_episode_pre for different classes
-        pass

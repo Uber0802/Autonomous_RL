@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
 
 class CronosPPO:
     """Manages PPO training for the OpenVLA agent."""
@@ -37,7 +36,7 @@ class CronosPPO:
             
             # 2. Forward Pass & Evaluate
             if idx == 0:
-                print(f"[DEBUG MINIBATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values_old: {values_old.mean().item():.6f}/{values_old.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs_old: {logprobs_old.mean().item():.6f}/{logprobs_old.std().item():.6f}", flush=True)
+                print(f"[PPO BATCH] returns: {returns.mean().item():.6f}/{returns.std().item():.6f}, values: {values_old.mean().item():.6f}/{values_old.std().item():.6f}, advantages: {advantages.mean().item():.6f}/{advantages.std().item():.6f}, logprobs: {logprobs_old.mean().item():.6f}/{logprobs_old.std().item():.6f}", flush=True)
 
             logprobs, entropy, values = self.policy.evaluate_actions(obs_dict, actions)
             
@@ -70,10 +69,7 @@ class CronosPPO:
             loss = (policy_loss + value_loss - self.entropy_coef * entropy_loss) / self.gradient_accum
             
             if idx == 0:
-                print(f"[DEBUG LOSS] policy_loss: {policy_loss.item():.6f}", flush=True)
-                print(f"[DEBUG LOSS] value_loss: {value_loss.item():.6f}", flush=True)
-                print(f"[DEBUG LOSS] entropy: {entropy_loss.item():.6f}", flush=True)
-                print(f"[DEBUG LOSS] total_loss: {loss.item() * self.gradient_accum:.6f}", flush=True)
+                print(f"[PPO LOSS] policy: {policy_loss.item():.6f}, value: {value_loss.item():.6f}, entropy: {entropy_loss.item():.6f}, total: {loss.item() * self.gradient_accum:.6f}", flush=True)
 
             loss.backward()
 
@@ -84,7 +80,7 @@ class CronosPPO:
                 self.policy.vh_optimizer.step()
                 self.policy.vla_optimizer.zero_grad()
                 self.policy.vh_optimizer.zero_grad()
-                print(f"[DEBUG PPO] Loss: {loss.item()*self.gradient_accum:.6f}, Policy: {policy_loss.item():.6f}, Value: {value_loss.item():.6f}, Grad norm: {grad_norm.item():.6f}", flush=True)
+                print(f"[PPO UPDATE] loss: {loss.item()*self.gradient_accum:.6f}, policy: {policy_loss.item():.6f}, value: {value_loss.item():.6f}, grad_norm: {grad_norm.item():.6f}", flush=True)
             
             train_stats.append({
                 "policy_loss": policy_loss.item(),

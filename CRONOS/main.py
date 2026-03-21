@@ -1,22 +1,19 @@
-import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false" # Silence fork warnings
 import logging
+logging.getLogger("mani_skill").setLevel(logging.ERROR)
 
-# Suppress ManiSkill agent registration warnings
-class ManiSkillFilter(logging.Filter):
-    def filter(self, record):
-        return "is already registered" not in record.getMessage() and "Overriding registered agent" not in record.getMessage()
-
-logging.getLogger("mani_skill").addFilter(ManiSkillFilter())
-
+import gc
 import atexit
-import shutil
+import random
 import itertools
+import numpy as np
 import torch
 import tyro
 import wandb
 from tqdm import tqdm
 from pathlib import Path
+from dataclasses import dataclass
+from collections import defaultdict
+import pprint
 
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
@@ -24,14 +21,7 @@ from envs.scheduler import TaskScheduler
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO
 from training.buffer import CronosReplayBuffer
-from mani_skill.utils.visualization.misc import images_to_video, put_info_on_image
-
-# Standard Args from train_ms3_ppo.py
-from dataclasses import dataclass
-from typing import Annotated
-from collections import defaultdict
-import pprint
-import numpy as np
+from mani_skill.utils.visualization.misc import images_to_video
 
 @dataclass
 class Args:
@@ -79,6 +69,7 @@ class Args:
     video_dir: str = "videos"
     num_groups: int = 0  # 0 means dynamically scale with available tasks
     max_episodes: int = 32
+    max_reset: int = 8192
     vla_checkpoint_interval: int = 8
     vla_save_path: str = "checkpoints"
     resume_iteration: int = 0
@@ -93,10 +84,7 @@ class CronosRunner:
         self.args = args
         self.iteration = args.resume_iteration
         
-        # Set Seed for deterministic alignment (matching AutoRL exactly)
-        import numpy as np
-        import random
-        import torch
+        # Set seed for deterministic alignment (matching AutoRL exactly)
         np.random.seed(args.seed)
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -136,10 +124,14 @@ class CronosRunner:
         self.env.set_scheduler(self.scheduler)
 
         self.buffer = CronosReplayBuffer(args)
-        
+
         # Register cleanup for memmap files
         atexit.register(self.buffer.cleanup)
-        
+
+        # Reset tracking
+        self.hard_reset_count = 0
+        self.soft_reset_count = 0
+
         if args.record_video:
             self.video_frames = [[] for _ in range(args.num_envs)]
 
@@ -163,7 +155,7 @@ class CronosRunner:
 
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
-    def eval(self, iteration, task_idx, obj_set, envs_object, envs_recep, prefix="ood", reset=True):
+    def eval(self, iteration, task_idx, obj_set, envs_object, envs_recep, prefix="eval", reset=True):
         """Evaluates one task episode, matching AutoRL's eval() behavior."""
         self.policy.prep_rollout()
 
@@ -221,9 +213,8 @@ class CronosRunner:
         self.policy.prep_rollout()
         obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
-        
-        print(f"[DEBUG INIT CRONOS] obs: {obs.float().mean().item():.6f}, instr: {instruct[0][:30]}...", flush=True)
-        
+        print(f"[INIT] obs_mean: {obs.float().mean().item():.6f}, instruction: {instruct[0][:40]}...", flush=True)
+
         self.video_frames = [[] for _ in range(self.args.num_envs)]
         
         # Determine number of active environmental groups dynamically
@@ -245,8 +236,9 @@ class CronosRunner:
             # 2. Environment Step
             next_obs, reward, truncated, info = self.env.step(action)
 
-            if getattr(self, 'iteration', 0) == 0:
-                print(f"[DEBUG STEP] step: {step_idx}, reward: {reward.mean().item():.6f}, value: {value.mean().item():.6f}, logprob: {logprob.mean().item():.6f}, action: {action.float().mean().item():.6f}, obs: {obs.float().mean().item():.6f}", flush=True)
+            if self.iteration == 0:
+                print(f"[ROLLOUT] step: {step_idx}, reward: {reward.mean().item():.6f}, value: {value.mean().item():.6f}, logprob: {logprob.mean().item():.6f}, action_mean: {action.float().mean().item():.6f}, obs_mean: {obs.float().mean().item():.6f}", flush=True)
+
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
             
@@ -277,17 +269,19 @@ class CronosRunner:
                 # Resets for non-episodic continuity
                 if self.args.reset_unsuitable:
                     next_obs = self.env.reset_unsuitable_envs()
+                    self.soft_reset_count = self.env.reset_strategy.reset_unsuitable_count
+                    print(f"Total unsuitable resets: {self.soft_reset_count}")
                 elif self.args.reset_robot:
                     next_obs = self.env.reset_robot()
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()
+                print(f"{step_idx} switch instruction to  {' '.join(instruct[:4])}")
                 with torch.no_grad():
                     next_value, _, _ = self._get_action(next_obs, instruct, deterministic=False)
                 self.buffer.end_segment(next_value)
                 
                 # GPU Memory Management
-                import gc
                 gc.collect()
                 torch.cuda.empty_cache()
                 
@@ -300,47 +294,59 @@ class CronosRunner:
         """Main training loop coordinating rollouts and PPO updates."""
         for iteration in range(self.args.resume_iteration, self.args.max_episodes):
             self.iteration = iteration
-            
+
             # 1. Collect Experience
             self.run_rollout()
-            
+            self.hard_reset_count += self.args.num_envs
+            total_resets = self.hard_reset_count + self.soft_reset_count
+            print(f"Total resets: {total_resets}")
+
             # 2. Optimization Step
             self.buffer.compute_gae()
             self.policy.prep_training()
-            
+
             train_results = []
             for _ in range(self.args.alg_ppo_epoch):
                 train_results.extend(self.ppo.train_epoch(self.buffer))
-            
+
             # 3. Logging & Checkpointing
             if train_results:
                 wandb.log(train_results[-1], step=iteration)
-            
-            # 4. In-Training Evaluation (matching AutoRL interval_eval logic)
+
+            # 4. In-Training Evaluation
             steps = (iteration + 1) * self.args.training_len * self.args.num_envs
-            if iteration % self.args.eval_interval == self.args.eval_interval - 1 or iteration == self.args.max_episodes - 1:
+            exceed_reset_limit = total_resets > self.args.max_reset
+            should_eval = (iteration % self.args.eval_interval == self.args.eval_interval - 1
+                           or iteration == self.args.max_episodes - 1
+                           or exceed_reset_limit)
+
+            if should_eval:
                 task_pool = self.env.get_task_pool()
 
-                # In-domain eval — matches AutoRL "Evaluating Random Scene"
-                print(f"Evaluating Random Scene at {steps}")
+                # In-domain eval: same object set as training, randomized scene layout
+                print(f"Evaluating In-Domain at {steps}")
                 for task in task_pool:
                     obj, recep = TaskScheduler._extract_obj_recep(task)
                     sval_stats = self.eval(iteration, 0, self.args.obj_set, [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"in_domain_{obj}_{recep}")
                     wandb.log({f"eval_in_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()}, step=steps)
 
-                # OOD eval — matches AutoRL "Evaluating Train Scene" (AutoRL's confusing label kept for parity)
-                print(f"Evaluating Train Scene at {steps}")
+                # Out-of-domain eval: different object set, novel scene layout
+                print(f"Evaluating Out-of-Domain at {steps}")
                 for task in task_pool:
                     obj, recep = TaskScheduler._extract_obj_recep(task)
-                    sval_stats = self.eval(iteration, 0, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"ood_{obj}_{recep}")
+                    sval_stats = self.eval(iteration, 0, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"out_of_domain_{obj}_{recep}")
                     wandb.log({f"eval_out_of_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()}, step=steps)
-            
+
             if (iteration + 1) % self.args.vla_checkpoint_interval == 0:
                 ckpt_path = self.glob_dir / f"steps_{iteration + 1:04d}"
                 self.policy.save(ckpt_path)
-                print(f"Checkpoint saved: {ckpt_path}")
-                
+                print(f"Checkpoint saved at step {steps}: {ckpt_path}")
+
             self.buffer.reset()
+
+            if exceed_reset_limit:
+                print(f"Reset limit exceeded: {total_resets} > {self.args.max_reset}")
+                break
 
     def save_video_segment(self, iteration, segment_id):
         """Saves current video buffer and clears it."""
