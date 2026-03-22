@@ -12,7 +12,7 @@ class CronosPPO:
         self.max_grad_norm = getattr(args, "vla_grad_norm", 10.0)
         self.gradient_accum = getattr(args, "alg_gradient_accum", 1)
         
-    def train_epoch(self, buffer):
+    def train_epoch(self, buffer, log_path=None):
         """Runs one Epoch of PPO training on the provided buffer with gradient accumulation."""
         train_stats = []
         total_batches = (buffer.ep_len * buffer.num_env) // buffer.minibatch_size
@@ -82,6 +82,18 @@ class CronosPPO:
                 self.policy.vh_optimizer.zero_grad()
                 print(f"[PPO UPDATE] loss: {loss.item()*self.gradient_accum:.6f}, policy: {policy_loss.item():.6f}, value: {value_loss.item():.6f}, grad_norm: {grad_norm.item():.6f}", flush=True)
             
+            if log_path:
+                log_str = (
+                    f"[PPO Step {idx}/{total_batches}] "
+                    f"Returns: {returns.mean().item():.4f} | "
+                    f"Advantages: {advantages.mean().item():.4f} | "
+                    f"Policy Loss: {policy_loss.item():.4f} | "
+                    f"Value Loss: {value_loss.item():.4f} | "
+                    f"Entropy Loss: {entropy_loss.item():.4f}\n"
+                )
+                with open(log_path, "a") as f:
+                    f.write(log_str)
+
             train_stats.append({
                 "policy_loss": policy_loss.item(),
                 "value_loss": value_loss.item(),

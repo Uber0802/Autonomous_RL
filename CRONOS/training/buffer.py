@@ -17,12 +17,12 @@ class CronosReplayBuffer:
     """Efficient memory-mapped replay buffer for PPO training."""
     
     def __init__(self, args, obs_dim=(480, 640, 3), act_dim=7):
-        self.ep_len = args.episode_len
+        self.ep_len = args.segment_len
         self.gamma = args.buffer_gamma
         self.gae_lambda = args.buffer_lambda
         self.minibatch_size = args.buffer_minibatch
         
-        self.max_envs = args.num_envs * args.training_len // args.episode_len
+        self.max_envs = args.num_envs * args.episode_len // args.segment_len
         self.num_env = 0
         self.curr_env = 0
         self.step = 0

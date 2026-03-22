@@ -21,7 +21,7 @@ class CronosWrapper:
             control_mode="arm_pd_ee_target_delta_pose_align2_gripper_pd_joint_pos",
             sim_backend="gpu",
             sim_config={"sim_freq": 500, "control_freq": 5},
-            max_episode_steps=args.episode_len,
+            max_episode_steps=args.segment_len,
             sensor_configs={"shader_pack": "default"},
         )
         self.env = gym.make(**env_config)

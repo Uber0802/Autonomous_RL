@@ -223,7 +223,7 @@ class OpenVLAPolicy:
     def prep_training(self):
         self.vla.train()
 
-    def save(self, path: Path):
+    def save(self, path: Path, extra_state: dict = None):
         path.mkdir(parents=True, exist_ok=True)
 
         self.vla.save_pretrained(str(path))
@@ -232,6 +232,8 @@ class OpenVLAPolicy:
             "vh_optimizer": self.vh_optimizer.state_dict(),
             "vla_optimizer": self.vla_optimizer.state_dict(),
         }
+        if extra_state:
+            training_state.update(extra_state)
         torch.save(training_state, path / "training_state.pt")
 
         json.dump(self.vla.base_model.norm_stats, open(path / "dataset_statistics.json", "w"))
