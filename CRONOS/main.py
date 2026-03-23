@@ -155,6 +155,8 @@ class CronosRunner:
         self.soft_reset_count = 0
         if args.vla_load_path:
             self._restore_training_state(args.vla_load_path)
+            # Sync strategy counter so it continues from checkpoint value
+            self.env.reset_strategy.reset_unsuitable_count = self.soft_reset_count
 
         if args.record_video:
             self.video_frames = [[] for _ in range(args.num_envs)]
