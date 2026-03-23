@@ -18,6 +18,14 @@ GRID_POS_UNIT = np.array([
     [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
 ]) * 2 - 1  # [36, 2]
 
+# 4×4 grid for environments with more slots (e.g., 3×3)
+GRID_POS_4x4 = np.array([
+    [0.0, 0.0], [0.0, 0.33], [0.0, 0.66], [0.0, 1.0],
+    [0.33, 0.0], [0.33, 0.33], [0.33, 0.66], [0.33, 1.0],
+    [0.66, 0.0], [0.66, 0.33], [0.66, 0.66], [0.66, 1.0],
+    [1.0, 0.0], [1.0, 0.33], [1.0, 0.66], [1.0, 1.0],
+]) * 2 - 1  # [16, 2]
+
 # Standard quaternion configs (4 rotations)
 QUAT_CONFIGS = np.stack([
     np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
@@ -28,7 +36,7 @@ QUAT_CONFIGS = np.stack([
 
 
 def generate_pose_configs(slot_heights, half_edge_length, spacing_matrix,
-                          xy_center=(-0.16, 0.00)):
+                          xy_center=(-0.16, 0.00), grid=None):
     """Generates xyz position configs for N slots (objects + receptacles) on a grid.
 
     Args:
@@ -38,13 +46,15 @@ def generate_pose_configs(slot_heights, half_edge_length, spacing_matrix,
             spacing_matrix[i][j] is the min distance between slot i and slot j.
             Use 0.0 for no constraint. Only upper triangle is checked.
         xy_center: (2,) workspace center [x, y]
+        grid: optional custom grid in unit coords [-1, 1]. Default: GRID_POS_UNIT (6×6).
 
     Returns:
         xyz_configs: np.ndarray of shape (N_configs, N_slots, 3)
     """
     center = np.array(xy_center).reshape(1, 2)
     half = np.array(half_edge_length).reshape(1, 2)
-    grid_pos = GRID_POS_UNIT * half + center  # [36, 2]
+    base_grid = grid if grid is not None else GRID_POS_UNIT
+    grid_pos = base_grid * half + center
 
     num_slots = len(slot_heights)
     spacing = np.array(spacing_matrix)
@@ -112,16 +122,54 @@ POSE_PRESETS = {
     ),
 
     # 6 slots: 3 carrots(z=1.0), 3 plates(z=0.95)
-    # Uniform: all pairs > 0.1
+    # Uniform: all pairs > 0.1. Uses 4×4 grid (16 points) instead of 6×6.
     "ThreeObjectThreeReceptacle": dict(
         slot_heights=[1.0, 1.0, 1.0, 0.95, 0.95, 0.95],
         half_edge_length=(0.13, 0.12),
         spacing_matrix=_uniform_spacing(6, 0.1),
+        grid=GRID_POS_4x4,
     ),
     "ThreeObjectThreeReceptacle_OOD": dict(
         slot_heights=[1.0, 1.0, 1.0, 0.95, 0.95, 0.95],
-        half_edge_length=(0.18, 0.18),
+        half_edge_length=(0.11, 0.13),
         spacing_matrix=_uniform_spacing(6, 0.1),
+        grid=GRID_POS_4x4,
+    ),
+
+    # --- New environment configurations ---
+
+    # 4 slots: 1 carrot(z=1.0), 3 plates(z=0.95)
+    # Uniform: all pairs > 0.12
+    "OneObjectThreeReceptacle": dict(
+        slot_heights=[1.0, 0.95, 0.95, 0.95],
+        half_edge_length=(0.075, 0.075),
+        spacing_matrix=_uniform_spacing(4, 0.12),
+    ),
+
+    # 4 slots: 3 carrots(z=1.0), 1 plate(z=0.95)
+    # Uniform: all pairs > 0.12
+    "ThreeObjectOneReceptacle": dict(
+        slot_heights=[1.0, 1.0, 1.0, 0.95],
+        half_edge_length=(0.075, 0.075),
+        spacing_matrix=_uniform_spacing(4, 0.12),
+    ),
+
+    # 5 slots: 2 carrots(z=1.0), 3 plates(z=0.95)
+    # Uniform: all pairs > 0.1. Uses 4×4 grid.
+    "TwoObjectThreeReceptacle": dict(
+        slot_heights=[1.0, 1.0, 0.95, 0.95, 0.95],
+        half_edge_length=(0.11, 0.11),
+        spacing_matrix=_uniform_spacing(5, 0.1),
+        grid=GRID_POS_4x4,
+    ),
+
+    # 5 slots: 3 carrots(z=1.0), 2 plates(z=0.95)
+    # Uniform: all pairs > 0.1. Uses 4×4 grid.
+    "ThreeObjectTwoReceptacle": dict(
+        slot_heights=[1.0, 1.0, 1.0, 0.95, 0.95],
+        half_edge_length=(0.11, 0.11),
+        spacing_matrix=_uniform_spacing(5, 0.1),
+        grid=GRID_POS_4x4,
     ),
 }
 

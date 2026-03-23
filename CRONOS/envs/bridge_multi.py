@@ -713,80 +713,34 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
     def get_extra_plate_pose(self):
         return self.get_plate_pose()
     
+    POSE_PRESET = "TwoObjectOneReceptacle"
+    NUM_OBJECTS = 2
+    NUM_RECEPTACLES = 1
+    DEFAULT_OBJ_INDICES = [7, 2]     # 1-based
+    DEFAULT_PLATE_INDICES = [1]      # 1-based
+
     def _generate_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.075, 0.075]).reshape(1, 2)
-
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        ]) * 2 - 1  # [36, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, grid_pos_1 in enumerate(grid_pos):
-            for j, grid_pos_2 in enumerate(grid_pos):
-                for k, grid_pos_3 in enumerate(grid_pos):
-                    if (
-                            np.linalg.norm(grid_pos_1 - grid_pos_2) > 0.070
-                            and np.linalg.norm(grid_pos_3 - grid_pos_2) > 0.070
-                            and np.linalg.norm(grid_pos_1 - grid_pos_3) > 0.15
-                    ):
-                        xyz_configs.append(
-                            np.array(
-                                [
-                                    np.append(grid_pos_1, 0.95),  # carrot
-                                    np.append(grid_pos_2, 0.92),  # plate
-                                    np.append(grid_pos_3, 1.0),  # extra carrot
-                                ]
-                            )
-                        )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "fixed")
-        if obj_set == "fixed":
-            lc = 16
-            lc_offset = 0
-        elif obj_set == "rand":
-            lc = 9
-            lc_offset = 16
-        elif obj_set == "all":
-            lc = 25
-            lc_offset = 0
-        else:
-            raise ValueError(f"Unknown obj_set: {obj_set}")
+        self._generate_init_pose()
 
-        le = lc - 1
-        lo = 16
-        lo_offset = 0
-        lp = len(self.plate_names)
+        lc = 16
+        lo = len(self.overlay_images_numpy)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
-        ltt = lc * le * lp * lo * l1 * l2
+        lp = 1
+        le = 16
+        ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
         if "episode_id" in options:
@@ -797,11 +751,15 @@ class TwoObjectOneReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        self.select_carrot1_ids = episode_id // (le * lp * lo * l1 * l2) + lc_offset  # [b]
-        self.select_carrot2_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
-        self.select_carrot2_ids = (self.select_carrot1_ids + self.select_carrot2_ids + 1) % lc + lc_offset  # [b]
-        self.select_plate_ids = (episode_id // (lo * l1 * l2)) % lp
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo + lo_offset
+        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
+        obj2_index = options.get("obj2_index", self.DEFAULT_OBJ_INDICES[1]) - 1
+        self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
+        self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
+
+        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
+        self.select_plate_ids = torch.full((b,), plate1_index, device=self.device)
+
+        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
 
@@ -1086,83 +1044,33 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
         assert len(self.overlay_textures_numpy) == 21
         assert len(self.overlay_mix_numpy) == 21
 
+    POSE_PRESET = "OneObjectTwoReceptacle"
+    NUM_OBJECTS = 1
+    NUM_RECEPTACLES = 2
+    DEFAULT_OBJ_INDICES = [7]        # 1-based
+    DEFAULT_PLATE_INDICES = [1, 2]   # 1-based
+
     def _generate_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.075, 0.075]).reshape(1, 2)
-
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        ]) * 2 - 1  # [36, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, grid_pos_1 in enumerate(grid_pos):
-            for j, grid_pos_2 in enumerate(grid_pos):
-                for k, grid_pos_3 in enumerate(grid_pos):
-                    if (
-                            np.linalg.norm(grid_pos_1 - grid_pos_2) > 0.070
-                            and np.linalg.norm(grid_pos_3 - grid_pos_2) > 0.150
-                            and np.linalg.norm(grid_pos_1 - grid_pos_3) > 0.070
-                    ):
-                        xyz_configs.append(
-                            np.array(
-                                [
-                                    np.append(grid_pos_1, 1.0),  # carrot
-                                    np.append(grid_pos_2, 0.92),  # plate
-                                    np.append(grid_pos_3, 0.96),  # extra plate
-                                ]
-                            )
-                        )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "rand")
-        if obj_set == "fixed":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-        elif obj_set == "rand":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-        elif obj_set == "all":
-            lp = 17
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-        else:
-            raise ValueError(f"Unknown obj_set: {obj_set}")
+        self._generate_init_pose()
 
         lc = 16
         lo = len(self.overlay_images_numpy)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
+        lp = 1
+        le = 16
         ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
@@ -1174,21 +1082,17 @@ class OneObjectTwoReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        self.select_carrot_ids = episode_id // (lp * le * lo * l1 * l2)  # [b]
-        self.select_plate1_ids = (episode_id // (le * lo * l1 * l2)) % lp
-        self.select_plate2_ids = (episode_id // (lo * l1 * l2)) % le
-        self.select_plate2_ids = (self.select_plate1_ids + self.select_plate2_ids + 1) % le_mod
-        self.select_plate1_ids += lp_offset
-        self.select_plate2_ids += lp_offset
+        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
+        self.select_carrot_ids = torch.full((b,), obj1_index, device=self.device)
+
+        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
+        plate2_index = options.get("plate2_index", self.DEFAULT_PLATE_INDICES[1]) - 1
+        self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
+        self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
 
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
-        if obj_set == "fixed":
-            rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
-            rand_id = rand_id.reshape(b)
-            self.select_pos_ids = (rand_id // l2) % l1
-            self.select_quat_ids = rand_id % l2
 
     def set_current_task(self, object: list[str], receptacle: list[str]):
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
@@ -1479,112 +1383,28 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         assert len(self.overlay_textures_numpy) == 21
         assert len(self.overlay_mix_numpy) == 21
 
+    POSE_PRESET = "TwoObjectTwoReceptacle"
+    POSE_PRESET_OOD = "TwoObjectTwoReceptacle_OOD"
+    NUM_OBJECTS = 2
+    NUM_RECEPTACLES = 2
+    DEFAULT_OBJ_INDICES = [7, 2]     # 1-based
+    DEFAULT_PLATE_INDICES = [1, 2]   # 1-based
+
     def _generate_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.075, 0.075]).reshape(1, 2)
-
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        ]) * 2 - 1  # [36, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, p1 in enumerate(grid_pos):
-            for j, p2 in enumerate(grid_pos):
-                for k, p3 in enumerate(grid_pos):
-                    for l, p4 in enumerate(grid_pos):
-                        # Ensure all positions are spaced apart
-                        if (
-                            np.linalg.norm(p1 - p2) > 0.12 and
-                            np.linalg.norm(p1 - p3) > 0.12 and
-                            np.linalg.norm(p1 - p4) > 0.12 and
-                            np.linalg.norm(p2 - p3) > 0.12 and
-                            np.linalg.norm(p2 - p4) > 0.12 and
-                            np.linalg.norm(p3 - p4) > 0.12
-                        ):
-                            xyz_configs.append(
-                                np.array([
-                                    np.append(p1, 1.0),    # carrot 1
-                                    np.append(p2, 1.0),    # carrot 2
-                                    np.append(p3, 0.95),   # plate 1
-                                    np.append(p4, 0.95),   # plate 2
-                                ])
-                            )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _generate_OOD_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.11, 0.15]).reshape(1, 2)
-        
-
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        ]) * 2 - 1  # [36, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, p1 in enumerate(grid_pos):
-            for j, p2 in enumerate(grid_pos):
-                for k, p3 in enumerate(grid_pos):
-                    for l, p4 in enumerate(grid_pos):
-                        # Ensure all positions are spaced apart
-                        if (
-                            np.linalg.norm(p1 - p2) > 0.12 and
-                            np.linalg.norm(p1 - p3) > 0.12 and
-                            np.linalg.norm(p1 - p4) > 0.12 and
-                            np.linalg.norm(p2 - p3) > 0.12 and
-                            np.linalg.norm(p2 - p4) > 0.12 and
-                            np.linalg.norm(p3 - p4) > 0.12
-                        ):
-                            xyz_configs.append(
-                                np.array([
-                                    np.append(p1, 1.0),    # carrot 1
-                                    np.append(p2, 1.0),    # carrot 2
-                                    np.append(p3, 0.95),   # plate 1
-                                    np.append(p4, 0.95),   # plate 2
-                                ])
-                            )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET_OOD]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized
@@ -1592,37 +1412,17 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
         assert b == self.num_envs
 
         obj_set = options.get("obj_set", "rand")
-        if obj_set == "fixed":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand_8":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand_ood":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
+        if obj_set == "rand_ood":
             self._generate_OOD_init_pose()
         else:
-            raise ValueError(f"Unknown obj_set: {obj_set}")
+            self._generate_init_pose()
 
         lc = 16
         lo = len(self.overlay_images_numpy)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
+        lp = 1
+        le = 16
         ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
@@ -1634,13 +1434,13 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        obj1_index = options.get("obj1_index", 7) - 1
-        obj2_index = options.get("obj2_index", 2) - 1
+        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
+        obj2_index = options.get("obj2_index", self.DEFAULT_OBJ_INDICES[1]) - 1
         self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
         self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
 
-        plate1_index = options.get("plate1_index", 1) - 1
-        plate2_index = options.get("plate2_index", 2) - 1
+        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
+        plate2_index = options.get("plate2_index", self.DEFAULT_PLATE_INDICES[1]) - 1
         self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
         self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
 
@@ -1656,7 +1456,6 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             rand_id = rand_id.reshape(b)
             self.select_pos_ids = (rand_id // l2) % l1
             self.select_quat_ids = rand_id % l2
-
 
     def set_current_task(self, object: list[str], receptacle: list[str]):
         select_carrot1 = [self.carrot_names[idx] for idx in self.select_carrot1_ids]
@@ -1971,157 +1770,28 @@ class ThreeObjectThreeReceptacle(BaseMultiPickPlace):
         assert len(self.overlay_textures_numpy) == 21
         assert len(self.overlay_mix_numpy) == 21
 
+    POSE_PRESET = "ThreeObjectThreeReceptacle"
+    POSE_PRESET_OOD = "ThreeObjectThreeReceptacle_OOD"
+    NUM_OBJECTS = 3
+    NUM_RECEPTACLES = 3
+    DEFAULT_OBJ_INDICES = [7, 2, 10]    # 1-based
+    DEFAULT_PLATE_INDICES = [1, 2, 3]   # 1-based
+
     def _generate_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.13, 0.12]).reshape(1, 2)
-
-        # grid_pos = np.array([
-        #     [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-        #     [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-        #     [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-        #     [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-        #     [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-        #     [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        # ]) * 2 - 1  # [36, 2]
-        # grid_pos = np.array([
-        #     [0.0, 0.0], [0.0, 0.25], [0.0, 0.5], [0.0, 0.75], [0.0, 1.0],
-        #     [0.25, 0.0], [0.25, 0.25], [0.25, 0.5], [0.25, 0.75], [0.25, 1.0],
-        #     [0.5, 0.0], [0.5, 0.25], [0.5, 0.5], [0.5, 0.75], [0.5, 1.0],
-        #     [0.75, 0.0], [0.75, 0.25], [0.75, 0.5], [0.75, 0.75], [0.75, 1.0],
-        #     [1.0, 0.0], [1.0, 0.25], [1.0, 0.5], [1.0, 0.75], [1.0, 1.0],
-        # ]) * 2 - 1  # [25, 2]
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.33], [0.0, 0.66], [0.0, 1.0],
-            [0.33, 0.0], [0.33, 0.33], [0.33, 0.66], [0.33, 1.0],
-            [0.66, 0.0], [0.66, 0.33], [0.66, 0.66], [0.66, 1.0],
-            [1.0, 0.0], [1.0, 0.33], [1.0, 0.66], [1.0, 1.0],
-        ]) * 2 - 1  # [16, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, p1 in enumerate(grid_pos):
-            for j, p2 in enumerate(grid_pos):
-                for k, p3 in enumerate(grid_pos):
-                    for l, p4 in enumerate(grid_pos):
-                        for m, p5 in enumerate(grid_pos):
-                            for n, p6 in enumerate(grid_pos):
-                                # Ensure all positions are spaced apart
-                                if (
-                                    np.linalg.norm(p1 - p2) > 0.1 and
-                                    np.linalg.norm(p1 - p3) > 0.1 and
-                                    np.linalg.norm(p1 - p4) > 0.1 and
-                                    np.linalg.norm(p1 - p5) > 0.1 and
-                                    np.linalg.norm(p1 - p6) > 0.1 and
-                                    np.linalg.norm(p2 - p3) > 0.1 and
-                                    np.linalg.norm(p2 - p4) > 0.1 and
-                                    np.linalg.norm(p2 - p5) > 0.1 and
-                                    np.linalg.norm(p2 - p6) > 0.1 and
-                                    np.linalg.norm(p3 - p4) > 0.1 and
-                                    np.linalg.norm(p3 - p5) > 0.1 and
-                                    np.linalg.norm(p3 - p6) > 0.1 and
-                                    np.linalg.norm(p4 - p5) > 0.1 and
-                                    np.linalg.norm(p4 - p6) > 0.1 and
-                                    np.linalg.norm(p5 - p6) > 0.1 
-                                ):
-                                    xyz_configs.append(
-                                        np.array([
-                                            np.append(p1, 1.0),    # carrot 1
-                                            np.append(p2, 1.0),    # carrot 2
-                                            np.append(p3, 1.0),    # carrot 3
-                                            np.append(p4, 0.95),   # plate 1
-                                            np.append(p5, 0.95),   # plate 2
-                                            np.append(p6, 0.95),   # plate 3
-                                        ])
-                                    )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _generate_OOD_init_pose(self):
-        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
-        half_edge_length = np.array([0.11, 0.13]).reshape(1, 2)
-        
-
-        # grid_pos = np.array([
-        #     [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
-        #     [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
-        #     [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
-        #     [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
-        #     [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
-        #     [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
-        # ]) * 2 - 1  # [36, 2]
-        grid_pos = np.array([
-            [0.0, 0.0], [0.0, 0.33], [0.0, 0.66], [0.0, 1.0],
-            [0.33, 0.0], [0.33, 0.33], [0.33, 0.66], [0.33, 1.0],
-            [0.66, 0.0], [0.66, 0.33], [0.66, 0.66], [0.66, 1.0],
-            [1.0, 0.0], [1.0, 0.33], [1.0, 0.66], [1.0, 1.0],
-        ]) * 2 - 1  # [16, 2]
-        grid_pos = grid_pos * half_edge_length + xy_center
-
-        xyz_configs = []
-        for i, p1 in enumerate(grid_pos):
-            for j, p2 in enumerate(grid_pos):
-                for k, p3 in enumerate(grid_pos):
-                    for l, p4 in enumerate(grid_pos):
-                        for m, p5 in enumerate(grid_pos):
-                            for n, p6 in enumerate(grid_pos):
-                                # Ensure all positions are spaced apart
-                                if (
-                                    np.linalg.norm(p1 - p2) > 0.1 and
-                                    np.linalg.norm(p1 - p3) > 0.1 and
-                                    np.linalg.norm(p1 - p4) > 0.1 and
-                                    np.linalg.norm(p1 - p5) > 0.1 and
-                                    np.linalg.norm(p1 - p6) > 0.1 and
-                                    np.linalg.norm(p2 - p3) > 0.1 and
-                                    np.linalg.norm(p2 - p4) > 0.1 and
-                                    np.linalg.norm(p2 - p5) > 0.1 and
-                                    np.linalg.norm(p2 - p6) > 0.1 and
-                                    np.linalg.norm(p3 - p4) > 0.1 and
-                                    np.linalg.norm(p3 - p5) > 0.1 and
-                                    np.linalg.norm(p3 - p6) > 0.1 and
-                                    np.linalg.norm(p4 - p5) > 0.1 and
-                                    np.linalg.norm(p4 - p6) > 0.1 and
-                                    np.linalg.norm(p5 - p6) > 0.1 
-                                ):
-                                    xyz_configs.append(
-                                        np.array([
-                                            np.append(p1, 1.0),    # carrot 1
-                                            np.append(p2, 1.0),    # carrot 2
-                                            np.append(p3, 1.0),    # carrot 3
-                                            np.append(p4, 0.95),   # plate 1
-                                            np.append(p5, 0.95),   # plate 2
-                                            np.append(p6, 0.95),   # plate 3
-                                        ])
-                                    )
-        xyz_configs = np.stack(xyz_configs)
-
-        quat_configs = np.stack(
-            [
-                np.array([euler2quat(0, 0, 0.0), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 4), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi / 2), [1, 0, 0, 0]]),
-                np.array([euler2quat(0, 0, np.pi * 3 / 4), [1, 0, 0, 0]]),
-            ]
-        )
-
-        self.xyz_configs = xyz_configs
-        self.quat_configs = quat_configs
-
-        print(f"xyz_configs: {xyz_configs.shape}")
-        print(f"quat_configs: {quat_configs.shape}")
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET_OOD]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+        print(f"xyz_configs: {self.xyz_configs.shape}")
+        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
         # NOTE: this part of code is not GPU parallelized
@@ -2129,37 +1799,17 @@ class ThreeObjectThreeReceptacle(BaseMultiPickPlace):
         assert b == self.num_envs
 
         obj_set = options.get("obj_set", "rand")
-        if obj_set == "fixed":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand_8":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
-            self._generate_init_pose()
-        elif obj_set == "rand_ood":
-            lp = 1
-            lp_offset = 0
-            le = 16
-            le_mod = 17
+        if obj_set == "rand_ood":
             self._generate_OOD_init_pose()
         else:
-            raise ValueError(f"Unknown obj_set: {obj_set}")
+            self._generate_init_pose()
 
         lc = 16
         lo = len(self.overlay_images_numpy)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
+        lp = 1
+        le = 16
         ltt = lc * lp * le * lo * l1 * l2
 
         # Use one shared episode ID for all environments
@@ -2171,16 +1821,16 @@ class ThreeObjectThreeReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
-        obj1_index = options.get("obj1_index", 7) - 1
-        obj2_index = options.get("obj2_index", 2) - 1
-        obj3_index = options.get("obj3_index", 10) - 1
+        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
+        obj2_index = options.get("obj2_index", self.DEFAULT_OBJ_INDICES[1]) - 1
+        obj3_index = options.get("obj3_index", self.DEFAULT_OBJ_INDICES[2]) - 1
         self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
         self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
         self.select_carrot3_ids = torch.full((b,), obj3_index, device=self.device)
 
-        plate1_index = options.get("plate1_index", 1) - 1
-        plate2_index = options.get("plate2_index", 2) - 1
-        plate3_index = options.get("plate2_index", 3) - 1
+        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
+        plate2_index = options.get("plate2_index", self.DEFAULT_PLATE_INDICES[1]) - 1
+        plate3_index = options.get("plate3_index", self.DEFAULT_PLATE_INDICES[2]) - 1
         self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
         self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
         self.select_plate3_ids = torch.full((b,), plate3_index, device=self.device)
