@@ -188,8 +188,8 @@ class CronosRunner:
             f"task_len ({args.task_len}) must be divisible by segment_len ({args.segment_len})"
         assert args.episode_len % args.task_len == 0, \
             f"episode_len ({args.episode_len}) must be divisible by task_len ({args.task_len})"
-        assert args.ppo_update_len % args.segment_len == 0, \
-            f"ppo_update_len ({args.ppo_update_len}) must be divisible by segment_len ({args.segment_len})"
+        assert args.ppo_update_len % args.task_len == 0, \
+            f"ppo_update_len ({args.ppo_update_len}) must be divisible by task_len ({args.task_len})"
 
     def _write_eval_report(self, header, results):
         """Appends eval results to the eval report file."""
@@ -276,26 +276,40 @@ class CronosRunner:
 
         return env_stats
 
-    def run_rollout(self):
-        """Executes a non-episodic rollout with instruction switching and partial resets."""
+    def _run_ppo_update(self, ppo_log_path):
+        """Runs one PPO update on the current buffer, then resets it."""
+        self.buffer.compute_gae()
+        self.policy.prep_training()
+        train_results = []
+        for _ in range(self.args.alg_ppo_epoch):
+            train_results.extend(self.ppo.train_epoch(self.buffer, log_path=ppo_log_path))
+        self.buffer.reset()
+        self.policy.prep_rollout()
+        return train_results
+
+    def run_rollout(self, ppo_log_path=None):
+        """Executes a non-episodic rollout with instruction switching, partial resets,
+        and mid-rollout PPO training every ppo_update_len steps (matching AutoRL)."""
         self.policy.prep_rollout()
         obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
         print(f"[INIT] obs_mean: {obs.float().mean().item():.6f}, instruction: {instruct[0][:40]}...", flush=True)
 
         self.video_frames = [[] for _ in range(self.args.num_envs)]
-        
+
         # Determine number of active environmental groups dynamically
         self.num_groups = self.args.num_groups if self.args.num_groups > 0 else len(self.scheduler.task_pool)
-        
+
         forward_count = 1
         segment_id = 0
-        
+        steps_since_ppo = 0
+        all_train_results = []
+
         # Track current tasks for logging/naming
         active_groups = self.args.num_groups if self.args.num_groups > 0 else None
         objs, receps = self.scheduler.get_next_tasks(active_groups)
         self.last_info = {}
-        
+
         for step_idx in tqdm(range(self.args.episode_len), desc="Rollout", leave=False):
             # 1. Action Prediction (Vectorized/Micro-batched)
             with torch.no_grad():
@@ -309,7 +323,7 @@ class CronosRunner:
 
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
-            
+
             # 4. Optional Video Recording
             if self.args.record_video:
                 for i in range(self.args.num_envs):
@@ -322,6 +336,19 @@ class CronosRunner:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
                     segment_id += 1
 
+                # End current buffer segment
+                instruct_next = self.env.get_language_instructions()  # still old task
+                with torch.no_grad():
+                    next_value, _, _ = self._get_action(next_obs, instruct_next, deterministic=False)
+                self.buffer.end_segment(next_value)
+                steps_since_ppo += self.args.task_len
+
+                # 6. Mid-rollout PPO update (matching AutoRL's training_interval)
+                if steps_since_ppo >= self.args.ppo_update_len and step_idx > 0:
+                    results = self._run_ppo_update(ppo_log_path)
+                    all_train_results.extend(results)
+                    steps_since_ppo = 0
+
                 # Task Switching (AutoRL Continual Learning Logic)
                 if self.args.enable_backward and forward_count >= self.args.backward_interval:
                     self.env.set_backward()
@@ -333,7 +360,7 @@ class CronosRunner:
                     objs, receps = self.scheduler.get_next_tasks(active_groups)
                     self.env.set_task(objs, receps)
                     forward_count += 1
-                
+
                 # Resets for non-episodic continuity
                 if self.args.reset_unsuitable:
                     next_obs = self.env.reset_unsuitable_envs()
@@ -344,19 +371,25 @@ class CronosRunner:
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()
-                print(f"Step {step_idx + 1}: switch instruction to  {' '.join(instruct[:4])}")
-                with torch.no_grad():
-                    next_value, _, _ = self._get_action(next_obs, instruct, deterministic=False)
-                self.buffer.end_segment(next_value)
-                
+                group_size = self.args.num_envs // self.num_groups
+                group_instrs = [instruct[g * group_size] for g in range(self.num_groups)]
+                print(f"Step {step_idx + 1}: switch instruction to  {' '.join(group_instrs)}")
+
                 # GPU Memory Management
                 gc.collect()
                 torch.cuda.empty_cache()
-                
+
                 if step_idx + 1 < self.args.episode_len:
                     self.buffer.warmup(next_obs, instruct)
-            
+
             obs = next_obs
+
+        # Final PPO update on remaining buffer (if any data left)
+        if self.buffer.num_env > 0:
+            results = self._run_ppo_update(ppo_log_path)
+            all_train_results.extend(results)
+
+        return all_train_results
 
     def train(self):
         """Main training loop coordinating rollouts and PPO updates."""
@@ -374,24 +407,16 @@ class CronosRunner:
             self.iteration = iteration
             episode = iteration + 1  # 1-based absolute
 
-            # 1. Collect Experience
-            self.run_rollout()
-            self.hard_reset_count += self.args.num_envs
-            total_resets = self.hard_reset_count + self.soft_reset_count
-            total_steps = episode * self.args.episode_len * self.args.num_envs
-            print(f"Episode {episode}: total_steps={total_steps}, total_resets={total_resets}")
-
-            # 2. Optimization Step
-            self.buffer.compute_gae()
-            self.policy.prep_training()
-
+            # 1. Collect Experience + Mid-rollout PPO
             ppo_log_path = str(self.glob_dir / self.args.ppo_log)
+            total_steps = episode * self.args.episode_len * self.args.num_envs
             with open(ppo_log_path, "a") as f:
                 f.write(f"step : {total_steps}\n")
 
-            train_results = []
-            for _ in range(self.args.alg_ppo_epoch):
-                train_results.extend(self.ppo.train_epoch(self.buffer, log_path=ppo_log_path))
+            train_results = self.run_rollout(ppo_log_path=ppo_log_path)
+            self.hard_reset_count += self.args.num_envs
+            total_resets = self.hard_reset_count + self.soft_reset_count
+            print(f"Episode {episode}: total_steps={total_steps}, total_resets={total_resets}")
 
             # 3. Logging (dual-axis: both episode and total_steps)
             if train_results:
