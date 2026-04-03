@@ -7,9 +7,10 @@ from mani_skill.envs.sapien_env import BaseEnv
 
 
 class SimlerWrapper:
-    def __init__(self, all_args, unnorm_state, extra_seed=0):
+    def __init__(self, all_args, unnorm_state, extra_seed=0, continuous_actions=False):
         self.args = all_args
         self.unnorm_state = unnorm_state
+        self.continuous_actions = continuous_actions
 
         self.num_envs = self.args.num_envs
         robot_control_mode = "arm_pd_ee_target_delta_pose_align2_gripper_pd_joint_pos"
@@ -70,6 +71,16 @@ class SimlerWrapper:
         return reward_diff
 
     def _process_action(self, raw_actions: torch.Tensor) -> torch.Tensor:
+        """Process actions from policy output to env input.
+        For OpenVLA: raw_actions are token IDs (int) → decode to continuous.
+        For CogACT: raw_actions are already continuous [-1, 1] (float).
+        """
+        if self.continuous_actions:
+            return self._process_action_continuous(raw_actions)
+        return self._process_action_discrete(raw_actions)
+
+    def _process_action_discrete(self, raw_actions: torch.Tensor) -> torch.Tensor:
+        """OpenVLA path: token IDs → bin centers → denormalize."""
         action_scale = 1.0
 
         # Extract predicted action tokens and translate into (normalized) continuous actions
@@ -79,16 +90,7 @@ class SimlerWrapper:
         normalized_actions = np.asarray([self.bin_centers[da] for da in dact])  # [B, dim]
 
         # Unnormalize actions
-        action_norm_stats = self.unnorm_state
-        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))  # [dim]
-        mask = np.asarray(mask).reshape(1, -1)  # [1, dim]
-        action_high = np.array(action_norm_stats["q99"]).reshape(1, -1)  # [1, dim]
-        action_low = np.array(action_norm_stats["q01"]).reshape(1, -1)  # [1, dim]
-        raw_action_np = np.where(
-            mask,
-            0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
-            normalized_actions,
-        )
+        raw_action_np = self._denormalize(normalized_actions)
 
         raw_action = {
             "world_vector": raw_action_np[:, :3],
@@ -110,6 +112,46 @@ class SimlerWrapper:
         action = action.to(raw_actions.device)
 
         return action
+
+    def _process_action_continuous(self, raw_actions: torch.Tensor) -> torch.Tensor:
+        """CogACT path: continuous [-1, 1] actions → denormalize."""
+        action_scale = 1.0
+
+        normalized_actions = raw_actions.cpu().numpy().astype(np.float64)  # [B, 7]
+        normalized_actions = np.clip(normalized_actions, -1, 1)
+
+        # Unnormalize actions
+        raw_action_np = self._denormalize(normalized_actions)
+
+        raw_action = {
+            "world_vector": raw_action_np[:, :3],
+            "rotation_delta": raw_action_np[:, 3:6],
+            "open_gripper": raw_action_np[:, 6:7],
+        }
+        action = {}
+        action["world_vector"] = raw_action["world_vector"] * action_scale
+        action["gripper"] = 2.0 * (raw_action["open_gripper"] > 0.5) - 1.0
+
+        action["rot_axangle"] = raw_action["rotation_delta"]
+
+        action = {k: torch.tensor(v) for k, v in action.items()}
+        action = torch.cat([action["world_vector"], action["rot_axangle"], action["gripper"]], dim=1)
+        action = action.to(raw_actions.device)
+
+        return action
+
+    def _denormalize(self, normalized_actions: np.ndarray) -> np.ndarray:
+        """Denormalize actions from [-1, 1] to original scale using q01/q99."""
+        action_norm_stats = self.unnorm_state
+        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+        mask = np.asarray(mask).reshape(1, -1)
+        action_high = np.array(action_norm_stats["q99"]).reshape(1, -1)
+        action_low = np.array(action_norm_stats["q01"]).reshape(1, -1)
+        return np.where(
+            mask,
+            0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
+            normalized_actions,
+        )
 
     def set_task(self, object: list[str], receptacle: list[str]) -> bool:
         """

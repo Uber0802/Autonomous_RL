@@ -114,6 +114,9 @@ class Args:
     alg_entropy_coef: float = 0.0
     lambda_bc: float = 0.1
 
+    # policy type
+    policy_type: str = "openvla"  # "openvla" or "cogact"
+
     # other
     wandb: bool = True
     wandb_dir: str = ""
@@ -153,19 +156,29 @@ class Runner:
         yaml.dump(all_args.__dict__, open(self.glob_dir / "config.yaml", "w"))
 
         # policy
-        from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy, OpenVLAPPO
         device_id = 0
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
         self.device = torch.device("cuda:" + str(device_id))
-        self.policy = OpenVLAPolicy(all_args, device_id_other)
+        self.use_cogact = (self.args.policy_type == "cogact")
 
-        self.alg = OpenVLAPPO(all_args, self.policy)
+        if self.use_cogact:
+            from simpler_env.policies.cogact.cogact_train import CogACTPolicy, CogACTPPO
+            self.policy = CogACTPolicy(all_args, device_id_other)
+            self.alg = CogACTPPO(all_args, self.policy)
+            unnorm_state = self.policy.cogact.get_action_stats(self.args.vla_unnorm_key)
+        else:
+            from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy, OpenVLAPPO
+            self.policy = OpenVLAPolicy(all_args, device_id_other)
+            self.alg = OpenVLAPPO(all_args, self.policy)
+            unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
 
         # env
-        unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
-        self.env = SimlerWrapper(self.args, unnorm_state)
+        self.env = SimlerWrapper(self.args, unnorm_state, continuous_actions=self.use_cogact)
 
-        # buffer
+        # buffer: CogACT uses float32 actions + scalar logprobs; OpenVLA uses int32 + per-token logprobs
+        action_dtype = np.float32 if self.use_cogact else np.int32
+        logprob_dim = 1 if self.use_cogact else 7
+
         if self.args.fifo_buffer:
             assert self.args.fifo_length % self.args.num_envs == 0, "fifo_length must be divisible by num_envs"
             self.prealloc_buffer = FIFOReplayBuffer(
@@ -173,17 +186,23 @@ class Runner:
                 obs_dim=(480, 640, 3),
                 act_dim=7,
                 max_num_envs=self.args.fifo_length,
+                action_dtype=action_dtype,
+                logprob_dim=logprob_dim,
             )
         else:
             self.prealloc_buffer = PreallocReplayBuffer(
                 all_args,
                 obs_dim=(480, 640, 3),
                 act_dim=7,
+                action_dtype=action_dtype,
+                logprob_dim=logprob_dim,
             )
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
             act_dim=7,
+            action_dtype=action_dtype,
+            logprob_dim=logprob_dim,
         )
         minibatch_count = self.buffer.get_minibatch_count()
         print(f"Buffer minibatch count: {minibatch_count}")
@@ -247,7 +266,11 @@ class Runner:
         masks = 1.0 - done.to(torch.float32)
 
         obs_img = obs_img.cpu().numpy()
-        actions = actions.to(torch.int32).cpu().numpy()
+        # CogACT: actions are float32 continuous; OpenVLA: actions are int32 tokens
+        if self.use_cogact:
+            actions = actions.to(torch.float32).cpu().numpy()
+        else:
+            actions = actions.to(torch.int32).cpu().numpy()
         logprob = logprob.to(torch.float32).cpu().numpy()
         value_preds = value_preds.to(torch.float32).cpu().numpy()
         rewards = rewards.cpu().numpy()
