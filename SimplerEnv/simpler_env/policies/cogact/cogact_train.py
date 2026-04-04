@@ -81,6 +81,11 @@ class CogACTPolicy:
 
         # Setup LoRA on VLM (same targets as AutoRL's OpenVLA)
         if not getattr(self.args, 'vla_load_path', None):
+            # Use default LoRA init (zero B matrix) so VLM output is unchanged at init.
+            # This preserves the cognition token distribution that the BC-pretrained
+            # Gaussian head was trained on. AutoRL uses "gaussian" init, but that's OK
+            # for OpenVLA because its action decoder is inside the LLM (both perturbed
+            # equally). For us, the action head is separate and expects clean cognition.
             lora_config = LoraConfig(
                 r=self.args.vla_lora_rank,
                 lora_alpha=min(self.args.vla_lora_rank, 16),
@@ -91,7 +96,7 @@ class CogACTPolicy:
                     "q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj", "lm_head",  # LLM
                 ],
-                init_lora_weights="gaussian",
+                init_lora_weights=True,  # default: zero B matrix, identity at init
             )
             self.vlm = get_peft_model(self.vlm, lora_config)
         else:

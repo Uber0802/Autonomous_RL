@@ -21,13 +21,16 @@ python simpler_env/train_ms3_ppo.py \
     --vla_lora_rank 32 \
     --vla_lr 1e-4 \
     --vla_vhlr 3e-3 \
-    --env_id PutCarrotOnPlateInScene-v1 \
+    --env_id TwoObjectTwoReceptacle-v1 \
     --num_envs 64 \
     --episode_len 80 \
     --training_len 80 \
     --training_interval 80 \
     --instruction_switch_interval 80 \
-    --max_episodes 32 \
+    --max_episodes 256 \
+    --max_reset 16384 \
+    --interval_eval=16 \
+    --interval_save=32 \
     --alg_name ppo \
     --alg_ppo_epoch 1 \
     --alg_gradient_accum 20 \
@@ -36,7 +39,8 @@ python simpler_env/train_ms3_ppo.py \
     --buffer_gamma 0.99 \
     --buffer_lambda 0.95 \
     --seed 0 \
-    --name "CogACT-PPO-carrot" \
+    --name "CogACT-PPO-Test" \
     --wandb_dir ../wandb \
     --log train_cogact.log \
+    --bc_init_path ../bc_checkpoints/two_obj_init/bc_init.pt
     "$@"

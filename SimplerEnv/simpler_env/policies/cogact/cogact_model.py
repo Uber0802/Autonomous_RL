@@ -17,7 +17,7 @@ class GaussianActionHead(nn.Module):
     """
 
     def __init__(self, hidden_dim: int = 4096, action_dim: int = 7,
-                 init_log_std: float = -0.5):
+                 init_log_std: float = -2.0):
         super().__init__()
         self.action_dim = action_dim
         self.mean_net = nn.Sequential(
@@ -35,7 +35,9 @@ class GaussianActionHead(nn.Module):
             Normal distribution over [B, action_dim]
         """
         mean = self.mean_net(cognition)  # [B, action_dim]
-        std = self.log_std.exp().expand_as(mean)
+        # Clamp log_std to prevent collapse (<-4 → std<0.018) or explosion (>0 → std>1)
+        log_std = self.log_std.clamp(min=-4.0, max=0.0)
+        std = log_std.exp().expand_as(mean)
         return Normal(mean, std)
 
     def get_action(self, cognition: torch.Tensor, deterministic: bool = False):

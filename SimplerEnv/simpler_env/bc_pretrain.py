@@ -245,7 +245,7 @@ def main():
         env_id=args.env_id,
         num_envs=args.num_envs,
         episode_len=80,
-        obj_set=1,
+        obj_set="rand",
         seed=args.seed,
     )
     unnorm_state = cogact.norm_stats.get(args.vla_unnorm_key, {}).get("action", {})
@@ -267,16 +267,17 @@ def main():
         )
         replay.add(cognition.cpu().numpy(), dit_actions.cpu().numpy())
 
-        # Step env with DiT actions to get diverse observations
+        # Step env with DiT actions → robot moves, giving diverse arm states
         action_tensor = dit_actions.to(device)
         try:
             obs_img, reward, done, env_info = env.step(action_tensor)
         except Exception:
-            # If env errors, just reset
             obs_img, instruction, info = env.reset(obj_set=env_args.obj_set)
 
-        # Periodically reset to get diverse scenes
-        if (step + 1) % 20 == 0:
+        # Reset every ~1 episode (80 steps) for new scene layout
+        # Within each episode, the DiT drives the robot through a full trajectory,
+        # giving diverse robot states (reaching, grasping, lifting, placing)
+        if (step + 1) % 80 == 0:
             obs_img, instruction, info = env.reset(obj_set=env_args.obj_set)
 
     print(f"Replay buffer: {replay.size} samples")
@@ -295,17 +296,19 @@ def main():
         # Forward through Gaussian head
         dist = action_head(cog_batch)
         predicted_mean = dist.mean
-        predicted_actions = dist.rsample()
 
-        # BC loss: MSE on mean (primary) + log-prob of teacher actions (secondary)
+        # BC loss: NLL (trains both mean and std jointly)
+        # log_prob per-dim then mean over dims and batch — balanced with MSE scale
+        nll_loss = -dist.log_prob(action_batch).mean()
         mse_loss = F.mse_loss(predicted_mean, action_batch)
-        logprob_loss = -dist.log_prob(action_batch).sum(-1).mean()
 
         # Value head regularization: predict zero (no reward signal yet)
         value_pred = value_head(cog_batch)
         value_loss = F.mse_loss(value_pred, torch.zeros_like(value_pred))
 
-        loss = mse_loss + 0.01 * logprob_loss + 0.1 * value_loss
+        # NLL is the primary loss (trains both mean and std).
+        # MSE is a stabilizer (prevents mean from drifting if std collapses).
+        loss = nll_loss + 0.5 * mse_loss + 0.1 * value_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -319,8 +322,10 @@ def main():
         if (step + 1) % args.log_interval == 0:
             avg_loss = np.mean(losses[-args.log_interval:])
             std_pred = dist.scale.mean().item()
+            log_std_val = action_head.log_std.data.mean().item()
             print(f"Step {step+1}/{args.bc_steps} | MSE: {avg_loss:.6f} | "
-                  f"std: {std_pred:.4f} | value: {value_pred.mean().item():.4f}")
+                  f"NLL: {nll_loss.item():.4f} | std: {std_pred:.4f} | "
+                  f"log_std: {log_std_val:.3f}")
 
         # Collect more data periodically to keep replay diverse
         if (step + 1) % 200 == 0:
