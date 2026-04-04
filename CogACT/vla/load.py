@@ -192,13 +192,17 @@ def load_vla(
         model_cfg.image_resize_strategy,
     )
 
-    # Load LLM Backbone --> note `inference_mode = True` by default when calling `load()`
+    # Load LLM Backbone
+    # Always use inference_mode=True here: the CogACT checkpoint contains all LLM
+    # weights, so from_pretrained() below loads them. This also avoids needing the
+    # full 13GB Llama-2 weights for initial construction (only config+tokenizer needed).
+    # We fix up training mode after checkpoint loading.
     overwatch.info(f"Loading Pretrained LLM [bold]{model_cfg.llm_backbone_id}[/] via HF Transformers")
     llm_backbone, tokenizer = get_llm_backbone_and_tokenizer(
         model_cfg.llm_backbone_id,
         llm_max_length=model_cfg.llm_max_length,
         hf_token=hf_token,
-        inference_mode=not load_for_training,
+        inference_mode=True,
     )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
@@ -214,5 +218,11 @@ def load_vla(
         norm_stats=norm_stats,
         **kwargs,
     )
+
+    # Fix up training mode: checkpoint loaded all weights, now enable training features
+    if load_for_training:
+        vla.vlm.llm_backbone.llm.config.use_cache = False
+        vla.vlm.llm_backbone.llm.enable_input_require_grads()
+        vla.vlm.llm_backbone.inference_mode = False
 
     return vla

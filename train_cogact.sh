@@ -1,15 +1,19 @@
 #!/bin/bash
-# Train CogACT with PPO on PutCarrotOnPlateInScene-v1
-# Uses CogACT-Base VLM with Gaussian action head + LoRA
+# Train CogACT with PPO
+# Usage: bash train_cogact.sh
+#        cuda=1 bash train_cogact.sh          # use GPU 1
+#        bash train_cogact.sh --seed 42       # pass extra args
 
-export CUDA_VISIBLE_DEVICES=0
+cuda="${cuda:-0}"
+
+cd "$(dirname "$0")/SimplerEnv"
+
+export CUDA_VISIBLE_DEVICES=$cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 
-conda activate cogact
-
-cd /mnt/home/ChengDian/CRONOS/CogACT_RL
-
-python SimplerEnv/simpler_env/train_ms3_ppo.py \
+python simpler_env/train_ms3_ppo.py \
     --policy_type cogact \
     --vla_path CogACT/CogACT-Base \
     --vla_unnorm_key bridge_orig \
@@ -19,8 +23,8 @@ python SimplerEnv/simpler_env/train_ms3_ppo.py \
     --env_id PutCarrotOnPlateInScene-v1 \
     --num_envs 64 \
     --episode_len 80 \
-    --training_len 320 \
-    --training_interval 160 \
+    --training_len 80 \
+    --training_interval 80 \
     --instruction_switch_interval 80 \
     --max_episodes 32 \
     --alg_name ppo \
@@ -32,7 +36,6 @@ python SimplerEnv/simpler_env/train_ms3_ppo.py \
     --buffer_lambda 0.95 \
     --seed 0 \
     --name "CogACT-PPO-carrot" \
-    --wandb_dir /mnt/home/ChengDian/CRONOS/CogACT_RL/wandb \
-    --wandb true \
-    --log /mnt/home/ChengDian/CRONOS/CogACT_RL/train_cogact.log \
+    --wandb_dir ../wandb \
+    --log train_cogact.log \
     "$@"
