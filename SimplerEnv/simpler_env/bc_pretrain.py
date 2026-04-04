@@ -223,9 +223,38 @@ def main():
     print(f"BC steps: {args.bc_steps}, lr: {args.bc_lr}, batch_size: {args.bc_batch_size}")
     print(f"Half dtype: {half_dtype}")
 
-    # Load full CogACT model (VLM + DiT)
+    # Create env FIRST (SAPIEN GPU physics must init before model fills VRAM)
+    print(f"\nCreating env: {args.env_id} x {args.num_envs}...")
+    from types import SimpleNamespace
+    from simpler_env.env.simpler_wrapper import SimlerWrapper
+
+    # Load norm stats from checkpoint config without loading the full model
+    import json
+    from huggingface_hub import hf_hub_download
+    try:
+        stats_path = hf_hub_download(args.vla_path, "dataset_statistics.json")
+        with open(stats_path) as f:
+            norm_stats = json.load(f)
+    except Exception:
+        norm_stats = {}
+
+    env_args = SimpleNamespace(
+        env_id=args.env_id,
+        num_envs=args.num_envs,
+        episode_len=80,
+        obj_set="rand",
+        seed=args.seed,
+    )
+    unnorm_state = norm_stats.get(args.vla_unnorm_key, {}).get("action", {})
+    env = SimlerWrapper(env_args, unnorm_state=unnorm_state, continuous_actions=True)
+
+    # Reset env
+    obs_img, instruction, info = env.reset(obj_set=env_args.obj_set)
+    print(f"Env reset. Instructions: {instruction[:2]}")
+
+    # THEN load model (after SAPIEN has reserved its GPU memory)
     print("\nLoading CogACT model (VLM + DiT)...")
-    cogact = load_vla(args.vla_path, load_for_training=False)  # inference mode for DiT
+    cogact = load_vla(args.vla_path, load_for_training=False)
     cogact = cogact.to(device)
     cogact.eval()
     print(f"Model loaded. Norm stats keys: {list(cogact.norm_stats.keys())[:3]}")
@@ -236,24 +265,6 @@ def main():
     value_head = ValueHead(hidden_dim).to(device)
     optimizer = Adam(list(action_head.parameters()) + list(value_head.parameters()),
                      lr=args.bc_lr)
-
-    # Create env
-    print(f"\nCreating env: {args.env_id} x {args.num_envs}...")
-    from types import SimpleNamespace
-    from simpler_env.env.simpler_wrapper import SimlerWrapper
-    env_args = SimpleNamespace(
-        env_id=args.env_id,
-        num_envs=args.num_envs,
-        episode_len=80,
-        obj_set="rand",
-        seed=args.seed,
-    )
-    unnorm_state = cogact.norm_stats.get(args.vla_unnorm_key, {}).get("action", {})
-    env = SimlerWrapper(env_args, unnorm_state=unnorm_state, continuous_actions=True)
-
-    # Reset env
-    obs_img, instruction, info = env.reset(obj_set=env_args.obj_set)
-    print(f"Env reset. Instructions: {instruction[:2]}")
 
     # Create replay buffer
     replay = BCReplayBuffer(args.replay_size, cognition_dim=hidden_dim, action_dim=7)

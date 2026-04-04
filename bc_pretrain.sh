@@ -12,6 +12,16 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 
+# Ensure libcuda.so is findable (needed by SAPIEN GPU physics)
+if ! ldconfig -p 2>/dev/null | grep -q "libcuda.so "; then
+    for d in /usr/local/cuda/lib64/stubs /usr/local/cuda/compat /usr/lib/x86_64-linux-gnu; do
+        if [ -f "$d/libcuda.so" ] || [ -f "$d/libcuda.so.1" ]; then
+            export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"
+            break
+        fi
+    done
+fi
+
 python simpler_env/bc_pretrain.py \
     --vla_path CogACT/CogACT-Base \
     --vla_unnorm_key bridge_orig \
