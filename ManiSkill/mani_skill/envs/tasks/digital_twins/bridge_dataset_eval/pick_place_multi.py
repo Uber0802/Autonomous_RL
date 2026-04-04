@@ -1513,17 +1513,27 @@ class TwoObjectTwoReceptacle(BaseMultiPickPlace):
             episode_id = episode_id.reshape(b)
             episode_id = episode_id % ltt
 
+        # Create increments to change scene
+        chunk_size = max(1, b // 4)
+        increments = torch.arange(b, device=self.device) // chunk_size
+        increments = torch.clamp(increments, max=3)  # handle remainder
+
         obj1_index = options.get("obj1_index", 7) - 1
         obj2_index = options.get("obj2_index", 2) - 1
         self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
+        self.select_carrot1_ids += increments
         self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
+        self.select_carrot2_ids += increments
 
         plate1_index = options.get("plate1_index", 1) - 1
         plate2_index = options.get("plate2_index", 2) - 1
         self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
+        self.select_plate1_ids += increments
         self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
+        self.select_plate2_ids += increments
 
         self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
+        self.select_overlay_ids += increments
         self.select_pos_ids = (episode_id // l2) % l1
         self.select_quat_ids = episode_id % l2
         if obj_set != "fixed":
