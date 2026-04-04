@@ -1,0 +1,16 @@
+# Model checkpoints (14+ GB)
+checkpoints/
+
+# Wandb logs and artifacts
+wandb/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Training logs
+*.txt
+
+# Memmap buffer directories (created by replay buffer)
+[0-9]*/
