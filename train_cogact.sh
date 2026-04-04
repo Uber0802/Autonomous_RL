@@ -1,8 +1,9 @@
 #!/bin/bash
 # Train CogACT with PPO
 # Usage: bash train_cogact.sh
-#        cuda=1 bash train_cogact.sh          # use GPU 1
-#        bash train_cogact.sh --seed 42       # pass extra args
+#        cuda=1 bash train_cogact.sh                               # use GPU 1
+#        bash train_cogact.sh --seed 42                            # pass extra args
+#        bash train_cogact.sh --bc_init_path ../bc_checkpoints/gaussian_head_init/bc_init.pt  # with BC warmstart
 
 cuda="${cuda:-0}"
 

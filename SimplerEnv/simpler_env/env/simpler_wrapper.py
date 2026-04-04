@@ -117,7 +117,7 @@ class SimlerWrapper:
         """CogACT path: continuous [-1, 1] actions → denormalize."""
         action_scale = 1.0
 
-        normalized_actions = raw_actions.cpu().numpy().astype(np.float64)  # [B, 7]
+        normalized_actions = raw_actions.float().cpu().numpy().astype(np.float64)  # [B, 7]
         normalized_actions = np.clip(normalized_actions, -1, 1)
 
         # Unnormalize actions

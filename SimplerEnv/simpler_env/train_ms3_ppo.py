@@ -97,6 +97,7 @@ class Args:
     vla_path: str = "openvla/openvla-7b"
     vla_unnorm_key: str = "bridge_orig"
     vla_load_path: str = ""
+    bc_init_path: str = ""  # Path to BC-pretrained Gaussian head (bc_init.pt)
     vla_lora_rank: int = 32
 
     vla_lr: float = 1e-4

@@ -6,6 +6,7 @@ Mirrors the interface of OpenVLAPolicy / OpenVLAPPO in openvla_train.py.
 """
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,7 +34,8 @@ class CogACTPolicy:
         self.args = all_args
         self.device_id = device_id
         self.device = torch.device(f"cuda:{device_id}")
-        self.tpdv = dict(device=self.device, dtype=torch.bfloat16)
+        self._half_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.tpdv = dict(device=self.device, dtype=self._half_dtype)
         self.tpdv_vn = dict(device=self.device, dtype=torch.float32)
 
         # Load CogACT model (VLM + DiT action head, but we only use VLM)
@@ -66,6 +68,16 @@ class CogACTPolicy:
             action_dim=7,
         ).to(**self.tpdv)
         self.value_head = ValueHead(hidden_dim=self.hidden_dim).to(**self.tpdv)
+
+        # Load BC-pretrained weights if available (distilled from DiT)
+        bc_init_path = getattr(self.args, 'bc_init_path', None)
+        if bc_init_path and os.path.exists(bc_init_path):
+            bc_state = torch.load(bc_init_path, map_location=self.device)
+            self.action_head.load_state_dict(bc_state["action_head"])
+            if "value_head" in bc_state:
+                self.value_head.load_state_dict(bc_state["value_head"])
+            print(f"BC-pretrained heads loaded from {bc_init_path} "
+                  f"(MSE={bc_state.get('final_mse', '?'):.6f})")
 
         # Setup LoRA on VLM (same targets as AutoRL's OpenVLA)
         if not getattr(self.args, 'vla_load_path', None):
@@ -147,7 +159,7 @@ class CogACTPolicy:
         Run VLM forward pass and extract cognition token [B, hidden_dim].
         Uses the same logic as CogACT's cogactvla.py forward().
         """
-        autocast_dtype = self.cogact.vlm.llm_backbone.half_precision_dtype
+        autocast_dtype = self._half_dtype
         with torch.autocast("cuda", dtype=autocast_dtype,
                             enabled=self.cogact.vlm.enable_mixed_precision_training):
             output = self.vlm(
