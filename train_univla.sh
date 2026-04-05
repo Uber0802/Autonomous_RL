@@ -3,7 +3,7 @@
 # Uses the SAME OpenVLAPolicy code — only checkpoint path and norm_key change.
 
 cd SimplerEnv
-cuda="3"  # Select GPU
+cuda="1"  # Select GPU
 
 export PYTHONPATH=$(dirname $PWD)/openvla:$PYTHONPATH
 
@@ -13,7 +13,6 @@ python simpler_env/train_ms3_ppo.py \
   --log="univla-warmup-seed0.txt" \
   --wandb_dir=".." \
   --env_id="TwoObjectTwoReceptacle-v1" \
-  --vla_type="univla_lam" \
   --vla_path="../checkpoints/univla-7b-sft-bridge" \
   --vla_unnorm_key="bridge_oxe" \
   --seed=0 \

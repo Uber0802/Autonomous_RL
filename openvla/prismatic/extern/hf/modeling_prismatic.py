@@ -1120,7 +1120,7 @@ class UniVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration):
         raw_dct = raw.view(B, self.ACTION_CHUNK_SIZE, self.ACTION_DIM)  # [B, 10, 7]
 
         # Divide by scale (matches UniversalActionProcessor.decode: idct(coeff / scale))
-        dct_coeffs = (raw_dct / self.DCT_SCALE).cpu().float().numpy()
+        dct_coeffs = (raw_dct / self.DCT_SCALE).detach().cpu().float().numpy()
         from scipy.fft import idct
         normalized_actions = idct(dct_coeffs, axis=1, norm="ortho")  # [B, 10, 7]
         normalized_actions = torch.tensor(normalized_actions, device=raw.device, dtype=raw.dtype)

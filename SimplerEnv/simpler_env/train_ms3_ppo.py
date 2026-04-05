@@ -287,11 +287,11 @@ class Runner:
         obs_img, actions, logprob, value_preds, rewards, done = data
         masks = 1.0 - done.to(torch.float32)
 
-        obs_img = obs_img.cpu().numpy()
-        actions = actions.to(torch.int32).cpu().numpy()
-        logprob = logprob.to(torch.float32).cpu().numpy()
-        value_preds = value_preds.to(torch.float32).cpu().numpy()
-        rewards = rewards.cpu().numpy()
+        obs_img = obs_img.detach().cpu().numpy()
+        actions = actions.detach().to(torch.int32).cpu().numpy()
+        logprob = logprob.detach().to(torch.float32).cpu().numpy()
+        value_preds = value_preds.detach().to(torch.float32).cpu().numpy()
+        rewards = rewards.detach().cpu().numpy()
         masks = masks.cpu().numpy()
 
         self.buffer.insert(obs_img, actions, logprob, value_preds, rewards, masks)
