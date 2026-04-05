@@ -589,6 +589,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
 
 class AllowedTokensLogitsProcessor(LogitsProcessor):
+    """Constrains generation to OpenVLA-style action bin tokens (31744-31999)."""
     def __call__(self, input_ids, scores):
         assert len(scores.shape) == 2
         assert scores.shape[1] >= 32000
@@ -597,6 +598,173 @@ class AllowedTokensLogitsProcessor(LogitsProcessor):
         scores[:, 32000:] = -torch.inf
 
         return scores
+
+
+class ACTTokensLogitsProcessor(LogitsProcessor):
+    """Constrains generation to UniVLA <ACT_0>..<ACT_31> tokens (32001-32032) + EOS (2)."""
+    def __init__(self, act_start=32001, act_end=32032, eos_id=2):
+        self.act_start = act_start
+        self.act_end = act_end
+        self.eos_id = eos_id
+
+    def __call__(self, input_ids, scores):
+        mask = torch.full_like(scores, -torch.inf)
+        mask[:, self.act_start:self.act_end + 1] = 0.0
+        mask[:, self.eos_id] = 0.0
+        return scores + mask
+
+
+# =====================================================================
+# UniVLA LAM (Latent Action Model) Decoder Components
+# =====================================================================
+
+class RMSNorm(nn.Module):
+    """RMS Normalization with learnable gain parameter 'g'."""
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.g = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.g
+
+
+class SwiGLU(nn.Module):
+    """SwiGLU MLP: Linear(dim, hidden*2) -> split -> silu(gate) * up -> Linear(hidden, dim)."""
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.project = nn.Linear(dim, hidden_dim * 2)
+
+    def forward(self, x):
+        x_proj = self.project(x)
+        gate, up = x_proj.chunk(2, dim=-1)
+        return F.silu(gate) * up
+
+
+class PerceiverAttentionPool(nn.Module):
+    """
+    Perceiver-style attention pooling: uses a learnable query to attend over
+    input hidden states, producing a single pooled vector.
+
+    Architecture (from action_decoder.pt state dict):
+      - latents: [1, pool_dim] learnable query
+      - projection: Linear(input_dim, pool_dim)
+      - attn_norm: RMSNorm(pool_dim)
+      - attn: CrossAttention(q: pool_dim->pool_dim, kv: pool_dim->pool_dim*2, proj: pool_dim->pool_dim)
+      - mlp_norm: RMSNorm(pool_dim)
+      - mlp: SwiGLU(pool_dim, hidden_dim) + Linear(hidden_dim, pool_dim)
+    """
+    def __init__(self, input_dim=4096, pool_dim=512, hidden_dim=2048, num_heads=8):
+        super().__init__()
+        self.latents = nn.Parameter(torch.randn(1, pool_dim))
+        self.projection = nn.Linear(input_dim, pool_dim)
+
+        self.attn_norm = RMSNorm(pool_dim)
+        self.attn = nn.ModuleDict({
+            'q': nn.Linear(pool_dim, pool_dim, bias=False),
+            'kv': nn.Linear(pool_dim, pool_dim * 2, bias=False),
+            'proj': nn.Linear(pool_dim, pool_dim),
+        })
+        self.num_heads = num_heads
+        self.head_dim = pool_dim // num_heads
+
+        self.mlp_norm = RMSNorm(pool_dim)
+        self.mlp = nn.ModuleList([
+            SwiGLU(pool_dim, hidden_dim),
+            nn.Linear(hidden_dim, pool_dim),
+        ])
+
+    def forward(self, hidden_states):
+        """
+        Args:
+            hidden_states: [B, seq_len, input_dim]
+        Returns:
+            pooled: [B, pool_dim]
+        """
+        B = hidden_states.shape[0]
+
+        # Project input to pool dimension
+        kv_input = self.projection(hidden_states)  # [B, seq_len, pool_dim]
+
+        # Expand learnable query
+        q_input = self.latents.unsqueeze(0).expand(B, -1, -1)  # [B, 1, pool_dim]
+
+        # Cross-attention: query attends to projected hidden states
+        residual = q_input
+        x = self.attn_norm(q_input)
+        kv_normed = self.attn_norm(kv_input)
+
+        q = self.attn['q'](x)  # [B, 1, pool_dim]
+        kv = self.attn['kv'](kv_normed)  # [B, seq_len, pool_dim*2]
+        k, v = kv.chunk(2, dim=-1)  # [B, seq_len, pool_dim] each
+
+        # Multi-head attention
+        q = q.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, 1, D]
+        k = k.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, S, D]
+        v = v.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, S, D]
+
+        attn = F.scaled_dot_product_attention(q, k, v)  # [B, H, 1, D]
+        attn = attn.transpose(1, 2).reshape(B, 1, -1)  # [B, 1, pool_dim]
+        attn = self.attn['proj'](attn)  # [B, 1, pool_dim]
+        x = residual + attn
+
+        # MLP
+        residual = x
+        x = self.mlp_norm(x)
+        x = self.mlp[0](x)  # SwiGLU
+        x = self.mlp[1](x)  # down projection
+        x = residual + x
+
+        return x.squeeze(1)  # [B, pool_dim]
+
+
+class LatentActionDecoder(nn.Module):
+    """
+    Decodes LLM hidden states into continuous actions using Perceiver-style pooling.
+
+    Takes hidden states from ACT token positions and visual token positions,
+    pools each separately, then projects to action space.
+
+    Output: [B, action_chunk_size * action_dim] (e.g., 70 = 10 * 7)
+    """
+    def __init__(self, input_dim=4096, pool_dim=512, hidden_dim=2048, output_dim=70, num_heads=8):
+        super().__init__()
+        self.latent_action_pool = PerceiverAttentionPool(input_dim, pool_dim, hidden_dim, num_heads)
+        self.visual_pool = PerceiverAttentionPool(input_dim, pool_dim, hidden_dim, num_heads)
+        self.proj = nn.ModuleList([nn.Linear(pool_dim, output_dim)])
+        self.output_dim = output_dim
+
+    def forward(self, act_hidden_states, visual_hidden_states):
+        """
+        Args:
+            act_hidden_states: [B, num_act_tokens, hidden_dim] - hidden states at ACT token positions
+            visual_hidden_states: [B, num_vis_tokens, hidden_dim] - hidden states at visual token positions
+        Returns:
+            actions: [B, output_dim] (e.g., [B, 70])
+        """
+        act_pooled = self.latent_action_pool(act_hidden_states)  # [B, pool_dim]
+        vis_pooled = self.visual_pool(visual_hidden_states)  # [B, pool_dim]
+        combined = act_pooled + vis_pooled  # [B, pool_dim]
+        actions = self.proj[0](combined)  # [B, output_dim]
+        return actions
+
+    @classmethod
+    def from_pretrained(cls, path, input_dim=4096, **kwargs):
+        """Load from action_decoder.pt file."""
+        sd = torch.load(path, map_location='cpu')
+        # Infer dimensions from state dict
+        pool_dim = sd['latent_action_pool.latents'].shape[1]
+        output_dim = sd['proj.0.bias'].shape[0]
+        hidden_dim = sd['latent_action_pool.mlp.1.weight'].shape[1]
+        # Infer num_heads: head_dim is typically 64 or 128
+        # q weight: [pool_dim, pool_dim], try head_dim=64 first
+        num_heads = pool_dim // 64 if pool_dim % 64 == 0 else pool_dim // 128
+
+        decoder = cls(input_dim=input_dim, pool_dim=pool_dim, hidden_dim=hidden_dim,
+                      output_dim=output_dim, num_heads=num_heads)
+        decoder.load_state_dict(sd)
+        return decoder
 
 
 class ValueHead(nn.Module):
@@ -863,3 +1031,132 @@ class OpenVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration)
         """Get all the logged statistics for the given dataset."""
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return self.norm_stats[unnorm_key]["action"]
+
+
+# =====================================================================
+# UniVLA LAM Model — generates ACT tokens, decodes via neural network
+# =====================================================================
+
+class UniVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration):
+    """
+    UniVLA with LAM decoder and value head for PPO.
+    Generates 32 <ACT> tokens, decodes hidden states via LatentActionDecoder -> 7D actions.
+    """
+    config_class: PretrainedConfig = OpenVLAConfig
+
+    NUM_ACT_TOKENS = 32
+    ACT_TOKEN_START = 32001
+    ACT_TOKEN_END = 32032
+    ACTION_CHUNK_SIZE = 10
+    ACTION_DIM = 7
+
+    def __init__(self, config: OpenVLAConfig, vh_mode: str = "a0") -> None:
+        super().__init__(config)
+        self.vh_mode = vh_mode
+        self.value_head = ValueHead(config.text_config.hidden_size)
+        self.norm_stats = config.norm_stats
+        self.action_decoder = None
+        self.act_logits_processor = ACTTokensLogitsProcessor(
+            self.ACT_TOKEN_START, self.ACT_TOKEN_END
+        )
+
+    def load_action_decoder(self, path: str):
+        self.action_decoder = LatentActionDecoder.from_pretrained(
+            path, input_dim=self.config.text_config.hidden_size
+        )
+        self.action_decoder.eval()
+        for p in self.action_decoder.parameters():
+            p.requires_grad = False
+        device = next(self.parameters()).device
+        self.action_decoder = self.action_decoder.to(device=device, dtype=torch.float32)
+        logger.info(f"Loaded action decoder from {path} (frozen)")
+
+    def predict_action_batch(
+            self, input_ids, attention_mask, pixel_values, unnorm_key,
+            do_sample=True, **kwargs
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns: (values [B,1], actions [B,7], act_token_ids [B,32], logprobs [B,1])"""
+        assert self.action_decoder is not None, "Call load_action_decoder() first"
+        B = input_ids.shape[0]
+        P = input_ids.shape[1]
+
+        output = self.generate(
+            input_ids, attention_mask=attention_mask, pixel_values=pixel_values,
+            max_new_tokens=self.NUM_ACT_TOKENS, return_dict_in_generate=True,
+            output_hidden_states=True, output_logits=True,
+            logits_processor=LogitsProcessorList([self.act_logits_processor]),
+            do_sample=do_sample, **kwargs
+        )
+
+        gen = output.sequences[:, P:]
+        if gen.shape[1] < self.NUM_ACT_TOKENS:
+            gen = torch.cat([gen, gen.new_full((B, self.NUM_ACT_TOKENS - gen.shape[1]), self.ACT_TOKEN_START)], dim=1)
+        act_ids = gen[:, :self.NUM_ACT_TOKENS].clone()
+        # Replace any non-ACT tokens (e.g., EOS=2) with ACT_TOKEN_START
+        non_act_mask = (act_ids < self.ACT_TOKEN_START) | (act_ids > self.ACT_TOKEN_END)
+        act_ids[non_act_mask] = self.ACT_TOKEN_START
+
+        # Log-probs
+        nl = min(len(output.logits), self.NUM_ACT_TOKENS)
+        lt = torch.stack(output.logits[:nl], dim=1)[:, :, self.ACT_TOKEN_START:self.ACT_TOKEN_END + 1]
+        alp = F.log_softmax(lt, dim=-1)
+        idx = (act_ids[:, :nl] - self.ACT_TOKEN_START).clamp(0, self.NUM_ACT_TOKENS - 1).unsqueeze(-1)
+        logprobs = torch.gather(alp, 2, idx).squeeze(-1).sum(1, keepdim=True)
+
+        # Value
+        values = self.value_head(output.hidden_states[0][-1][:, -1])
+
+        # Decode actions — use cleaned act_ids for full forward pass
+        fids = torch.cat([output.sequences[:, :P], act_ids], dim=1)
+        with torch.no_grad():
+            fo = super().forward(input_ids=fids, attention_mask=torch.ones_like(fids),
+                                 pixel_values=pixel_values, output_hidden_states=True, return_dict=True)
+            fh = fo.hidden_states[-1]
+            raw = self.action_decoder(fh[:, P:P + self.NUM_ACT_TOKENS].float(), fh[:, :P].float())
+
+        cont = raw.view(B, self.ACTION_CHUNK_SIZE, self.ACTION_DIM)[:, 0]
+
+        # Unnormalize
+        s = self.get_action_stats(unnorm_key)
+        q01 = torch.tensor(s["q01"], device=cont.device, dtype=cont.dtype)
+        q99 = torch.tensor(s["q99"], device=cont.device, dtype=cont.dtype)
+        m = torch.tensor(s.get("mask", [1]*self.ACTION_DIM), device=cont.device, dtype=cont.dtype)
+        actions = torch.where(m.bool(), 0.5*(cont+1)*(q99-q01)+q01, cont)
+
+        return values, actions, act_ids, logprobs
+
+    def evaluate_action(self, input_ids, attention_mask, pixel_values, labels, unnorm_key):
+        """Teacher-forced. Input: ... prompt ACT_0..ACT_31 EOS"""
+        out = super().forward(input_ids=input_ids, attention_mask=attention_mask,
+                              pixel_values=pixel_values, labels=labels,
+                              output_hidden_states=True, return_dict=True)
+        h = out.hidden_states[-1]
+        values = self.value_head(h[:, -self.NUM_ACT_TOKENS - 2])
+
+        al = out.logits[:, -self.NUM_ACT_TOKENS-2:-2, self.ACT_TOKEN_START:self.ACT_TOKEN_END+1]
+        alp = F.log_softmax(al, dim=-1)
+        tids = labels[:, -self.NUM_ACT_TOKENS-1:-1]
+        idx = (tids - self.ACT_TOKEN_START).clamp(0, self.NUM_ACT_TOKENS-1).unsqueeze(-1)
+        logprobs = torch.gather(alp, 2, idx).squeeze(-1).sum(1, keepdim=True)
+
+        ap = F.softmax(al, dim=-1)
+        entropy = -(ap * alp).sum(-1).mean(-1, keepdim=True)
+        return logprobs, entropy, values
+
+    def get_value(self, input_ids, attention_mask, pixel_values):
+        out = super().forward(input_ids=input_ids, attention_mask=attention_mask,
+                              pixel_values=pixel_values, output_hidden_states=True, return_dict=True)
+        return self.value_head(out.hidden_states[-1][:, -1])
+
+    @staticmethod
+    def _check_unnorm_key(ns, uk):
+        if uk is None:
+            assert len(ns) == 1; uk = next(iter(ns.keys()))
+        assert uk in ns, f"'{uk}' not in {ns.keys()}"
+        return uk
+
+    def get_action_dim(self, uk=None):
+        return len(self.norm_stats[self._check_unnorm_key(self.norm_stats, uk)]["action"]["q01"])
+
+    def get_action_stats(self, uk=None):
+        return self.norm_stats[self._check_unnorm_key(self.norm_stats, uk)]["action"]

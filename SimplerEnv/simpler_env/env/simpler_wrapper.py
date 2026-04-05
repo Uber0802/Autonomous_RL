@@ -112,6 +112,38 @@ class SimlerWrapper:
 
         return action
 
+    def _process_continuous_action(self, continuous_actions: torch.Tensor) -> torch.Tensor:
+        """Process already-unnormalized continuous actions from LAM decoder (skip token→bin conversion)."""
+        raw_action_np = continuous_actions.cpu().numpy()  # [B, 7]
+
+        raw_action = {
+            "world_vector": raw_action_np[:, :3],
+            "rotation_delta": raw_action_np[:, 3:6],
+            "open_gripper": raw_action_np[:, 6:7],
+        }
+        action = {}
+        action["world_vector"] = raw_action["world_vector"]
+        action["gripper"] = 2.0 * (raw_action["open_gripper"] > 0.5) - 1.0
+        action["rot_axangle"] = raw_action["rotation_delta"]
+
+        action = {k: torch.tensor(v) for k, v in action.items()}
+        action = torch.cat([action["world_vector"], action["rot_axangle"], action["gripper"]], dim=1)
+        action = action.to(continuous_actions.device)
+        return action
+
+    def step_continuous(self, continuous_actions: torch.Tensor):
+        """Step with already-unnormalized continuous actions (for UniVLA LAM)."""
+        action = self._process_continuous_action(continuous_actions)
+        obs, _reward, _terminated, truncated, info = self.env.step(action)
+        obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
+        truncated = truncated.reshape(-1, 1)
+        reward = self.get_reward(info)
+        if "episode" in info:
+            episode_info = info["episode"]
+        else:
+            episode_info = {}
+        return obs_image, reward, truncated, {"episode": episode_info, **info}
+
     def set_task(self, object: list[str], receptacle: list[str]) -> bool:
         """
         Set task in all envs.

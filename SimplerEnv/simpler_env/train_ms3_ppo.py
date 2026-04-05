@@ -94,12 +94,13 @@ class Args:
     buffer_lambda: float = 0.95
 
     # vla
-    vla_type: str = "openvla"  # "openvla" or "univla"
+    vla_type: str = "openvla"  # "openvla", "univla", or "univla_lam"
     vla_path: str = "openvla/openvla-7b"
     vla_unnorm_key: str = "bridge_orig"
     vla_load_path: str = ""
     vla_lora_rank: int = 32
     vision_vq_path: str = ""  # UniVLA: path to Emu3-VisionVQ (defaults to vla_path)
+    action_decoder_path: str = ""  # UniVLA LAM: path to action_decoder.pt (defaults to vla_path/action_decoder.pt)
 
     vla_lr: float = 1e-4
     vla_vhlr: float = 3e-3
@@ -165,6 +166,12 @@ class Runner:
             self.alg = UniVLAPPO(all_args, self.policy)
             unnorm_state = self.policy.get_action_stats()
             last_vocab_idx = self.policy.last_vocab_idx  # 151642
+        elif self.args.vla_type == "univla_lam":
+            from simpler_env.policies.univla_lam.univla_lam_train import UniVLALAMPolicy, UniVLALAMPPO
+            self.policy = UniVLALAMPolicy(all_args, device_id_other)
+            self.alg = UniVLALAMPPO(all_args, self.policy)
+            unnorm_state = self.policy.vla.get_action_stats(self.args.vla_unnorm_key)
+            last_vocab_idx = 32000  # not used for LAM (continuous actions)
         else:
             from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy, OpenVLAPPO
             self.policy = OpenVLAPolicy(all_args, device_id_other)
@@ -174,6 +181,11 @@ class Runner:
 
         # env
         self.env = SimlerWrapper(self.args, unnorm_state, last_vocab_idx=last_vocab_idx)
+        self.is_lam = (self.args.vla_type == "univla_lam")
+
+        # buffer — LAM stores 32 ACT token IDs with scalar logprobs
+        buf_act_dim = 32 if self.is_lam else 7
+        buf_logprob_dim = 1 if self.is_lam else None  # None → defaults to act_dim
 
         # buffer
         if self.args.fifo_buffer:
@@ -181,19 +193,22 @@ class Runner:
             self.prealloc_buffer = FIFOReplayBuffer(
                 all_args,
                 obs_dim=(480, 640, 3),
-                act_dim=7,
+                act_dim=buf_act_dim,
+                logprob_dim=buf_logprob_dim,
                 max_num_envs=self.args.fifo_length,
             )
         else:
             self.prealloc_buffer = PreallocReplayBuffer(
                 all_args,
                 obs_dim=(480, 640, 3),
-                act_dim=7,
+                act_dim=buf_act_dim,
+                logprob_dim=buf_logprob_dim,
             )
         self.buffer = SeparatedReplayBuffer(
             all_args,
             obs_dim=(480, 640, 3),
-            act_dim=7,
+            act_dim=buf_act_dim,
+            logprob_dim=buf_logprob_dim,
         )
         minibatch_count = self.buffer.get_minibatch_count()
         print(f"Buffer minibatch count: {minibatch_count}")
@@ -228,18 +243,29 @@ class Runner:
         values = []
         actions = []
         logprobs = []
+        cont_actions = [] if self.is_lam else None
 
         for i in range(0, total_batch, self.args.buffer_inferbatch):
             obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
-            value, action, logprob = self.policy.get_action(obs_batch, deterministic)
-            values.append(value)
-            actions.append(action)
-            logprobs.append(logprob)
+            if self.is_lam:
+                value, cont_action, act_ids, logprob = self.policy.get_action(obs_batch, deterministic)
+                values.append(value)
+                actions.append(act_ids)  # store ACT token IDs
+                logprobs.append(logprob)
+                cont_actions.append(cont_action)
+            else:
+                value, action, logprob = self.policy.get_action(obs_batch, deterministic)
+                values.append(value)
+                actions.append(action)
+                logprobs.append(logprob)
 
         values = torch.cat(values, dim=0).to(device=self.device)
         actions = torch.cat(actions, dim=0).to(device=self.device)
         logprobs = torch.cat(logprobs, dim=0).to(device=self.device)
 
+        if self.is_lam:
+            cont_actions_cat = torch.cat(cont_actions, dim=0).to(device=self.device)
+            return values, actions, logprobs, cont_actions_cat
         return values, actions, logprobs
 
     def collect(self):
@@ -248,9 +274,14 @@ class Runner:
         obs_image = self.buffer.obs[self.buffer.step]
         obs_image = torch.tensor(obs_image).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
-        value, action, logprob = self._get_action(obs)
 
-        return value, action, logprob
+        if self.is_lam:
+            # LAM returns 4-tuple: (values, continuous_actions, act_token_ids, logprobs)
+            values, cont_actions, act_ids, logprobs = self.policy.get_action(obs, deterministic=False)
+            return values, cont_actions, act_ids, logprobs
+        else:
+            value, action, logprob = self._get_action(obs)
+            return value, action, logprob
 
     def insert(self, data):
         obs_img, actions, logprob, value_preds, rewards, done = data
@@ -271,7 +302,10 @@ class Runner:
         obs_image = torch.tensor(self.buffer.obs[-1]).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
         with torch.no_grad():
-            next_value, _, _ = self._get_action(obs)
+            if self.is_lam:
+                next_value = self.policy.get_value(obs)
+            else:
+                next_value, _, _ = self._get_action(obs)
         next_value = next_value.to(torch.float32).cpu().numpy()
 
         self.buffer.endup(next_value)
@@ -305,9 +339,12 @@ class Runner:
 
         for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
-            value, action, logprob = self._get_action(obs, deterministic=True)
-
-            obs_img, reward, done, env_info = self.env.step(action)
+            if self.is_lam:
+                value, act_ids, logprob, cont_action = self._get_action(obs, deterministic=True)
+                obs_img, reward, done, env_info = self.env.step_continuous(cont_action)
+            else:
+                value, action, logprob = self._get_action(obs, deterministic=True)
+                obs_img, reward, done, env_info = self.env.step(action)
 
             if "episode" in env_info.keys():
                 for k, v in env_info["episode"].items():
@@ -341,9 +378,13 @@ class Runner:
 
         for _ in range(self.args.episode_len):
             obs = dict(image=obs_img, task_description=instruction)
-            value, action, logprob = self._get_action(obs, deterministic=True)
-
-            obs_img_new, reward, done, env_info = self.env.step(action)
+            if self.is_lam:
+                value, act_ids, logprob, cont_action = self._get_action(obs, deterministic=True)
+                action = cont_action
+                obs_img_new, reward, done, env_info = self.env.step_continuous(cont_action)
+            else:
+                value, action, logprob = self._get_action(obs, deterministic=True)
+                obs_img_new, reward, done, env_info = self.env.step(action)
 
             if "episode" in env_info.keys():
                 for k, v in env_info["episode"].items():
@@ -579,10 +620,15 @@ class Runner:
             print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
-            # Reset buffer for 0-79 step    
+            # Reset buffer for 0-79 step
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
-                value, action, logprob = self.collect()
-                obs_img, reward, done, env_info = self.env.step(action)
+                if self.is_lam:
+                    value, cont_action, act_ids, logprob = self.collect()
+                    obs_img, reward, done, env_info = self.env.step_continuous(cont_action)
+                    action = act_ids  # store ACT token IDs in buffer
+                else:
+                    value, action, logprob = self.collect()
+                    obs_img, reward, done, env_info = self.env.step(action)
                 for env_i in range(self.args.num_envs):
                     rollout_images[env_i].append(obs_img[env_i].cpu().numpy())
                 data = (obs_img, action, logprob, value, reward, done)

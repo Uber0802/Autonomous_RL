@@ -4,7 +4,7 @@ import gc
 import os
 
 class SeparatedReplayBuffer(object):
-    def __init__(self, all_args, obs_dim, act_dim):
+    def __init__(self, all_args, obs_dim, act_dim, logprob_dim=None):
         self.ep_len = all_args.episode_len
         self.num_env = all_args.num_envs
         self.gamma = all_args.buffer_gamma
@@ -12,12 +12,17 @@ class SeparatedReplayBuffer(object):
         self.buffer_minibatch = all_args.buffer_minibatch
         self.alg_grpo_fix = all_args.alg_grpo_fix
 
+        # logprob_dim defaults to act_dim (OpenVLA: per-dim logprobs)
+        # For LAM: logprob_dim=1 (sum of logprobs stored as scalar)
+        if logprob_dim is None:
+            logprob_dim = act_dim
+
         self.obs = np.zeros((self.ep_len + 1, self.num_env, *obs_dim), dtype=np.uint8)
         self.instruction = [""] * self.num_env
         self.value_preds = np.zeros((self.ep_len + 1, self.num_env, 1), dtype=np.float32)
         self.returns = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
         self.actions = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.int32)
-        self.action_log_probs = np.zeros((self.ep_len, self.num_env, act_dim), dtype=np.float32)
+        self.action_log_probs = np.zeros((self.ep_len, self.num_env, logprob_dim), dtype=np.float32)
         self.rewards = np.zeros((self.ep_len, self.num_env, 1), dtype=np.float32)
         self.masks = np.ones((self.ep_len + 1, self.num_env, 1), dtype=np.float32)
 
@@ -196,7 +201,9 @@ def create_memmap(filename, shape, dtype):
     return np.memmap(filepath, dtype=dtype, mode='w+', shape=shape)
 
 class PreallocReplayBuffer(SeparatedReplayBuffer):
-    def __init__(self, all_args, obs_dim, act_dim):
+    def __init__(self, all_args, obs_dim, act_dim, logprob_dim=None):
+        if logprob_dim is None:
+            logprob_dim = act_dim
         self.ep_len = all_args.episode_len
         self.num_env = 0
         self.gamma = all_args.buffer_gamma
@@ -212,7 +219,7 @@ class PreallocReplayBuffer(SeparatedReplayBuffer):
         self.value_preds = create_memmap('value_preds.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.returns = create_memmap('returns.dat', (self.ep_len, max_num_envs, 1), np.float32)
         self.actions = create_memmap('actions.dat', (self.ep_len, max_num_envs, act_dim), np.int32)
-        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, logprob_dim), np.float32)
         self.rewards = create_memmap('rewards.dat', (self.ep_len, max_num_envs, 1), np.float32)
         self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
@@ -256,7 +263,9 @@ class PreallocReplayBuffer(SeparatedReplayBuffer):
         print("Reset PreallocReplayBuffer")
 
 class FIFOReplayBuffer(SeparatedReplayBuffer):
-    def __init__(self, all_args, obs_dim, act_dim, max_num_envs):
+    def __init__(self, all_args, obs_dim, act_dim, max_num_envs, logprob_dim=None):
+        if logprob_dim is None:
+            logprob_dim = act_dim
         self.ep_len = all_args.episode_len
         self.gamma = all_args.buffer_gamma
         self.gae_lambda = all_args.buffer_lambda
@@ -268,7 +277,7 @@ class FIFOReplayBuffer(SeparatedReplayBuffer):
         self.value_preds = create_memmap('value_preds.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.returns = create_memmap('returns.dat', (self.ep_len, max_num_envs, 1), np.float32)
         self.actions = create_memmap('actions.dat', (self.ep_len, max_num_envs, act_dim), np.int32)
-        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, act_dim), np.float32)
+        self.action_log_probs = create_memmap('action_log_probs.dat', (self.ep_len, max_num_envs, logprob_dim), np.float32)
         self.rewards = create_memmap('rewards.dat', (self.ep_len, max_num_envs, 1), np.float32)
         self.masks = create_memmap('masks.dat', (self.ep_len + 1, max_num_envs, 1), np.float32)
         self.advantages = create_memmap('advantages.dat', (self.ep_len, max_num_envs, 1), np.float32)
