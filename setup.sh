@@ -54,6 +54,11 @@ fi
 cd ManiSkill && pip install -e . && cd ..
 cd SimplerEnv && pip install -e . && cd ..
 
+# ===== Step 6.1: Restore setuptools (sapien needs pkg_resources) =====
+# pip install -e . can overwrite setuptools; sapien requires pkg_resources which
+# was removed from setuptools>=70. Pin it back.
+pip install "setuptools<70.0.0"
+
 # ===== Step 7: Download checkpoint + patch (UniVLA-specific) =====
 echo "===== Downloading qwbu/univla-7b checkpoint (~14 GB) ====="
 huggingface-cli download qwbu/univla-7b --local-dir checkpoints/univla-7b
