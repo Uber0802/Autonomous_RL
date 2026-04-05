@@ -113,7 +113,11 @@ class SimlerWrapper:
         return action
 
     def _process_continuous_action(self, continuous_actions: torch.Tensor) -> torch.Tensor:
-        """Process already-unnormalized continuous actions from LAM decoder (skip token→bin conversion)."""
+        """Process already-unnormalized continuous actions from LAM decoder.
+
+        The model's predict_action_batch() already applies IDCT + q01/q99 unnormalization.
+        Here we just format the action and binarize the gripper.
+        """
         raw_action_np = continuous_actions.cpu().numpy()  # [B, 7]
 
         raw_action = {

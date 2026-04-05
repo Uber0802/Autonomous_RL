@@ -64,13 +64,18 @@ class UniVLALAMPolicy:
         )
 
         # Load action decoder
-        action_decoder_path = getattr(self.args, 'action_decoder_path', None)
-        if action_decoder_path is None:
+        action_decoder_path = getattr(self.args, 'action_decoder_path', '')
+        if not action_decoder_path:
             action_decoder_path = str(Path(self.args.vla_path) / "action_decoder.pt")
         self.vla.load_action_decoder(action_decoder_path)
 
         # LoRA
         if not self.args.vla_load_path:
+            # Temporarily detach action_decoder to avoid LoRA targeting its modules
+            # (action_decoder has "proj", "q", "kv" which collide with vision/LLM targets)
+            action_decoder = self.vla.action_decoder
+            self.vla.action_decoder = None
+
             lora_config = LoraConfig(
                 r=self.args.vla_lora_rank,
                 lora_alpha=min(self.args.vla_lora_rank, 16),
@@ -83,6 +88,9 @@ class UniVLALAMPolicy:
                 init_lora_weights="gaussian"
             )
             self.vla = get_peft_model(self.vla, lora_config)
+
+            # Re-attach frozen action decoder
+            self.vla.base_model.model.action_decoder = action_decoder
         else:
             self.vla = PeftModel.from_pretrained(self.vla, self.args.vla_load_path, is_trainable=True)
             print(f"VLA load: {self.args.vla_load_path}")
@@ -225,8 +233,8 @@ class UniVLALAMPolicy:
             device_map="cuda:" + str(self.device_id),
             vh_mode="a0",
         )
-        action_decoder_path = getattr(self.args, 'action_decoder_path', None)
-        if action_decoder_path is None:
+        action_decoder_path = getattr(self.args, 'action_decoder_path', '')
+        if not action_decoder_path:
             action_decoder_path = str(Path(self.args.vla_path) / "action_decoder.pt")
         self.vla.load_action_decoder(action_decoder_path)
 

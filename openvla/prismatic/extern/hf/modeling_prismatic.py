@@ -1049,6 +1049,7 @@ class UniVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration):
     ACT_TOKEN_END = 32032
     ACTION_CHUNK_SIZE = 10
     ACTION_DIM = 7
+    DCT_SCALE = 50  # matches UniversalActionProcessor scale for bridge tasks
 
     def __init__(self, config: OpenVLAConfig, vh_mode: str = "a0") -> None:
         super().__init__(config)
@@ -1114,9 +1115,19 @@ class UniVLAForActionPredictionWithValueHead(PrismaticForConditionalGeneration):
             fh = fo.hidden_states[-1]
             raw = self.action_decoder(fh[:, P:P + self.NUM_ACT_TOKENS].float(), fh[:, :P].float())
 
-        cont = raw.view(B, self.ACTION_CHUNK_SIZE, self.ACTION_DIM)[:, 0]
+        # Decoder outputs DCT coefficients scaled by 50.
+        # Pipeline: raw [B, 70] → reshape [B, 10, 7] → /scale → IDCT → normalized [-1,1] → unnorm
+        raw_dct = raw.view(B, self.ACTION_CHUNK_SIZE, self.ACTION_DIM)  # [B, 10, 7]
 
-        # Unnormalize
+        # Divide by scale (matches UniversalActionProcessor.decode: idct(coeff / scale))
+        dct_coeffs = (raw_dct / self.DCT_SCALE).cpu().float().numpy()
+        from scipy.fft import idct
+        normalized_actions = idct(dct_coeffs, axis=1, norm="ortho")  # [B, 10, 7]
+        normalized_actions = torch.tensor(normalized_actions, device=raw.device, dtype=raw.dtype)
+
+        cont = normalized_actions[:, 0]  # [B, 7] — first timestep
+
+        # Unnormalize from [-1, 1] to physical action space
         s = self.get_action_stats(unnorm_key)
         q01 = torch.tensor(s["q01"], device=cont.device, dtype=cont.dtype)
         q99 = torch.tensor(s["q99"], device=cont.device, dtype=cont.dtype)
