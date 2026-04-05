@@ -6,7 +6,6 @@ cd SimplerEnv
 cuda="0"  # Select GPU
 
 export PYTHONPATH=$(dirname $PWD)/openvla:$PYTHONPATH
-export VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/etc/vulkan/icd.d/nvidia_icd.json}
 
 CUDA_VISIBLE_DEVICES=$cuda XLA_PYTHON_CLIENT_PREALLOCATE=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python simpler_env/train_ms3_ppo.py \
@@ -22,6 +21,5 @@ python simpler_env/train_ms3_ppo.py \
   --max_reset=16384 \
   --max_episodes=256 \
   --interval_eval=16 \
-  --interval_save=32 \
-  --wandb_dir=".."
+  --interval_save=32
 
