@@ -12,5 +12,6 @@ __pycache__/
 # Training logs
 *.txt
 
-# Memmap buffer directories (created by replay buffer)
-[0-9]*/
+# Memmap buffer directories (created by replay buffer in SimplerEnv/)
+# Use specific path to avoid catching ManiSkill asset dirs like 001_carrot_simpler/
+SimplerEnv/[0-9]*/

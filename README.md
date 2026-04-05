@@ -61,8 +61,9 @@ cd SimplerEnv && pip install -e . && cd ..
 ## 3. Download Checkpoint
 
 ```bash
-# UniVLA-7b pretrained (~14 GB)
-huggingface-cli download qwbu/univla-7b --local-dir checkpoints/univla-7b
+# UniVLA-7b SFT checkpoint (~14 GB) — fine-tuned on SimplerEnv/Bridge tasks
+# The base univla-7b acts randomly on Bridge tasks; use the SFT version for RL warm-start.
+huggingface-cli download qwbu/univla-7b-224-sft-simpler-bridge --local-dir checkpoints/univla-7b-sft-bridge
 ```
 
 ## 4. Patch Checkpoint for Prismatic Loading
@@ -70,19 +71,19 @@ huggingface-cli download qwbu/univla-7b --local-dir checkpoints/univla-7b
 `qwbu/univla-7b` is missing `auto_map` fields that `PrismaticProcessor.from_pretrained()` requires. Run this once after downloading:
 
 ```bash
-python patch_checkpoint.py
+python patch_checkpoint.py --ckpt_dir checkpoints/univla-7b-sft-bridge
 ```
 
 Or do it manually:
 
 ```bash
 # Copy prismatic source files into checkpoint directory
-cp openvla/prismatic/extern/hf/configuration_prismatic.py checkpoints/univla-7b/
-cp openvla/prismatic/extern/hf/modeling_prismatic.py checkpoints/univla-7b/
-cp openvla/prismatic/extern/hf/processing_prismatic.py checkpoints/univla-7b/
+cp openvla/prismatic/extern/hf/configuration_prismatic.py checkpoints/univla-7b-sft-bridge/
+cp openvla/prismatic/extern/hf/modeling_prismatic.py checkpoints/univla-7b-sft-bridge/
+cp openvla/prismatic/extern/hf/processing_prismatic.py checkpoints/univla-7b-sft-bridge/
 ```
 
-Then add `auto_map` to `checkpoints/univla-7b/config.json`:
+Then add `auto_map` to `checkpoints/univla-7b-sft-bridge/config.json`:
 ```json
 "auto_map": {
     "AutoConfig": "configuration_prismatic.OpenVLAConfig",
@@ -90,7 +91,7 @@ Then add `auto_map` to `checkpoints/univla-7b/config.json`:
 }
 ```
 
-And add `auto_map` to `checkpoints/univla-7b/preprocessor_config.json`:
+And add `auto_map` to `checkpoints/univla-7b-sft-bridge/preprocessor_config.json`:
 ```json
 "auto_map": {
     "AutoImageProcessor": "processing_prismatic.PrismaticImageProcessor"
@@ -268,7 +269,7 @@ UniVLA_RL/
 
 **`PrismaticProcessor.from_pretrained()` fails:**
 - Ensure `transformers==4.40.1` (not 4.44+)
-- Ensure `python patch_checkpoint.py` was run
+- Ensure `python patch_checkpoint.py --ckpt_dir checkpoints/univla-7b-sft-bridge` was run
 
 **`No module named 'prismatic'`:**
 - Training scripts set PYTHONPATH automatically. If running manually: `PYTHONPATH=$PWD/openvla:$PYTHONPATH`

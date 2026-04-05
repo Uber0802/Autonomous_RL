@@ -60,9 +60,11 @@ cd SimplerEnv && pip install -e . && cd ..
 pip install "setuptools<70.0.0"
 
 # ===== Step 7: Download checkpoint + patch (UniVLA-specific) =====
-echo "===== Downloading qwbu/univla-7b checkpoint (~14 GB) ====="
-huggingface-cli download qwbu/univla-7b --local-dir checkpoints/univla-7b
-python patch_checkpoint.py
+# Use SFT checkpoint (fine-tuned on SimplerEnv/Bridge) for purposeful initial actions.
+# The base univla-7b acts randomly on Bridge tasks — not suitable for RL warm-start.
+echo "===== Downloading qwbu/univla-7b-224-sft-simpler-bridge checkpoint (~14 GB) ====="
+huggingface-cli download qwbu/univla-7b-224-sft-simpler-bridge --local-dir checkpoints/univla-7b-sft-bridge
+python patch_checkpoint.py --ckpt_dir checkpoints/univla-7b-sft-bridge
 
 # ===== Step 8: Download ManiSkill assets =====
 python -m mani_skill.utils.download_asset bridge_v2_real2sim

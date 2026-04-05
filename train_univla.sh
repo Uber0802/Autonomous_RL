@@ -13,7 +13,7 @@ python simpler_env/train_ms3_ppo.py \
   --log="univla-warmup-seed0.txt" \
   --wandb_dir=".." \
   --env_id="TwoObjectTwoReceptacle-v1" \
-  --vla_path="../checkpoints/univla-7b" \
+  --vla_path="../checkpoints/univla-7b-sft-bridge" \
   --vla_unnorm_key="bridge_oxe" \
   --seed=0 \
   --num_envs=4 \
