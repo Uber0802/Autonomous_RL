@@ -59,12 +59,35 @@ cd SimplerEnv && pip install -e . && cd ..
 # was removed from setuptools>=70. Pin it back.
 pip install "setuptools<70.0.0"
 
-# ===== Step 7: Download checkpoint + patch (UniVLA-specific) =====
+# ===== Step 6.2: Extra deps for Emu3 path =====
+# tiktoken is required by emu3.mllm.tokenization_emu3 (Emu3Tokenizer).
+# openvla's pyproject.toml declares it but pip sometimes misses it.
+pip install tiktoken==0.6.0
+
+# ===== Step 7a: Download Prismatic checkpoint + patch (default path) =====
 # Use SFT checkpoint (fine-tuned on SimplerEnv/Bridge) for purposeful initial actions.
 # The base univla-7b acts randomly on Bridge tasks — not suitable for RL warm-start.
 echo "===== Downloading qwbu/univla-7b-224-sft-simpler-bridge checkpoint (~14 GB) ====="
 huggingface-cli download qwbu/univla-7b-224-sft-simpler-bridge --local-dir checkpoints/univla-7b-sft-bridge
 python patch_checkpoint.py --ckpt_dir checkpoints/univla-7b-sft-bridge
+
+# ===== Step 7b: Download Emu3 path artifacts (optional, for vla_type=univla) =====
+# Required only if you plan to run train_univla_emu3.sh (FAST/Emu3 path).
+# Skip with: SKIP_EMU3=1 bash setup.sh
+if [ -z "${SKIP_EMU3:-}" ]; then
+    echo "===== Downloading Emu3-based UniVLA checkpoint (~14 GB) ====="
+    huggingface-cli download Yuqi1997/UniVLA \
+        --include "UNIVLA_SIMPLER_BRIDGE_VIDEO_BS128_20K/*" \
+        --local-dir checkpoints/univla-emu3-raw
+
+    echo "===== Downloading BAAI/Emu3-VisionTokenizer (~300 MB) ====="
+    huggingface-cli download BAAI/Emu3-VisionTokenizer \
+        --local-dir checkpoints/emu3-vision-tokenizer
+
+    echo "===== Downloading FAST action tokenizer (~1 MB) ====="
+    huggingface-cli download physical-intelligence/fast \
+        --local-dir checkpoints/fast-bridge-t5-s50
+fi
 
 # ===== Step 8: Download ManiSkill assets =====
 python -m mani_skill.utils.download_asset bridge_v2_real2sim

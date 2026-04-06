@@ -482,9 +482,13 @@ class Runner:
 
         for idx in tqdm(range(self.args.episode_len), desc=f"Rendering {instruction[0]}"):
             obs = dict(image=obs_img, task_description=instruction)
-            value, action, logprob = self._get_action(obs, deterministic=True)
-
-            obs_img_new, reward, done, env_info = self.env.step(action)
+            if self.use_continuous_action:
+                value, act_ids, logprob, cont_action = self._get_action(obs, deterministic=True)
+                obs_img_new, reward, done, env_info = self.env.step_continuous(cont_action)
+                action = cont_action  # for logging
+            else:
+                value, action, logprob = self._get_action(obs, deterministic=True)
+                obs_img_new, reward, done, env_info = self.env.step(action)
 
             # info
             if "episode" in env_info.keys():
@@ -492,9 +496,13 @@ class Runner:
                     env_infos[f"{k}"] += v
 
             for i in range(self.args.num_envs):
-                post_action = self.env._process_action(action)
+                if self.use_continuous_action:
+                    # Continuous actions are already in physical units — log as-is
+                    log_action = action[i].detach().cpu().numpy().tolist()
+                else:
+                    post_action = self.env._process_action(action)
+                    log_action = post_action[i].cpu().numpy().tolist()
                 log_image = obs_img[i].cpu().numpy()
-                log_action = post_action[i].cpu().numpy().tolist()
                 log_info = {k: v[i].tolist() for k, v in env_info.items() if k != "episode"}
                 datas[i]["image"].append(log_image)
                 datas[i]["action"].append(log_action)

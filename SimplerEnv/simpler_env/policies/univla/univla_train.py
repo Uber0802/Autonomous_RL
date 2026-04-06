@@ -88,6 +88,17 @@ class UniVLAPolicy:
         print(f"[UniVLAPolicy] vision_vq_path={vision_vq_path}")
         print(f"[UniVLAPolicy] fast_path={fast_path}")
 
+        # Defensive: fail early if any artifact is missing, with a clear hint.
+        for label, p in [("vla_path", vla_path), ("vision_vq_path", vision_vq_path), ("fast_tokenizer_path", fast_path)]:
+            if not os.path.isdir(p):
+                raise FileNotFoundError(
+                    f"[UniVLAPolicy] {label} not found at: {p}\n"
+                    f"  Run `bash setup.sh` (or download manually) to fetch the Emu3 path artifacts:\n"
+                    f"    - Yuqi1997/UniVLA → checkpoints/univla-emu3-raw\n"
+                    f"    - BAAI/Emu3-VisionTokenizer → checkpoints/emu3-vision-tokenizer\n"
+                    f"    - physical-intelligence/fast → checkpoints/fast-bridge-t5-s50"
+                )
+
         # --- Emu3 text tokenizer (for building prompts) ---
         self.tokenizer = Emu3Tokenizer.from_pretrained(
             vla_path, padding_side="right", use_fast=False,
