@@ -132,14 +132,108 @@ It reaches `.glb` only when Vulkan fails before the file check runs properly.
 
 ## 6. Run Training
 
-```bash
-bash train_univla_full.sh
-```
+There are two paths depending on which UniVLA variant you want to use.
 
-Or warm-up test first (optional, verifies pipeline works):
+### Path A — Prismatic UniVLA (drop-in OpenVLA replacement)
+
 ```bash
+# Full PPO training with the SFT'd Prismatic UniVLA
+bash train_univla_full.sh
+
+# Or warm-up smoke test (1 episode, 4 envs)
 bash train_univla.sh
 ```
+
+Uses `qwbu/univla-7b-224-sft-simpler-bridge`. Same architecture, tokenizer and
+action space as OpenVLA — only `--vla_path` and `--vla_unnorm_key` differ.
+
+### Path B — Emu3 UniVLA (FAST tokenization)
+
+```bash
+# Production training (102 GB GPU, num_envs=64, 384² image)
+bash train_univla_emu3_full.sh
+
+# Or warm-up smoke test (1 episode, 2 envs, 256² image)
+bash train_univla_emu3.sh
+```
+
+Uses `Yuqi1997/UniVLA/UNIVLA_SIMPLER_BRIDGE_VIDEO_BS128_20K` with the Emu3
+backbone, VisionVQ image encoding, and the FAST BPE action tokenizer. Three
+extra artifacts must be in `checkpoints/`:
+
+| Path | Source | Notes |
+|---|---|---|
+| `checkpoints/univla-emu3-raw/UNIVLA_SIMPLER_BRIDGE_VIDEO_BS128_20K/` | `Yuqi1997/UniVLA` | ~14 GB, downloaded by `setup.sh` Step 7b |
+| `checkpoints/emu3-vision-tokenizer/` | `BAAI/Emu3-VisionTokenizer` | ~300 MB, downloaded by `setup.sh` Step 7b |
+| `checkpoints/fast-bridge-t5-s50/` | **manual transfer** (see below) | 52 KB, **not on HuggingFace** |
+
+**FAST tokenizer warning**: `setup.sh` currently downloads
+`physical-intelligence/fast` (vocab=2048, scale=10) into the right directory
+name, but this is the **wrong variant**. The model was trained with the
+Bridge-fit `fast_bridge_t5_s50` (`vocab=1024, scale=50, min_token=-112`),
+which has a completely different BPE merge table. Using the wrong variant
+silently produces garbage actions.
+
+After running `setup.sh`, **always verify**:
+
+```bash
+cat checkpoints/fast-bridge-t5-s50/processor_config.json
+# expect: vocab_size: 1024, scale: 50, min_token: -112
+```
+
+If you see `vocab_size: 2048`, transfer the correct variant:
+
+```bash
+# On the source machine that has the right files (~10 KB)
+tar czf /tmp/fast-bridge-t5-s50.tar.gz \
+    -C UniVLA_RL/checkpoints fast-bridge-t5-s50
+
+# scp / rsync /tmp/fast-bridge-t5-s50.tar.gz to the target machine, then
+cd UniVLA_RL/checkpoints
+rm -rf fast-bridge-t5-s50
+tar xzof /tmp/fast-bridge-t5-s50.tar.gz   # 'o' avoids ownership errors
+```
+
+For full diagnosis run:
+
+```bash
+python tests/test_emu3_check_model.py
+```
+
+It checks the FAST config, runs inference on real Bridge frames, and prints
+a verdict comparing your numbers to the reference. All three checks must
+pass before launching training.
+
+### OOM remediation for `train_univla_emu3_full.sh`
+
+If the production script OOMs, drop the knobs **in this order** until it
+fits, observing `[mem]` peaks (re-enable with `GPU_MEM_DEBUG=1`). Each
+step is roughly equal in cost; stop as soon as it survives one full
+episode (rollout → train → eval → render → save).
+
+| Step | Edit | Effect on memory | Effect on quality / speed |
+|---|---|---|---|
+| 1 | `--vla_image_pixels=147456 → 65536` (384² → 256²) | rollout & train −15 GB each | weaker zero-shot detail; ~1.5× faster |
+| 2 | `--alg_gradient_accum=8 → 16` | unchanged | 2× more PPO microsteps per optimizer step (slower, no quality loss) |
+| 3 | `--num_envs=64 → 32` | rollout buffer halves (~10 GB) | half as many parallel rollouts, halves PPO sample throughput |
+| 4 | `--buffer_inferbatch=2 → 1` | rollout peak −5 GB | sequential generation, halves rollout throughput |
+| 5 | `--vla_image_pixels=65536 → 36864` (256² → 192²) | rollout & train −10 GB each | 540 vision tokens (very low); zero-shot may degrade |
+| 6 | re-enable grad checkpointing if you removed it (default is on) | train peak −20 GB | 30% slower backward |
+| 7 | `--vla_lora_rank=32 → 8` | LoRA params + Adam state ÷4 | weaker fine-tuning capacity |
+
+Conversely, if you have lots of headroom and want to go faster / better:
+
+| Bump (in order) | New value | Memory cost | Why |
+|---|---|---|---|
+| `--vla_image_pixels` | `262144` (512²) | +20 GB rollout, +25 GB train | training-time grid, attention pattern aligned with pretraining |
+| `--buffer_inferbatch` | `4` then `8` | +10 GB then +20 GB rollout | parallel rollout generation |
+| `--buffer_minibatch` | `2` then `4` | +10 GB then +20 GB train | bigger PPO minibatch → less variance |
+| `--num_envs` | `128` | +10 GB buffer storage | more parallel envs → faster wall-clock |
+
+**Rule of thumb**: keep ≥20 GB headroom on top of the steady-state peak you
+see in `[mem]`. The largest single tensor allocation during PPO backward
+can be 30-45 GB on its own (the lm_head logits gradient + attention
+recompute spike). If `[mem]` shows you using 75 GB, do NOT bump anything.
 
 ## Troubleshooting
 
