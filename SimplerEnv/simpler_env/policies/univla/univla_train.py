@@ -100,8 +100,12 @@ class UniVLAPolicy:
                 )
 
         # --- Emu3 text tokenizer (for building prompts) ---
+        # Decoder-only batched generation REQUIRES left-padding so the
+        # final prompt position aligns at the right edge across all batch
+        # elements. Right-padding silently produces wrong actions because
+        # the model's position ids drift into padding territory.
         self.tokenizer = Emu3Tokenizer.from_pretrained(
-            vla_path, padding_side="right", use_fast=False,
+            vla_path, padding_side="left", use_fast=False,
         )
 
         # --- Emu3 VisionVQ encoder (frozen) ---
