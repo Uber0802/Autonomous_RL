@@ -330,29 +330,50 @@ class UniVLAPolicy:
         padded_tokens: torch.Tensor,
         lengths: torch.Tensor,
     ) -> torch.Tensor:
-        """FAST BPE → IDCT → unnormalize → first-step continuous action [B, 7]."""
+        """Manual BPE → DCT coeffs → IDCT → first-step continuous action [B, 7].
+
+        Bypasses ``UniversalActionProcessor.decode()`` because the upstream
+        ``physical-intelligence/fast`` version doesn't pad/truncate variable-length
+        BPE→DCT-coeff outputs to ``time_horizon * action_dim``. We replicate the
+        decode pipeline here so it works with any FAST variant:
+
+            BPE ids → bpe_tokenizer.decode → str → ord() → +min_token → coefs
+                    → pad/truncate to (10*7) → reshape → /scale → IDCT
+        """
+        from scipy.fft import idct as _idct
+
         B = padded_tokens.shape[0]
-        token_lists = []
+        H, D = self.ACTION_CHUNK_SIZE, self.ACTION_DIM  # 10, 7
+        max_len = H * D  # 70
+
+        bpe_tok = self.fast_tokenizer.bpe_tokenizer
+        scale = float(self.fast_tokenizer.scale)
+        min_token = int(self.fast_tokenizer.min_token)
+
+        first_steps = np.zeros((B, D), dtype=np.float32)
         for b in range(B):
             L = int(lengths[b].item())
+            if L <= 0:
+                continue
             bpe_ids = (self.last_vocab_idx - padded_tokens[b, :L]).cpu().tolist()
-            token_lists.append(bpe_ids)
+            try:
+                decoded_str = bpe_tok.decode(bpe_ids)
+                coeffs = np.array(list(map(ord, decoded_str)), dtype=np.float64) + min_token
+                # Pad or truncate to exactly max_len so reshape always succeeds.
+                if len(coeffs) > max_len:
+                    coeffs = coeffs[:max_len]
+                elif len(coeffs) < max_len:
+                    coeffs = np.pad(coeffs, (0, max_len - len(coeffs)), mode="constant")
+                coeffs = coeffs.reshape(H, D)
+                # Inverse DCT along the time axis to get a [10, 7] action chunk
+                # in normalized [-1, 1] space.
+                action_chunk = _idct(coeffs / scale, axis=0, norm="ortho")
+                first_steps[b] = action_chunk[0].astype(np.float32)
+            except Exception as e:
+                print(f"[UniVLAPolicy] decode failed for env {b}: {e} — using zeros")
+                first_steps[b] = 0.0
 
-        # Decode: list[list[int]] → np.array [B, 10, 7] normalized
-        try:
-            decoded = self.fast_tokenizer.decode(
-                token_lists,
-                time_horizon=self.ACTION_CHUNK_SIZE,
-                action_dim=self.ACTION_DIM,
-            )
-        except Exception as e:
-            print(f"[UniVLAPolicy] FAST decode error: {e} — falling back to zeros")
-            decoded = np.zeros((B, self.ACTION_CHUNK_SIZE, self.ACTION_DIM), dtype=np.float32)
-
-        decoded = np.asarray(decoded, dtype=np.float32)  # [B, 10, 7]
-        first_step = decoded[:, 0, :]  # [B, 7]
-        first_step_t = torch.tensor(first_step, device=self.device, dtype=torch.float32)
-
+        first_step_t = torch.tensor(first_steps, device=self.device, dtype=torch.float32)
         # Unnormalize from [-1, 1] to physical units using q01/q99
         phys = 0.5 * (first_step_t + 1.0) * (self.q99 - self.q01) + self.q01  # [B, 7]
         return phys

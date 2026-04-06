@@ -28,6 +28,36 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)  # allow ctrl+c
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+# ============================================================================
+# GPU memory monitor — gated by GPU_MEM_DEBUG env var (default on for now)
+# ============================================================================
+_GPU_MEM_DEBUG = os.environ.get("GPU_MEM_DEBUG", "1") not in ("0", "false", "False")
+
+
+def _log_mem(tag: str, reset_peak: bool = False) -> None:
+    """Print current and peak GPU memory at a phase boundary.
+
+    Set ``GPU_MEM_DEBUG=0`` to silence. Set ``GPU_MEM_DEBUG=1`` (default) to
+    keep one-line output: ``[mem] <tag>: alloc=A.A reserved=R.R peak=P.P GB``.
+    Pass ``reset_peak=True`` to start a new peak window for the next phase.
+    """
+    if not _GPU_MEM_DEBUG or not torch.cuda.is_available():
+        return
+    alloc = torch.cuda.memory_allocated() / 1e9
+    reserved = torch.cuda.memory_reserved() / 1e9
+    peak = torch.cuda.max_memory_allocated() / 1e9
+    free, total = torch.cuda.mem_get_info()
+    free_gb = free / 1e9
+    total_gb = total / 1e9
+    print(
+        f"[mem] {tag}: alloc={alloc:5.1f} reserved={reserved:5.1f} "
+        f"peak={peak:5.1f} free={free_gb:5.1f}/{total_gb:5.1f} GB",
+        flush=True,
+    )
+    if reset_peak:
+        torch.cuda.reset_peak_memory_stats()
+
+
 @dataclass
 class Args:
     env_id: Annotated[str, tyro.conf.arg(aliases=["-e"])] = "PutCarrotOnPlateInScene-v1"
@@ -602,6 +632,7 @@ class Runner:
         group_size = num_envs // 4   
 
         for episode in range(max_episodes):
+            _log_mem(f"ep{episode} start", reset_peak=True)
             self.env.set_forward()
             forward_count = 1
             env_infos = defaultdict(lambda: [])
@@ -639,6 +670,7 @@ class Runner:
             print("instruction : ", instruction[0], instruction[group_size], instruction[group_size*2], instruction[group_size*3])
             with open(self.args.log, "a") as f:
                 f.write(f"step : {steps}\n")
+            _log_mem(f"ep{episode} rollout begin", reset_peak=True)
             # Reset buffer for 0-79 step
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
                 if self.use_continuous_action:
@@ -674,11 +706,15 @@ class Runner:
                     del value, action, logprob, reward, done
                     gc.collect()
                     torch.cuda.empty_cache()
+                    _log_mem(f"ep{episode} rollout end (step={step_idx+1})")
 
                     # train
                     self.prealloc_buffer.cat_buffer(self.buffer)
                     if (step_idx+1) % self.args.training_interval == 0 and step_idx > 0:
+                        _log_mem(f"ep{episode} train begin", reset_peak=True)
                         infos = self.train()
+                        torch.cuda.empty_cache()
+                        _log_mem(f"ep{episode} train end")
                         self.prealloc_buffer.reset()
 
                     #Switch Instruction
@@ -729,6 +765,7 @@ class Runner:
            
             # eval
             if episode % self.args.interval_eval == self.args.interval_eval - 1 or episode == max_episodes - 1 or self.exceed_reset_limit:
+                _log_mem(f"ep{episode} eval begin", reset_peak=True)
                 print(f"Evaluating Random Scene at {steps}")
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
@@ -741,16 +778,20 @@ class Runner:
                     sval_stats = self.eval("rand_ood", [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
                     sval_stats = {f"eval_true_ood_put_{object}_in_{receptacle}/{k}": v for k, v in sval_stats.items()}
                     wandb.log(sval_stats, step=steps)
+                torch.cuda.empty_cache()
+                _log_mem(f"ep{episode} eval end")
 
             # save
             if episode % self.args.interval_save == self.args.interval_save - 1 or episode == max_episodes - 1 or self.exceed_reset_limit:
                 print(f"Saving model at {steps}")
                 save_path = self.glob_dir / f"steps_{episode:0>4d}"
                 self.policy.save(save_path)
-                
+                _log_mem(f"ep{episode} render begin", reset_peak=True)
                 for task in self.task_list:
                     object, receptacle = self.extract_obj_recep(task)
                     self.render(episode, self.args.obj_set, [object]*self.args.num_envs, [receptacle]*self.args.num_envs)
+                torch.cuda.empty_cache()
+                _log_mem(f"ep{episode} render end")
 
             if self.exceed_reset_limit:
                 print(f"Total reset: {self.hard_reset_count + self.soft_reset_count} exceed reset limit: {self.args.max_reset}")
