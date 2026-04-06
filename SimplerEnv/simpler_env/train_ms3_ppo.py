@@ -101,6 +101,8 @@ class Args:
     vla_lora_rank: int = 32
     vision_vq_path: str = ""  # UniVLA: path to Emu3-VisionVQ (defaults to vla_path)
     action_decoder_path: str = ""  # UniVLA LAM: path to action_decoder.pt (defaults to vla_path/action_decoder.pt)
+    fast_tokenizer_path: str = ""  # UniVLA Emu3: path to fast-bridge-t5-s50 (defaults next to vla_path)
+    vla_image_pixels: int = 256 * 256  # UniVLA Emu3: target image area (~972 tokens with grid 27x36)
 
     vla_lr: float = 1e-4
     vla_vhlr: float = 3e-3
@@ -182,10 +184,19 @@ class Runner:
         # env
         self.env = SimlerWrapper(self.args, unnorm_state, last_vocab_idx=last_vocab_idx)
         self.is_lam = (self.args.vla_type == "univla_lam")
+        self.is_emu3 = (self.args.vla_type == "univla")
+        # Both univla_lam (32 ACT tokens) and univla (Emu3 FAST, up to 50 tokens)
+        # use the continuous-action path via step_continuous + padded token storage.
+        self.use_continuous_action = self.is_lam or self.is_emu3
 
-        # buffer — LAM stores 32 ACT token IDs with scalar logprobs
-        buf_act_dim = 32 if self.is_lam else 7
-        buf_logprob_dim = 1 if self.is_lam else None  # None → defaults to act_dim
+        # buffer — continuous-action paths store padded tokens with scalar logprobs
+        if self.is_emu3:
+            buf_act_dim = 50  # MAX_ACTION_TOKENS for Emu3 FAST
+        elif self.use_continuous_action:
+            buf_act_dim = 32  # fixed ACT token count for LAM
+        else:
+            buf_act_dim = 7   # OpenVLA 7-DoF
+        buf_logprob_dim = 1 if self.use_continuous_action else None
 
         # buffer
         if self.args.fifo_buffer:
@@ -243,11 +254,11 @@ class Runner:
         values = []
         actions = []
         logprobs = []
-        cont_actions = [] if self.is_lam else None
+        cont_actions = [] if self.use_continuous_action else None
 
         for i in range(0, total_batch, self.args.buffer_inferbatch):
             obs_batch = {k: v[i:i + self.args.buffer_inferbatch] for k, v in obs.items()}
-            if self.is_lam:
+            if self.use_continuous_action:
                 value, cont_action, act_ids, logprob = self.policy.get_action(obs_batch, deterministic)
                 values.append(value)
                 actions.append(act_ids)  # store ACT token IDs
@@ -263,7 +274,7 @@ class Runner:
         actions = torch.cat(actions, dim=0).to(device=self.device)
         logprobs = torch.cat(logprobs, dim=0).to(device=self.device)
 
-        if self.is_lam:
+        if self.use_continuous_action:
             cont_actions_cat = torch.cat(cont_actions, dim=0).to(device=self.device)
             return values, actions, logprobs, cont_actions_cat
         return values, actions, logprobs
@@ -275,7 +286,7 @@ class Runner:
         obs_image = torch.tensor(obs_image).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
 
-        if self.is_lam:
+        if self.use_continuous_action:
             # LAM returns 4-tuple: (values, continuous_actions, act_token_ids, logprobs)
             values, cont_actions, act_ids, logprobs = self.policy.get_action(obs, deterministic=False)
             return values, cont_actions, act_ids, logprobs
@@ -302,7 +313,7 @@ class Runner:
         obs_image = torch.tensor(self.buffer.obs[-1]).to(self.device)
         obs = dict(image=obs_image, task_description=self.buffer.instruction)
         with torch.no_grad():
-            if self.is_lam:
+            if self.use_continuous_action:
                 next_value = self.policy.get_value(obs)
             else:
                 next_value, _, _ = self._get_action(obs)
@@ -339,7 +350,7 @@ class Runner:
 
         for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
-            if self.is_lam:
+            if self.use_continuous_action:
                 value, act_ids, logprob, cont_action = self._get_action(obs, deterministic=True)
                 obs_img, reward, done, env_info = self.env.step_continuous(cont_action)
             else:
@@ -378,7 +389,7 @@ class Runner:
 
         for _ in range(self.args.episode_len):
             obs = dict(image=obs_img, task_description=instruction)
-            if self.is_lam:
+            if self.use_continuous_action:
                 value, act_ids, logprob, cont_action = self._get_action(obs, deterministic=True)
                 action = cont_action
                 obs_img_new, reward, done, env_info = self.env.step_continuous(cont_action)
@@ -622,7 +633,7 @@ class Runner:
                 f.write(f"step : {steps}\n")
             # Reset buffer for 0-79 step
             for step_idx in tqdm(range(self.args.training_len), desc="rollout"):
-                if self.is_lam:
+                if self.use_continuous_action:
                     value, cont_action, act_ids, logprob = self.collect()
                     obs_img, reward, done, env_info = self.env.step_continuous(cont_action)
                     action = act_ids  # store ACT token IDs in buffer

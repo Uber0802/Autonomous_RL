@@ -24,7 +24,11 @@ import torch
 from torch.nn import functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
+from transformers.processing_utils import ProcessorMixin
+try:
+    from transformers.processing_utils import ProcessingKwargs
+except ImportError:
+    ProcessingKwargs = None  # not available in transformers < 4.44
 from transformers.tokenization_utils_base import TextInput, PreTokenizedInput
 from transformers.utils import logging
 
@@ -78,7 +82,12 @@ class Emu3Processor(ProcessorMixin):
         if hasattr(self.vision_tokenizer, "config"):
             self.vis_tok_spatial_factor = 2 ** (len(self.vision_tokenizer.config.ch_mult) - 1)
 
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+        try:
+            super().__init__(image_processor, tokenizer, chat_template=chat_template)
+        except TypeError:
+            # transformers < 4.44 doesn't support chat_template kwarg
+            super().__init__(image_processor, tokenizer)
+            self.chat_template = chat_template
         if hasattr(self.vision_tokenizer, "config"):
             self.const_helper = self.build_const_helper_video()
 
