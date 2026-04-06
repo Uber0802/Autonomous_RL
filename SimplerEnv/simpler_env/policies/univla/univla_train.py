@@ -208,16 +208,49 @@ class UniVLAPolicy:
     # ------------------------------------------------------------------
     # Normalization stats
     # ------------------------------------------------------------------
+    # Hardcoded fallback: bridge_robot stats for the SimplerEnv WidowX setup,
+    # extracted from the Yuqi1997/UniVLA training pipeline. Within ~5% of
+    # OpenVLA's `bridge_orig` stats. Used when norm_stats.json is missing
+    # from the checkpoint dir (it isn't part of the HF release).
+    _BRIDGE_ROBOT_FALLBACK = {
+        "bridge_robot": {
+            "mean": [0.00022990013530943543, 0.0001223820581799373,
+                     -0.00012801054981537163, -0.00015581517072860152,
+                     -0.00040400627767667174, 0.0002303723740624264,
+                     0.575043797492981],
+            "std":  [0.009764148853719234, 0.013682912103831768,
+                     0.012667506001889706, 0.02853561006486416,
+                     0.03064056858420372, 0.07689429819583893,
+                     0.49150383472442627],
+            "q01":  [-0.02887803485105428, -0.04178320091122349,
+                     -0.026113155505000457, -0.08117201867235568,
+                     -0.09309056401752747, -0.20778717060421048,
+                     -1e-10],
+            "q99":  [0.02819482065335177, 0.04079562563528227,
+                     0.04015785568112329, 0.08070396399877966,
+                     0.07745134926258301, 0.2016542930635028,
+                     0.99980000009996],
+        }
+    }
+
     def _load_norm_stats(self):
-        """Load bridge_robot norm stats directly from the Emu3 checkpoint."""
+        """Load bridge_robot norm stats from the Emu3 checkpoint, or fall back
+        to hardcoded values (norm_stats.json is not part of the HF release)."""
         ns_path = os.path.join(self.args.vla_path, 'norm_stats.json')
         if os.path.exists(ns_path):
             with open(ns_path) as f:
                 self.norm_stats = json.load(f)["norm_stats"]
             print(f"[UniVLAPolicy] Loaded norm_stats from {ns_path}, keys: {list(self.norm_stats.keys())}")
         else:
-            print(f"[UniVLAPolicy] WARNING: no norm_stats.json at {ns_path}")
-            self.norm_stats = {}
+            self.norm_stats = dict(self._BRIDGE_ROBOT_FALLBACK)
+            print(f"[UniVLAPolicy] norm_stats.json missing at {ns_path}; using hardcoded bridge_robot fallback")
+            # Persist for next time, so saved checkpoints carry it forward.
+            try:
+                with open(ns_path, 'w') as f:
+                    json.dump({"norm_stats": self.norm_stats}, f, indent=2)
+                print(f"[UniVLAPolicy] Wrote fallback to {ns_path}")
+            except OSError as e:
+                print(f"[UniVLAPolicy] Could not persist fallback ({e}); continuing with in-memory copy")
 
         # Pre-compute q01/q99 tensors on device.
         # norm_stats.json layout: {"bridge_robot": {"q01": [...], "q99": [...], ...}}
