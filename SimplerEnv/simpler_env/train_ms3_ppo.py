@@ -378,6 +378,7 @@ class Runner:
         obs_img, instruction, info = self.env.reset(obj_set=obj_set, same_init=self.args.use_same_init, object=object, receptacle=receptacle)
         print("Evaluating:", instruction[0])
 
+        last_env_info = None
         for _ in tqdm(range(self.args.episode_len), desc="eval"):
             obs = dict(image=obs_img, task_description=instruction)
             if self.use_continuous_action:
@@ -387,13 +388,28 @@ class Runner:
                 value, action, logprob = self._get_action(obs, deterministic=True)
                 obs_img, reward, done, env_info = self.env.step(action)
 
+            # Original path: only populated when an episode truncates.
             if "episode" in env_info.keys():
                 for k, v in env_info["episode"].items():
                     env_infos[f"{k}"] += v
 
-        # infos
-        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
-        env_stats = env_stats.copy()
+            # New path: keep the latest step-level info so we can read terminal
+            # success / grasp signals even when truncation never fires.
+            last_env_info = env_info
+
+        # If truncation populated env_infos, use it; otherwise fall back to the
+        # last-step success / grasp / is_src_obj_grasped fields, which are
+        # populated every step in SimplerEnv even without truncation.
+        env_stats = {k: float(np.mean(v)) for k, v in env_infos.items()}
+        if not env_stats and last_env_info is not None:
+            for k in ("success", "consecutive_grasp", "is_src_obj_grasped"):
+                if k in last_env_info:
+                    v = last_env_info[k]
+                    if hasattr(v, "tolist"):
+                        v = v.tolist()
+                    if hasattr(v, "item"):
+                        v = v.item()
+                    env_stats[k] = float(np.mean(v))
 
         print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
         print(f"")
@@ -469,7 +485,19 @@ class Runner:
             verbose=False
         )
 
-        env_stats = {k: np.mean(v) for k, v in env_infos.items()}
+        env_stats = {k: float(np.mean(v)) for k, v in env_infos.items()}
+        # Fallback: if truncation never fired, read terminal signals from
+        # the last logged step info (matches the eval() fix above).
+        if not env_stats and len(data["info"]) > 0:
+            last = data["info"][-1]
+            for k in ("success", "consecutive_grasp", "is_src_obj_grasped"):
+                if k in last:
+                    v = last[k]
+                    if hasattr(v, "tolist"):
+                        v = v.tolist()
+                    if hasattr(v, "item"):
+                        v = v.item()
+                    env_stats[k] = float(np.mean(v) if hasattr(v, "__len__") else v)
         env_stats_ret = env_stats.copy()
 
 
