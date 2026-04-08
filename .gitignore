@@ -1,6 +1,66 @@
+# Python
 __pycache__/
-CRONOS/wandb
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+venv/
+env/
+.venv/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# CRONOS runtime artifacts
+CRONOS/cronos_mmap_*/
+CRONOS/wandb/
+CRONOS/*.bak
+CRONOS/*_ldd.txt
+CRONOS/bridge_multi.py.bak
 CRONOS/test_checkpoints/
 CRONOS/test_alignment.py
 CRONOS/test_vla_limits.py
-CRONOS/cronos_mmap_*
+
+# Logs (all runtime outputs)
+*.log
+*.out
+*.tmp
+*_stdout.log
+*_stderr.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights (too large for git)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Datasets / large assets
+*.hdf5
+*.h5
+*.npz
+
+# Videos
+*.mp4
+*.avi
+
+# Submodule artifacts
+openvla/wandb/
+SimplerEnv/wandb/
+ManiSkill/data/
