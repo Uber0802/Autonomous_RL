@@ -2,6 +2,7 @@ import logging
 logging.getLogger("mani_skill").setLevel(logging.ERROR)
 
 import gc
+import sys
 import atexit
 import random
 import itertools
@@ -94,6 +95,8 @@ class Args:
     record_video: bool = True
     ppo_log: str = "ppo_log.txt"            # per-minibatch PPO progress (in glob_dir)
     eval_report: str = "eval_report.txt"    # per-eval success rate summary (in glob_dir)
+    log_file: str = "run.log"               # tee of stdout for the whole run (in glob_dir); empty string disables
+    debug_rollout: bool = False             # per-step [ROLLOUT] dump during iteration 0 (verbose)
 
 class CronosRunner:
     """Coordinates the CRONOS training workflow."""
@@ -120,7 +123,21 @@ class CronosRunner:
         run = wandb.init(**wandb_kwargs)
         self.glob_dir = Path(run.dir).parent / "glob"
         self.glob_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        # Tee stdout to a log file so the terminal stream is minimal and the full
+        # run record lives on disk. tqdm/wandb still write to stderr untouched.
+        if args.log_file:
+            log_path = self.glob_dir / args.log_file
+            log_fp = open(log_path, "a", buffering=1)
+            class _Tee:
+                def __init__(self, *streams): self.streams = streams
+                def write(self, s):
+                    for st in self.streams: st.write(s)
+                def flush(self):
+                    for st in self.streams: st.flush()
+            sys.stdout = _Tee(sys.__stdout__, log_fp)
+
+
         # Device Management (AutoRL style)
         device_id = 0
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
@@ -318,7 +335,7 @@ class CronosRunner:
             # 2. Environment Step
             next_obs, reward, truncated, info = self.env.step(action)
 
-            if self.iteration == 0:
+            if self.args.debug_rollout and self.iteration == 0:
                 print(f"[ROLLOUT] step: {step_idx + 1}, reward: {reward.mean().item():.6f}, value: {value.mean().item():.6f}, logprob: {logprob.mean().item():.6f}, action_mean: {action.float().mean().item():.6f}, obs_mean: {obs.float().mean().item():.6f}", flush=True)
 
             # 3. Buffer Storage
