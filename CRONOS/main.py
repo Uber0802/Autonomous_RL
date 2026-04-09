@@ -3,9 +3,13 @@ logging.getLogger("mani_skill").setLevel(logging.ERROR)
 
 import gc
 import sys
+import signal
 import atexit
+import json
 import random
 import itertools
+import datetime
+import subprocess
 import numpy as np
 import torch
 import tyro
@@ -22,6 +26,7 @@ from envs.scheduler import TaskScheduler
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO
 from training.buffer import CronosReplayBuffer
+from training.metrics import SuccessRecorder
 from mani_skill.utils.visualization.misc import images_to_video
 
 @dataclass
@@ -137,6 +142,13 @@ class CronosRunner:
                     for st in self.streams: st.flush()
             sys.stdout = _Tee(sys.__stdout__, log_fp)
 
+        # V0.2 M0: SuccessRecorder — dual-axis CSVs + wandb 5-chart panel + counters.json
+        self.recorder = SuccessRecorder(self.glob_dir)
+
+        # V0.2 M1: pre-init config dump — written BEFORE any SAPIEN scene is
+        # constructed, so a crash during env init still leaves an on-disk
+        # snapshot of exactly what was attempted.
+        self._dump_run_config()
 
         # Device Management (AutoRL style)
         device_id = 0
@@ -164,8 +176,11 @@ class CronosRunner:
 
         self.buffer = CronosReplayBuffer(args)
 
-        # Register cleanup for memmap files
+        # V0.2 M1: deterministic mmap cleanup on SIGINT. atexit alone races
+        # against still-open mmap fds at interpreter shutdown, producing the
+        # ENOTEMPTY silly-rename error seen in V0.1.
         atexit.register(self.buffer.cleanup)
+        self._install_sigint_handler()
 
         # Reset tracking — restore from checkpoint if available
         self.hard_reset_count = 0
@@ -177,6 +192,65 @@ class CronosRunner:
 
         if args.record_video:
             self.video_frames = [[] for _ in range(args.num_envs)]
+
+    def _dump_run_config(self):
+        """V0.2 M1: write glob_dir/run_config.{json,yaml} before any SAPIEN
+        init. Contents: resolved Args + seed + start_time + git_rev (best-
+        effort) + cronos_version. The snapshot lands *before* the policy/env
+        are constructed, so even a crash during env init leaves a diff-able
+        record of exactly what the user attempted."""
+        cfg = dict(self.args.__dict__)
+        cfg["start_time"] = datetime.datetime.utcnow().isoformat() + "Z"
+        cfg["cronos_version"] = "V0.2"
+        try:
+            rev = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                cwd=str(Path(__file__).resolve().parent),
+            ).decode().strip()
+            cfg["git_rev"] = rev
+        except Exception:
+            cfg["git_rev"] = None
+
+        # Coerce anything non-JSON-native (Path, etc.) via default=str.
+        (self.glob_dir / "run_config.json").write_text(
+            json.dumps(cfg, indent=2, default=str, sort_keys=False) + "\n"
+        )
+        try:
+            import yaml  # type: ignore
+            (self.glob_dir / "run_config.yaml").write_text(
+                yaml.safe_dump(cfg, sort_keys=False)
+            )
+        except Exception:
+            # yaml is a soft dep — the .json file is the authoritative snapshot.
+            pass
+
+    def _install_sigint_handler(self):
+        """Ensure buffer.cleanup() runs synchronously on Ctrl-C before the
+        interpreter tears down (atexit runs too late relative to the mmap
+        fd release window on NFS)."""
+        prev = signal.getsignal(signal.SIGINT)
+
+        def handler(signum, frame):
+            try:
+                self.buffer.cleanup()
+            except Exception as e:
+                print(f"[SIGINT] buffer cleanup error (non-fatal): {e}")
+            # Chain to the previous handler (tyro / default) so Ctrl-C still
+            # terminates the process as expected.
+            if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                try:
+                    prev(signum, frame)
+                    return
+                except Exception:
+                    pass
+            raise KeyboardInterrupt
+
+        try:
+            signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            # Not in main thread — skip silently.
+            pass
 
     def _restore_training_state(self, load_path):
         """Restores training progress from checkpoint (backward-compatible with old checkpoints)."""
@@ -304,7 +378,7 @@ class CronosRunner:
         self.policy.prep_rollout()
         return train_results
 
-    def run_rollout(self, ppo_log_path=None):
+    def run_rollout(self, ppo_log_path=None, episode=0, episode_base_steps=0, episode_base_resets=0):
         """Executes a non-episodic rollout with instruction switching, partial resets,
         and mid-rollout PPO training every ppo_update_len steps (matching AutoRL)."""
         self.policy.prep_rollout()
@@ -326,6 +400,7 @@ class CronosRunner:
         active_groups = self.args.num_groups if self.args.num_groups > 0 else None
         objs, receps = self.scheduler.get_next_tasks(active_groups)
         self.last_info = {}
+        info = {}
 
         for step_idx in tqdm(range(self.args.episode_len), desc="Rollout", leave=False):
             # 1. Action Prediction (Vectorized/Micro-batched)
@@ -351,7 +426,9 @@ class CronosRunner:
                 # Save video segment before switch
                 if self.args.record_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
-                    segment_id += 1
+                # Increment regardless of video recording so train_success.csv
+                # rows carry a meaningful segment_id even with --no-record_video.
+                segment_id += 1
 
                 # End current buffer segment
                 instruct_next = self.env.get_language_instructions()  # still old task
@@ -359,6 +436,44 @@ class CronosRunner:
                     next_value, _, _ = self._get_action(next_obs, instruct_next, deterministic=False)
                 self.buffer.end_segment(next_value)
                 steps_since_ppo += self.args.task_len
+
+                # V0.2 M0: per-group train success rows. Wrapper populates
+                # info["episode"] on the truncation step (segment_len == task_len)
+                # with per-env success/grasp lists.
+                ep_info = info.get("episode", {}) if isinstance(info, dict) else {}
+                if ep_info:
+                    segment_steps = episode_base_steps + (step_idx + 1) * self.args.num_envs
+                    segment_resets = episode_base_resets  # resets tracked at episode-level; fine-grained update in M5
+                    group_size = max(1, self.args.num_envs // max(1, self.num_groups))
+                    wandb_train_payload = {}
+                    for g in range(self.num_groups):
+                        lo, hi = g * group_size, (g + 1) * group_size
+                        def _mean(key):
+                            vals = ep_info.get(key, [])
+                            chunk = vals[lo:hi] if isinstance(vals, list) else []
+                            return float(np.mean(chunk)) if chunk else 0.0
+                        obj_g = objs[g * group_size] if g * group_size < len(objs) else ""
+                        rec_g = receps[g * group_size] if g * group_size < len(receps) else ""
+                        task_str = f"put {obj_g} on {rec_g}".strip()
+                        scalars = self.recorder.log_train(
+                            episode=episode,
+                            total_steps=segment_steps,
+                            total_resets=segment_resets,
+                            segment_id=segment_id - 1,  # id of segment just ended
+                            group_id=g,
+                            task=task_str,
+                            scene="default",
+                            n_envs=hi - lo,
+                            success=_mean("success"),
+                            grasp=_mean("consecutive_grasp"),
+                            obj_grasped=_mean("is_src_obj_grasped"),
+                        )
+                        wandb_train_payload.update(scalars)
+                    if wandb_train_payload:
+                        try:
+                            wandb.log(wandb_train_payload, step=segment_steps)
+                        except Exception:
+                            pass
 
                 # 6. Mid-rollout PPO update (matching AutoRL's training_interval)
                 if steps_since_ppo >= self.args.ppo_update_len and step_idx > 0:
@@ -427,13 +542,27 @@ class CronosRunner:
             # 1. Collect Experience + Mid-rollout PPO
             ppo_log_path = str(self.glob_dir / self.args.ppo_log)
             total_steps = episode * self.args.episode_len * self.args.num_envs
+            episode_base_steps = iteration * self.args.episode_len * self.args.num_envs
+            episode_base_resets = self.hard_reset_count + self.soft_reset_count
             with open(ppo_log_path, "a") as f:
                 f.write(f"step : {total_steps}\n")
 
-            train_results = self.run_rollout(ppo_log_path=ppo_log_path)
+            train_results = self.run_rollout(
+                ppo_log_path=ppo_log_path,
+                episode=episode,
+                episode_base_steps=episode_base_steps,
+                episode_base_resets=episode_base_resets,
+            )
             self.hard_reset_count += self.args.num_envs
             total_resets = self.hard_reset_count + self.soft_reset_count
             print(f"Episode {episode}: total_steps={total_steps}, total_resets={total_resets}")
+
+            # V0.2 M0: durable counters sidecar for resume continuity
+            self.recorder.write_counters(
+                episode=episode,
+                total_steps=total_steps,
+                total_resets=total_resets,
+            )
 
             # 3. Logging (dual-axis: both episode and total_steps)
             if train_results:
@@ -442,7 +571,7 @@ class CronosRunner:
                     "episode": episode,
                     "total_steps": total_steps,
                     "total_resets": total_resets,
-                })
+                }, step=total_steps)
 
             # 4. Stopping conditions
             exceed_step_limit = total_steps >= self.args.max_steps
@@ -469,8 +598,21 @@ class CronosRunner:
                 for task_idx, task in enumerate(task_pool):
                     obj, recep = TaskScheduler._extract_obj_recep(task)
                     sval_stats = self.eval(iteration, task_idx, self.args.obj_set, [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"in_domain_{obj}_{recep}")
-                    eval_log.update({f"eval_in_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()})
+                    scalars = self.recorder.log_eval(
+                        episode=episode,
+                        total_steps=total_steps,
+                        total_resets=total_resets,
+                        eval_kind="in_domain",
+                        task=task,
+                        scene="default",
+                        n_envs=self.args.num_envs,
+                        success=sval_stats.get("success", 0.0),
+                        grasp=sval_stats.get("consecutive_grasp", 0.0),
+                        obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
+                    )
+                    eval_log.update(scalars)
                     in_domain_results.append((task, sval_stats))
+                eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
 
                 # Out-of-domain eval: different object set, novel scene layout
                 print(f"Evaluating Out-of-Domain at {total_steps}")
@@ -478,10 +620,23 @@ class CronosRunner:
                 for task_idx, task in enumerate(task_pool):
                     obj, recep = TaskScheduler._extract_obj_recep(task)
                     sval_stats = self.eval(iteration, task_idx, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"out_of_domain_{obj}_{recep}")
-                    eval_log.update({f"eval_out_of_domain_put_{obj}_in_{recep}/{k}": v for k, v in sval_stats.items()})
+                    scalars = self.recorder.log_eval(
+                        episode=episode,
+                        total_steps=total_steps,
+                        total_resets=total_resets,
+                        eval_kind="out_of_domain",
+                        task=task,
+                        scene="default",
+                        n_envs=self.args.num_envs,
+                        success=sval_stats.get("success", 0.0),
+                        grasp=sval_stats.get("consecutive_grasp", 0.0),
+                        obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
+                    )
+                    eval_log.update(scalars)
                     ood_results.append((task, sval_stats))
+                eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
 
-                wandb.log(eval_log)
+                wandb.log(eval_log, step=total_steps)
                 self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
                 self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
 
@@ -556,7 +711,21 @@ def main():
                 obj, recep = TaskScheduler._extract_obj_recep(task_str)
                 reset = (task_idx == 0)
                 sval_stats = runner.eval(seq_idx, task_idx, args.obj_set, [obj]*args.num_envs, [recep]*args.num_envs, prefix=f"seq{seq_idx}_task{task_idx}", reset=reset)
-                wandb.log({f"eval/seq{seq_idx}_task{task_idx}_{k}": v for k, v in sval_stats.items()})
+                seq_total_steps = (seq_idx + 1) * args.episode_len * args.num_envs
+                scalars = runner.recorder.log_eval(
+                    episode=seq_idx + 1,
+                    total_steps=seq_total_steps,
+                    total_resets=0,
+                    eval_kind=f"sequential_seq{seq_idx}",
+                    task=task_str,
+                    scene="default",
+                    n_envs=args.num_envs,
+                    success=sval_stats.get("success", 0.0),
+                    grasp=sval_stats.get("consecutive_grasp", 0.0),
+                    obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
+                )
+                panel = runner.recorder.build_wandb_eval_panel(f"sequential_seq{seq_idx}")
+                wandb.log({**scalars, **panel}, step=seq_total_steps)
                 seq_results.append((task_str, sval_stats))
             runner._write_eval_report(f"Sequence {seq_idx + 1}:\n", seq_results)
 

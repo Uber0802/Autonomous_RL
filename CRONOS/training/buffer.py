@@ -2,16 +2,53 @@ import numpy as np
 import torch
 import os
 import gc
+import shutil
+import time
+
+
+def _buffer_dir() -> str:
+    return os.path.join(os.getcwd(), f"cronos_mmap_{os.getpid()}")
+
 
 def create_memmap(filename, shape, dtype):
     """Utility to create memory-mapped files for large buffers."""
-    pid = os.getpid()
-    buffer_dir = os.path.join(os.getcwd(), f"cronos_mmap_{pid}")
+    buffer_dir = _buffer_dir()
     os.makedirs(buffer_dir, exist_ok=True)
     filepath = os.path.join(buffer_dir, filename)
     if os.path.exists(filepath):
         os.remove(filepath)
     return np.memmap(filepath, dtype=dtype, mode='w+', shape=shape)
+
+
+def _close_mmap(arr) -> None:
+    """Release the underlying mmap on a numpy.memmap (idempotent, best-effort)."""
+    if arr is None:
+        return
+    try:
+        inner = getattr(arr, "_mmap", None)
+        if inner is not None:
+            inner.close()
+    except Exception:
+        pass
+
+
+def _rmtree_retry(path: str, attempts: int = 3, delay: float = 0.5) -> None:
+    """Remove `path` with retry. Survives residual silly-rename entries that
+    may linger a few hundred ms on NFS after the last fd is released."""
+    for i in range(attempts):
+        if not os.path.exists(path):
+            return
+        try:
+            shutil.rmtree(path, ignore_errors=(i == 0))
+            if not os.path.exists(path):
+                return
+        except Exception:
+            pass
+        time.sleep(delay)
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 class CronosReplayBuffer:
     """Efficient memory-mapped replay buffer for PPO training."""
@@ -41,6 +78,7 @@ class CronosReplayBuffer:
         
         self.advantages = create_memmap('advantages.dat', (self.ep_len, self.max_envs, 1), np.float32)
         self.instructions = [""] * self.max_envs
+        self._closed = False
 
     def _to_numpy(self, x):
         """Helper to convert tensors or arrays to numpy safely, handling BFloat16."""
@@ -132,17 +170,32 @@ class CronosReplayBuffer:
         self.num_env = self.curr_env = self.step = 0
         gc.collect()
 
-    def cleanup(self):
-        """Manually closes and removes memmap files directory."""
-        self.obs = self.value_preds = self.returns = self.actions = None
-        self.action_log_probs = self.rewards = self.masks = self.advantages = None
+    def close(self):
+        """Synchronously release every underlying mmap. Idempotent.
+
+        Calling `_mmap.close()` on each np.memmap before rmtree is what
+        prevents the `ENOTEMPTY` silly-rename race on NFS: GC-driven release
+        can lag the rmtree call by tens of milliseconds, which is enough
+        for NFS to leave residual `.nfs*` entries behind.
+        """
+        if self._closed:
+            return
+        for name in (
+            "obs", "value_preds", "returns", "actions",
+            "action_log_probs", "rewards", "masks", "advantages",
+        ):
+            _close_mmap(getattr(self, name, None))
+            setattr(self, name, None)
         gc.collect()
-        
-        buffer_dir = os.path.join(os.getcwd(), f"cronos_mmap_{os.getpid()}")
+        self._closed = True
+
+    def cleanup(self):
+        """Manually closes mmaps and removes the buffer directory with retry."""
+        self.close()
+        buffer_dir = _buffer_dir()
         if os.path.exists(buffer_dir):
-            import shutil
-            try:
-                shutil.rmtree(buffer_dir)
+            _rmtree_retry(buffer_dir)
+            if not os.path.exists(buffer_dir):
                 print(f"Cleaned up {buffer_dir}")
-            except Exception as e:
-                print(f"Cleanup error: {e}")
+            else:
+                print(f"Cleanup warning: {buffer_dir} not fully removed")
