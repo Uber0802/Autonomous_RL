@@ -132,6 +132,9 @@ class CronosRunner:
         if args.wandb_dir:
             wandb_kwargs["dir"] = args.wandb_dir
         run = wandb.init(**wandb_kwargs)
+        # X-axis: all metrics keyed on total_steps (environment steps)
+        wandb.define_metric("total_steps")
+        wandb.define_metric("eval_*", step_metric="total_steps")
         self.glob_dir = Path(run.dir).parent / "glob"
         self.glob_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,8 +435,6 @@ class CronosRunner:
                 # Save video segment before switch
                 if self.args.record_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
-                # Increment regardless of video recording so train_success.csv
-                # rows carry a meaningful segment_id even with --no-record_video.
                 segment_id += 1
 
                 # End current buffer segment
@@ -442,44 +443,6 @@ class CronosRunner:
                     next_value, _, _ = self._get_action(next_obs, instruct_next, deterministic=False)
                 self.buffer.end_segment(next_value)
                 steps_since_ppo += self.args.task_len
-
-                # V0.2 M0: per-group train success rows. Wrapper populates
-                # info["episode"] on the truncation step (segment_len == task_len)
-                # with per-env success/grasp lists.
-                ep_info = info.get("episode", {}) if isinstance(info, dict) else {}
-                if ep_info:
-                    segment_steps = episode_base_steps + (step_idx + 1) * self.args.num_envs
-                    segment_resets = episode_base_resets  # resets tracked at episode-level; fine-grained update in M5
-                    group_size = max(1, self.args.num_envs // max(1, self.num_groups))
-                    wandb_train_payload = {}
-                    for g in range(self.num_groups):
-                        lo, hi = g * group_size, (g + 1) * group_size
-                        def _mean(key):
-                            vals = ep_info.get(key, [])
-                            chunk = vals[lo:hi] if isinstance(vals, list) else []
-                            return float(np.mean(chunk)) if chunk else 0.0
-                        obj_g = objs[g * group_size] if g * group_size < len(objs) else ""
-                        rec_g = receps[g * group_size] if g * group_size < len(receps) else ""
-                        task_str = f"put {obj_g} on {rec_g}".strip()
-                        scalars = self.recorder.log_train(
-                            episode=episode,
-                            total_steps=segment_steps,
-                            total_resets=segment_resets,
-                            segment_id=segment_id - 1,  # id of segment just ended
-                            group_id=g,
-                            task=task_str,
-                            scene="default",
-                            n_envs=hi - lo,
-                            success=_mean("success"),
-                            grasp=_mean("consecutive_grasp"),
-                            obj_grasped=_mean("is_src_obj_grasped"),
-                        )
-                        wandb_train_payload.update(scalars)
-                    if wandb_train_payload:
-                        try:
-                            wandb.log(wandb_train_payload, step=segment_steps)
-                        except Exception:
-                            pass
 
                 # 6. Mid-rollout PPO update (matching AutoRL's training_interval)
                 if steps_since_ppo >= self.args.ppo_update_len and step_idx > 0:

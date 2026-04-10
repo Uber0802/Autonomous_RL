@@ -1,8 +1,7 @@
 """CRONOS V0.2 — metrics.
 
-SuccessRecorder owns the two success-rate CSVs (`train_success.csv` and
-`eval_success.csv`) plus the `counters.json` sidecar, and builds the wandb
-5-chart-per-eval_kind panel payload.
+SuccessRecorder owns `eval_success.csv` plus the `counters.json` sidecar,
+and builds the wandb eval panel payload (per-task scalars + overlay + mean).
 
 Design notes:
 - stdlib csv only, no pandas.
@@ -33,20 +32,6 @@ try:
 except Exception:  # wandb is optional; metrics still work for CSVs
     wandb = None  # type: ignore
 
-
-TRAIN_FIELDS: Tuple[str, ...] = (
-    "episode",
-    "total_steps",
-    "total_resets",
-    "segment_id",
-    "group_id",
-    "task",
-    "scene",
-    "n_envs",
-    "success",
-    "grasp",
-    "obj_grasped",
-)
 
 EVAL_FIELDS: Tuple[str, ...] = (
     "episode",
@@ -91,11 +76,9 @@ class SuccessRecorder:
         self.glob_dir = Path(glob_dir)
         self.glob_dir.mkdir(parents=True, exist_ok=True)
 
-        self.train_csv_path = self.glob_dir / "train_success.csv"
         self.eval_csv_path = self.glob_dir / "eval_success.csv"
         self.counters_path = self.glob_dir / "counters.json"
 
-        self._ensure_header(self.train_csv_path, TRAIN_FIELDS)
         self._ensure_header(self.eval_csv_path, EVAL_FIELDS)
 
         # eval_history[eval_kind][task] -> list of (total_steps, success)
@@ -146,48 +129,6 @@ class SuccessRecorder:
             # Corrupt file → leave history empty, don't crash.
             pass
 
-    # ---------- Public API: train ----------
-
-    def log_train(
-        self,
-        *,
-        episode: int,
-        total_steps: int,
-        total_resets: int,
-        segment_id: int,
-        group_id: int,
-        task: str,
-        scene: str,
-        n_envs: int,
-        success: float,
-        grasp: float,
-        obj_grasped: float,
-    ) -> Dict[str, float]:
-        """Append a train row. Returns a flat dict of wandb scalars to log."""
-        row = {
-            "episode": episode,
-            "total_steps": total_steps,
-            "total_resets": total_resets,
-            "segment_id": segment_id,
-            "group_id": group_id,
-            "task": task,
-            "scene": scene,
-            "n_envs": n_envs,
-            "success": round(float(success), 6),
-            "grasp": round(float(grasp), 6),
-            "obj_grasped": round(float(obj_grasped), 6),
-        }
-        self._append_row(self.train_csv_path, TRAIN_FIELDS, row)
-
-        tkey = _slugify(task)
-        skey = _slugify(scene)
-        prefix = f"train_success/by_task/{tkey}__{skey}"
-        return {
-            f"{prefix}/success": float(success),
-            f"{prefix}/grasp": float(grasp),
-            f"{prefix}/obj_grasped": float(obj_grasped),
-        }
-
     # ---------- Public API: eval ----------
 
     def log_eval(
@@ -228,12 +169,11 @@ class SuccessRecorder:
             (int(total_steps), float(success))
         )
 
-        tkey = _slugify(task)
-        prefix = f"eval_{eval_kind}/by_task/{tkey}"
+        prefix = f"eval_{eval_kind}/{task}"
         return {
-            f"{prefix}/success": float(success),
-            f"{prefix}/grasp": float(grasp),
-            f"{prefix}/obj_grasped": float(obj_grasped),
+            f"{prefix}_success": float(success),
+            f"{prefix}_grasp": float(grasp),
+            f"{prefix}_obj_grasped": float(obj_grasped),
         }
 
     # ---------- wandb panel builder ----------
