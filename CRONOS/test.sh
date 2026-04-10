@@ -3,7 +3,7 @@
 # resume_episode restoration across the halfway split.
 # Usage: bash test.sh [t80a|t80b|t320a|t320b] [seed] [cuda]
 #
-# num_envs=64, TwoObjectTwoReceptacle-v1
+# num_envs=64, PickPlaceNxM-v1 (N=2, M=2)
 #   t80a : episode_len=80,   steps       0 -> 655360   (128 ep * 80  * 64)
 #   t80b : episode_len=80,   steps  655360 -> 1310720  (128 ep * 80  * 64), resumes from t80a
 #   t320a: episode_len=320,  steps       0 -> 655360   ( 32 ep * 320 * 64)
@@ -16,7 +16,7 @@
 
 set -e
 
-ENV_ARGS="--env-id TwoObjectTwoReceptacle-v1 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
+ENV_ARGS="--env-id PickPlaceNxM-v1 --env-n 2 --env-m 2 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
 
 MODE=${1:-t80a}
 SEED=${2:-0}

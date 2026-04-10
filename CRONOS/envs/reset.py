@@ -1,25 +1,32 @@
 import torch
 
+from .unsuitable import UnsuitableDetector, get_detector
+
+
 class ResetStrategy:
     """Manages environment reset logic (robot, objects, unsuitable states)."""
-    
-    def __init__(self, env, num_envs=64, device="cuda"):
+
+    def __init__(self, env, num_envs=64, device="cuda", detector="low_z"):
         self.env = env
         self.num_envs = num_envs
         self.device = device
         self.reset_unsuitable_count = 0
+        # V0.2 M2 Phase A+B: pluggable detector. Default `low_z` preserves
+        # V0.1 behavior. Phase B closes the loop: `reset_unsuitable_envs`
+        # now consults the detector via `per_actor_class()` and passes the
+        # resulting masks to the env's respawn path. The detector is the
+        # single source of truth for which envs/actors are unsuitable.
+        self.detector: UnsuitableDetector = get_detector(detector)
 
     def get_unsuitable_envs(self):
-        """Identifies environments with objects in unsuitable positions (e.g., fallen)."""
-        # Logic from simpler_wrapper.py
-        obj_pos = self.env.unwrapped.get_obj_pos()
-        recep_pos = self.env.unwrapped.get_recep_pos()
-        obj_z = obj_pos[:, 2]
-        recep_z = recep_pos[:, 2]
+        """Identifies environments with objects in unsuitable positions (e.g., fallen).
 
-        low_z_mask = (obj_z < 0.7) | (recep_z < 0.7)
-        env_indices = torch.nonzero(low_z_mask, as_tuple=False).squeeze()
-
+        Delegates to the registered detector. Returns a list of env indices
+        for backward compatibility with the V0.1 API; convert to a bool mask
+        upstream if you need it in tensor form.
+        """
+        mask = self.detector(self.env.unwrapped)
+        env_indices = torch.nonzero(mask, as_tuple=False).squeeze()
         if env_indices.ndim == 0:
             return [env_indices.item()] if env_indices.numel() > 0 else []
         return env_indices.tolist()
@@ -48,8 +55,24 @@ class ResetStrategy:
         self.env.unwrapped.reset_grasp_stats()
 
     def reset_unsuitable_envs(self):
-        """Resets specific environments where objects have fallen or are unreachable."""
+        """Resets specific environments where objects have fallen or are unreachable.
+
+        V0.2 M2 Phase B: ask the registered detector for per-channel masks
+        (``obj_mask``, ``recep_mask``) and forward them to the env-side
+        respawn path. Detectors that don't expose ``per_actor_class`` fall
+        back to deriving both masks from the single-mask ``__call__``, which
+        respawns both carrot and plate together for any unsuitable env.
+        """
         self.reset_robot()
-        count = self.env.unwrapped.reset_unsuitable_envs()
+        unwrapped = self.env.unwrapped
+        if hasattr(self.detector, "per_actor_class"):
+            masks = self.detector.per_actor_class(unwrapped)
+            obj_mask = masks["obj"]
+            recep_mask = masks["recep"]
+        else:
+            any_mask = self.detector(unwrapped)
+            obj_mask = any_mask
+            recep_mask = any_mask
+        count = unwrapped.reset_unsuitable_envs(obj_mask=obj_mask, recep_mask=recep_mask)
         self.reset_unsuitable_count += count
         return count

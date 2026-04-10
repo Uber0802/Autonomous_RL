@@ -404,7 +404,15 @@ class BasePickPlace(BaseEnv):
     def get_recep_pos(self):    
         return self.extra_stats["extra_pos_plate"]
 
-    def reset_unsuitable_envs(self, env_idx=[]):
+    def reset_unsuitable_envs(self, env_idx=[], obj_mask=None, recep_mask=None):
+        """Respawns envs whose objects/receptacles have fallen.
+
+        V0.2 M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
+        (by ``ResetStrategy.reset_unsuitable_envs``), they come from the
+        registered ``UnsuitableDetector`` and are the source of truth for
+        which envs/actors to respawn. When omitted, falls back to the V0.1
+        inlined ``< 0.7`` thresholds for backward compatibility.
+        """
         xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
         xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
@@ -412,29 +420,24 @@ class BasePickPlace(BaseEnv):
         carrot_actor = [self.objs_carrot[n] for n in select_carrot]
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
-        # Get unsuitable object, recep idx
-        obj_pos = self.get_obj_pos()
-        recep_pos = self.get_recep_pos()
-        obj_z = obj_pos[:, 2]
-        recep_z = recep_pos[:, 2]
+        # Get unsuitable object/recep masks. Prefer masks injected by the
+        # registered detector; fall back to inlined V0.1 thresholds if the
+        # caller didn't provide them (e.g. older test paths).
+        if obj_mask is None or recep_mask is None:
+            obj_z = self.get_obj_pos()[:, 2]
+            recep_z = self.get_recep_pos()[:, 2]
+            obj_mask = obj_z < 0.7
+            recep_mask = recep_z < 0.7
 
-        # Find indices where obj_z < 0.7
-        obj_low_z_mask = obj_z < 0.7
-        obj_low_z_indices = torch.nonzero(obj_low_z_mask, as_tuple=False).squeeze()
-
-        # Convert to list of ints
+        obj_low_z_indices = torch.nonzero(obj_mask, as_tuple=False).squeeze()
         if obj_low_z_indices.ndim == 0:
-            obj_low_z_list = [obj_low_z_indices.item()]
+            obj_low_z_list = [obj_low_z_indices.item()] if obj_low_z_indices.numel() > 0 else []
         else:
             obj_low_z_list = obj_low_z_indices.tolist()
 
-        # Find indices where recep_z < 0.7
-        recep_low_z_mask = recep_z < 0.7
-        recep_low_z_indices = torch.nonzero(recep_low_z_mask, as_tuple=False).squeeze()
-
-        # Convert to list of ints
+        recep_low_z_indices = torch.nonzero(recep_mask, as_tuple=False).squeeze()
         if recep_low_z_indices.ndim == 0:
-            recep_low_z_list = [recep_low_z_indices.item()]
+            recep_low_z_list = [recep_low_z_indices.item()] if recep_low_z_indices.numel() > 0 else []
         else:
             recep_low_z_list = recep_low_z_indices.tolist()
 
@@ -679,624 +682,9 @@ class BaseMultiPickPlace(BasePickPlace):
 
 
 
-@register_env("TwoObjectOneReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class TwoObjectOneReceptacle(BaseMultiPickPlace):
-    select_extra_ids: torch.Tensor
-    select_carrot1_ids: torch.Tensor
-    select_carrot2_ids: torch.Tensor
-
-    def get_carrot_actors(self):
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        return [self.objs_carrot[n] for n in select_carrot]
-
-    def get_plate_actors(self):
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        return [self.objs_plate[n] for n in select_plate]
-
-    def get_extra_plate_actors(self):
-        return self.get_plate_actors() # Only one plate
-
-    def get_carrot_pose(self):
-        p = torch.zeros((self.num_envs, 3), device=self.device)
-        for name, actor in self.objs_carrot.items():
-            mask = (self.select_carrot_ids == self.carrot_names.index(name))
-            if mask.any(): p[mask] = actor.pose.p[mask]
-        return p
-
-    def get_plate_pose(self):
-        p = torch.zeros((self.num_envs, 3), device=self.device)
-        for name, actor in self.objs_plate.items():
-            mask = (self.select_plate_ids == self.plate_names.index(name))
-            if mask.any(): p[mask] = actor.pose.p[mask]
-        return p
-
-    def get_extra_plate_pose(self):
-        return self.get_plate_pose()
-    
-    POSE_PRESET = "TwoObjectOneReceptacle"
-    NUM_OBJECTS = 2
-    NUM_RECEPTACLES = 1
-    DEFAULT_OBJ_INDICES = [7, 2]     # 1-based
-    DEFAULT_PLATE_INDICES = [1]      # 1-based
-
-    def _generate_init_pose(self):
-        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
-        params = POSE_PRESETS[self.POSE_PRESET]
-        self.xyz_configs = generate_pose_configs(**params)
-        self.quat_configs = QUAT_CONFIGS.copy()
-        print(f"xyz_configs: {self.xyz_configs.shape}")
-        print(f"quat_configs: {self.quat_configs.shape}")
-
-    def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
-        # NOTE: this part of code is not GPU parallelized
-        b = len(env_idx)
-        assert b == self.num_envs
-
-        self._generate_init_pose()
-
-        lc = 16
-        lo = len(self.overlay_images_numpy)
-        l1 = len(self.xyz_configs)
-        l2 = len(self.quat_configs)
-        lp = 1
-        le = 16
-        ltt = lc * lp * le * lo * l1 * l2
-
-        # Use one shared episode ID for all environments
-        if "episode_id" in options:
-            episode_id = options["episode_id"]
-        else:
-            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-            episode_id = torch.full((b,), single_id, device=self.device)
-            episode_id = episode_id.reshape(b)
-            episode_id = episode_id % ltt
-
-        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
-        obj2_index = options.get("obj2_index", self.DEFAULT_OBJ_INDICES[1]) - 1
-        self.select_carrot1_ids = torch.full((b,), obj1_index, device=self.device)
-        self.select_carrot2_ids = torch.full((b,), obj2_index, device=self.device)
-
-        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
-        self.select_plate_ids = torch.full((b,), plate1_index, device=self.device)
-
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
-        self.select_pos_ids = (episode_id // l2) % l1
-        self.select_quat_ids = episode_id % l2
-
-    def set_current_task(self, object: list[str], receptacle: list[str]):
-        select_carrot1 = [self.carrot_names[idx] for idx in self.select_carrot1_ids]
-        select_carrot2 = [self.carrot_names[idx] for idx in self.select_carrot2_ids]
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-
-        new_select_carrot_ids = []
-        new_select_plate_ids = []
-        for idx in range(self.num_envs):
-            if object[idx] == self.model_db_carrot[select_carrot1[idx]]["name"]:
-                new_select_carrot_ids.append(self.select_carrot1_ids[idx])
-            elif object[idx] == self.model_db_carrot[select_carrot2[idx]]["name"]:
-                new_select_carrot_ids.append(self.select_carrot2_ids[idx])
-            else:
-                raise ValueError(f"{object[idx]} does not exist!")
-
-            if receptacle[idx] == self.model_db_plate[select_plate[idx]]["name"]:
-                new_select_plate_ids.append(self.select_plate_ids[idx])
-            else:
-                raise ValueError(f"{receptacle[idx]} does not exist!")
-
-        self.select_carrot_ids = torch.stack(new_select_carrot_ids)
-        self.select_plate_ids = torch.stack(new_select_plate_ids)
-
-        # for motion planning capability
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
-        plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot
-        self.target_obj_name = select_plate
-        self.objs = {
-            self.source_obj_name[0]: carrot_actor[0],
-            self.target_obj_name[0]: plate_actor[0]
-        }
-
-    def object_name(self):
-        """
-        Get all object names in env.
-        """
-        select_carrot1 = [self.carrot_names[idx] for idx in self.select_carrot1_ids]
-        select_carrot2 = [self.carrot_names[idx] for idx in self.select_carrot2_ids]
-
-        name_in_all_envs = []
-        for idx in range(self.num_envs):
-            name_in_cur_envs = []
-            name_in_cur_envs.append(f"{self.model_db_carrot[select_carrot1[idx]]['name']}")
-            name_in_cur_envs.append(f"{self.model_db_carrot[select_carrot2[idx]]['name']}")
-            name_in_all_envs.append(name_in_cur_envs)
-
-        return name_in_all_envs
-
-
-    def receptacle_name(self):
-        """
-        Get all receptacle names in env.
-        """
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-
-        name_in_all_envs = []
-        for idx in range(self.num_envs):
-            name_in_cur_envs = []
-            name_in_cur_envs.append(f"{self.model_db_plate[select_plate[idx]]['name']}")
-            name_in_all_envs.append(name_in_cur_envs)
-
-        return name_in_all_envs
-
-    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
-        self._initialize_episode_pre(env_idx, options)
-
-        # Initial set carrot1 as task object, carrot 2 as extra object
-        self.select_carrot_ids = self.select_carrot1_ids
-        self.select_extra_ids = self.select_carrot2_ids
-
-        b = self.num_envs
-
-        # rgb overlay
-        sensor = self._sensor_configs[self.rgb_camera_name]
-        assert sensor.width == 640
-        assert sensor.height == 480
-        overlay_images = np.stack([self.overlay_images_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_images = torch.tensor(overlay_images, device=self.device)  # [b, H, W, 3]
-        overlay_textures = np.stack([self.overlay_textures_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_textures = torch.tensor(overlay_textures, device=self.device)  # [b, H, W, 3]
-        overlay_mix = np.array([self.overlay_mix_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_mix = torch.tensor(overlay_mix, device=self.device)  # [b]
-
-        # xyz and quat
-        xyz_configs = torch.tensor(self.xyz_configs, device=self.device)
-        quat_configs = torch.tensor(self.quat_configs, device=self.device)
-
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        select_extra = [self.carrot_names[idx] for idx in self.select_extra_ids]
-        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
-        plate_actor = [self.objs_plate[n] for n in select_plate]
-        extra_actor = [self.objs_carrot[n] for n in select_extra]
-
-        # for motion planning capability
-        self.source_obj_name = select_carrot
-        self.target_obj_name = select_plate
-        self.objs = {
-            self.source_obj_name[0]: carrot_actor[0],
-            self.target_obj_name[0]: plate_actor[0]
-        }
-
-        # set pose for robot
-        self.agent.robot.set_pose(self.safe_robot_pos)
-        # self._settle(0.5)
-
-        # set pose for objs
-        for idx, name in enumerate(self.model_db_carrot):
-            p_reset = torch.tensor([1.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
-            is_select = self.select_carrot_ids == idx  # [b]
-            p_select = xyz_configs[self.select_pos_ids, 0].reshape(b, 3)  # [b, 3]
-            is_select_extra = self.select_extra_ids == idx  # [b]
-            p_select_extra = xyz_configs[self.select_pos_ids, 2].reshape(b, 3)  # [b, 3]
-            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
-            p = torch.where(is_select_extra.unsqueeze(1).repeat(1, 3), p_select_extra, p)  # [b, 3]
-
-            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
-            q_select = quat_configs[self.select_quat_ids, 0].reshape(b, 4)  # [b, 4]
-            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
-            q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)  # [b, 4]
-
-            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
-
-        for idx, name in enumerate(self.model_db_plate):
-            is_select = self.select_plate_ids == idx  # [b]
-            p_reset = torch.tensor([2.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
-            p_select = xyz_configs[self.select_pos_ids, 1].reshape(b, 3)  # [b, 3]
-            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
-
-            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
-            q_select = quat_configs[self.select_quat_ids, 1].reshape(b, 4)  # [b, 4]
-            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
-
-            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
-
-        self._settle(0.5)
-
-        # Some objects need longer time to settle
-        c_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(carrot_actor)])
-        c_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(carrot_actor)])
-        p_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(plate_actor)])
-        p_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(plate_actor)])
-        e_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(extra_actor)])
-        e_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(extra_actor)])
-
-        lin_vel = torch.linalg.norm(c_lin) + torch.linalg.norm(p_lin) + torch.linalg.norm(e_lin)
-        ang_vel = torch.linalg.norm(c_ang) + torch.linalg.norm(p_ang) + torch.linalg.norm(e_ang)
-
-        if lin_vel > 1e-3 or ang_vel > 1e-2:
-            self._settle(6)
-
-        # measured values for bridge dataset
-        self.agent.robot.set_pose(self.initial_robot_pos)
-        self.agent.reset(init_qpos=self.initial_qpos)
-
-        # figure out object bounding boxes after settling. This is used to determine if an object is near the target object
-        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])  # [b, 4]
-        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])  # [b, 4]
-        corner_signs = torch.tensor([
-            [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
-            [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1]
-        ], device=self.device)
-
-        # carrot
-        carrot_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])  # [b, 3]
-        c_bbox_half = carrot_bbox_world / 2  # [b, 3]
-        c_bbox_corners = c_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
-
-        c_q_matrix = rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle)  # [b, 3, 3]
-        c_bbox_corners_rot = torch.matmul(c_bbox_corners, c_q_matrix.transpose(1, 2))  # [b, 8, 3]
-        c_rotated_bbox_size = c_bbox_corners_rot.max(dim=1).values - c_bbox_corners_rot.min(dim=1).values  # [b, 3]
-        self.carrot_bbox_world = c_rotated_bbox_size  # [b, 3]
-
-        # plate
-        plate_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_plate])  # [b, 3]
-        p_bbox_half = plate_bbox_world / 2  # [b, 3]
-        p_bbox_corners = p_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
-
-        p_q_matrix = rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle)  # [b, 3, 3]
-        p_bbox_corners_rot = torch.matmul(p_bbox_corners, p_q_matrix.transpose(1, 2))  # [b, 8, 3]
-        p_rotated_bbox_size = p_bbox_corners_rot.max(dim=1).values - p_bbox_corners_rot.min(dim=1).values  # [b, 3]
-        self.plate_bbox_world = p_rotated_bbox_size  # [b, 3]
-
-        # stats to track
-        self.consecutive_grasp = torch.zeros((b,), dtype=torch.int32, device=self.device)
-        self.episode_stats = dict(
-            # all_obj_keep_height=torch.zeros((b,), dtype=torch.bool),
-            # moved_correct_obj=torch.zeros((b,), dtype=torch.bool),
-            # moved_wrong_obj=torch.zeros((b,), dtype=torch.bool),
-            # near_tgt_obj=torch.zeros((b,), dtype=torch.bool),
-            is_src_obj_grasped=torch.zeros((b,), dtype=torch.bool, device=self.device),
-            # is_closest_to_tgt=torch.zeros((b,), dtype=torch.bool),
-            consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
-            src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
-
-            gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-            gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-            carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-        )
-
-
-@register_env("OneObjectTwoReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class OneObjectTwoReceptacle(BaseMultiPickPlace):
-    select_extra_ids: torch.Tensor
-    select_plate1_ids: torch.Tensor
-    select_plate2_ids: torch.Tensor
-
-    def get_carrot_actors(self):
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        return [self.objs_carrot[n] for n in select_carrot]
-
-    def get_plate_actors(self):
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        return [self.objs_plate[n] for n in select_plate]
-
-    def get_extra_plate_actors(self):
-        select_extra = [self.plate_names[idx] for idx in self.select_extra_ids]
-        return [self.objs_plate[n] for n in select_extra]
-
-    def get_carrot_pose(self):
-        p = torch.zeros((self.num_envs, 3), device=self.device)
-        for name, actor in self.objs_carrot.items():
-            mask = (self.select_carrot_ids == self.carrot_names.index(name))
-            if mask.any(): p[mask] = actor.pose.p[mask]
-        return p
-
-    def get_plate_pose(self):
-        p = torch.zeros((self.num_envs, 3), device=self.device)
-        for name, actor in self.objs_plate.items():
-            mask = (self.select_plate_ids == self.plate_names.index(name))
-            if mask.any(): p[mask] = actor.pose.p[mask]
-        return p
-
-    def get_extra_plate_pose(self):
-        p = torch.zeros((self.num_envs, 3), device=self.device)
-        for name, actor in self.objs_plate.items():
-            mask = (self.select_extra_ids == self.plate_names.index(name))
-            if mask.any(): p[mask] = actor.pose.p[mask]
-        return p
-
-    def _prep_init(self):
-        # models
-        self.model_db_carrot: dict[str, dict] = io_utils.load_json(
-            CARROT_DATASET_DIR / "more_carrot" / "model_db.json"
-        )
-        assert len(self.model_db_carrot) == 25
-
-        self.model_db_plate: dict[str, dict] = io_utils.load_json(
-            CARROT_DATASET_DIR / "more_plate" / "model_db.json"
-        )
-        #assert len(self.model_db_plate) == 17
-
-        # random configs
-        self.carrot_names = list(self.model_db_carrot.keys())
-        self.plate_names = list(self.model_db_plate.keys())
-
-        # rgb overlay
-        model_db_table = io_utils.load_json(
-            CARROT_DATASET_DIR / "more_table" / "model_db.json"
-        )
-
-        img_fd = CARROT_DATASET_DIR / "more_table" / "imgs"
-        texture_fd = CARROT_DATASET_DIR / "more_table" / "textures"
-        self.overlay_images_numpy = [
-            cv2.resize(cv2.cvtColor(cv2.imread(str(img_fd / k)), cv2.COLOR_BGR2RGB), (640, 480))
-            for k in model_db_table  # [H, W, 3]
-        ]  # (B) [H, W, 3]
-        self.overlay_textures_numpy = [
-            cv2.resize(cv2.cvtColor(cv2.imread(str(texture_fd / v["texture"])), cv2.COLOR_BGR2RGB), (640, 480))
-            for v in model_db_table.values()  # [H, W, 3]
-        ]  # (B) [H, W, 3]
-        self.overlay_mix_numpy = [
-            v["mix"] for v in model_db_table.values()  # []
-        ]
-        assert len(self.overlay_images_numpy) == 21
-        assert len(self.overlay_textures_numpy) == 21
-        assert len(self.overlay_mix_numpy) == 21
-
-    POSE_PRESET = "OneObjectTwoReceptacle"
-    NUM_OBJECTS = 1
-    NUM_RECEPTACLES = 2
-    DEFAULT_OBJ_INDICES = [7]        # 1-based
-    DEFAULT_PLATE_INDICES = [1, 2]   # 1-based
-
-    def _generate_init_pose(self):
-        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
-        params = POSE_PRESETS[self.POSE_PRESET]
-        self.xyz_configs = generate_pose_configs(**params)
-        self.quat_configs = QUAT_CONFIGS.copy()
-        print(f"xyz_configs: {self.xyz_configs.shape}")
-        print(f"quat_configs: {self.quat_configs.shape}")
-
-    def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
-        # NOTE: this part of code is not GPU parallelized
-        b = len(env_idx)
-        assert b == self.num_envs
-
-        self._generate_init_pose()
-
-        lc = 16
-        lo = len(self.overlay_images_numpy)
-        l1 = len(self.xyz_configs)
-        l2 = len(self.quat_configs)
-        lp = 1
-        le = 16
-        ltt = lc * lp * le * lo * l1 * l2
-
-        # Use one shared episode ID for all environments
-        if "episode_id" in options:
-            episode_id = options["episode_id"]
-        else:
-            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-            episode_id = torch.full((b,), single_id, device=self.device)
-            episode_id = episode_id.reshape(b)
-            episode_id = episode_id % ltt
-
-        obj1_index = options.get("obj1_index", self.DEFAULT_OBJ_INDICES[0]) - 1
-        self.select_carrot_ids = torch.full((b,), obj1_index, device=self.device)
-
-        plate1_index = options.get("plate1_index", self.DEFAULT_PLATE_INDICES[0]) - 1
-        plate2_index = options.get("plate2_index", self.DEFAULT_PLATE_INDICES[1]) - 1
-        self.select_plate1_ids = torch.full((b,), plate1_index, device=self.device)
-        self.select_plate2_ids = torch.full((b,), plate2_index, device=self.device)
-
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
-        self.select_pos_ids = (episode_id // l2) % l1
-        self.select_quat_ids = episode_id % l2
-
-    def set_current_task(self, object: list[str], receptacle: list[str]):
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        select_plate1 = [self.plate_names[idx] for idx in self.select_plate1_ids]
-        select_plate2 = [self.plate_names[idx] for idx in self.select_plate2_ids]
-
-        new_select_carrot_ids = []
-        new_select_plate_ids = []
-        for idx in range(self.num_envs):
-            if object[idx] == self.model_db_carrot[select_carrot[idx]]["name"]:
-                new_select_carrot_ids.append(self.select_carrot_ids[idx])
-            else:
-                raise ValueError(f"{object[idx]} does not exist!")
-
-            if receptacle[idx] == self.model_db_plate[select_plate1[idx]]["name"]:
-                new_select_plate_ids.append(self.select_plate1_ids[idx])
-            elif receptacle[idx] == self.model_db_plate[select_plate2[idx]]["name"]:
-                new_select_plate_ids.append(self.select_plate2_ids[idx])
-            else:
-                raise ValueError(f"{receptacle[idx]} does not exist!")
-
-        self.select_carrot_ids = torch.stack(new_select_carrot_ids)
-        self.select_plate_ids = torch.stack(new_select_plate_ids)
-
-        # for motion planning capability
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
-        plate_actor = [self.objs_plate[n] for n in select_plate]
-        self.source_obj_name = select_carrot
-        self.target_obj_name = select_plate
-        self.objs = {
-            self.source_obj_name[0]: carrot_actor[0],
-            self.target_obj_name[0]: plate_actor[0]
-        }
-
-    def object_name(self):
-        """
-        Get all object names in env.
-        """
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-
-        name_in_all_envs = []
-        for idx in range(self.num_envs):
-            name_in_cur_envs = []
-            name_in_cur_envs.append(f"{self.model_db_carrot[select_carrot[idx]]['name']}")
-            name_in_all_envs.append(name_in_cur_envs)
-
-        return name_in_all_envs
-
-
-    def receptacle_name(self):
-        """
-        Get all receptacle names in env.
-        """
-        select_plate1 = [self.plate_names[idx] for idx in self.select_plate1_ids]
-        select_plate2 = [self.plate_names[idx] for idx in self.select_plate2_ids]
-
-        name_in_all_envs = []
-        for idx in range(self.num_envs):
-            name_in_cur_envs = []
-            name_in_cur_envs.append(f"{self.model_db_plate[select_plate1[idx]]['name']}")
-            name_in_cur_envs.append(f"{self.model_db_plate[select_plate2[idx]]['name']}")
-            name_in_all_envs.append(name_in_cur_envs)
-
-        return name_in_all_envs
-
-    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
-        self._initialize_episode_pre(env_idx, options)
-
-        # Initial set plate 1 as task receptacle, plate 2 as extra receptacle
-        self.select_plate_ids = self.select_plate1_ids
-        self.select_extra_ids = self.select_plate2_ids
-
-        b = self.num_envs
-
-        # rgb overlay
-        sensor = self._sensor_configs[self.rgb_camera_name]
-        assert sensor.width == 640
-        assert sensor.height == 480
-        overlay_images = np.stack([self.overlay_images_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_images = torch.tensor(overlay_images, device=self.device)  # [b, H, W, 3]
-        overlay_textures = np.stack([self.overlay_textures_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_textures = torch.tensor(overlay_textures, device=self.device)  # [b, H, W, 3]
-        overlay_mix = np.array([self.overlay_mix_numpy[idx] for idx in self.select_overlay_ids])
-        self.overlay_mix = torch.tensor(overlay_mix, device=self.device)  # [b]
-
-        # xyz and quat
-        xyz_configs = torch.tensor(self.xyz_configs, device=self.device)
-        quat_configs = torch.tensor(self.quat_configs, device=self.device)
-
-        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
-        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
-        select_extra = [self.plate_names[idx] for idx in self.select_extra_ids]
-        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
-        plate_actor = [self.objs_plate[n] for n in select_plate]
-        extra_actor = [self.objs_plate[n] for n in select_extra]
-
-        # for motion planning capability
-        self.source_obj_name = select_carrot
-        self.target_obj_name = select_plate
-        self.objs = {
-            self.source_obj_name[0]: carrot_actor[0],
-            self.target_obj_name[0]: plate_actor[0]
-        }
-
-        # set pose for robot
-        self.agent.robot.set_pose(self.safe_robot_pos)
-        # self._settle(0.5)
-
-        # set pose for objs
-        for idx, name in enumerate(self.model_db_carrot):
-            p_reset = torch.tensor([1.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
-            is_select = self.select_carrot_ids == idx  # [b]
-            p_select = xyz_configs[self.select_pos_ids, 0].reshape(b, 3)  # [b, 3]
-            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
-
-            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
-            q_select = quat_configs[self.select_quat_ids, 0].reshape(b, 4)  # [b, 4]
-            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
-
-            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
-
-        for idx, name in enumerate(self.model_db_plate):
-            p_reset = torch.tensor([2.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
-            is_select = self.select_plate_ids == idx  # [b]
-            p_select = xyz_configs[self.select_pos_ids, 1].reshape(b, 3)  # [b, 3]
-            is_select_extra = self.select_extra_ids == idx  # [b]
-            p_select_extra = xyz_configs[self.select_pos_ids, 2].reshape(b, 3)  # [b, 3]
-            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
-            p = torch.where(is_select_extra.unsqueeze(1).repeat(1, 3), p_select_extra, p)  # [b, 3]
-
-            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
-            q_select = quat_configs[self.select_quat_ids, 1].reshape(b, 4)  # [b, 4]
-            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
-            q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select, q)
-
-            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
-
-        self._settle(0.5)
-
-        # Some objects need longer time to settle
-        c_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(carrot_actor)])
-        c_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(carrot_actor)])
-        p_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(plate_actor)])
-        p_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(plate_actor)])
-        e_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(extra_actor)])
-        e_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(extra_actor)])
-
-        lin_vel = torch.linalg.norm(c_lin) + torch.linalg.norm(p_lin) + torch.linalg.norm(e_lin)
-        ang_vel = torch.linalg.norm(c_ang) + torch.linalg.norm(p_ang) + torch.linalg.norm(e_ang)
-
-        if lin_vel > 1e-3 or ang_vel > 1e-2:
-            self._settle(6)
-
-        # measured values for bridge dataset
-        self.agent.robot.set_pose(self.initial_robot_pos)
-        self.agent.reset(init_qpos=self.initial_qpos)
-
-        # figure out object bounding boxes after settling. This is used to determine if an object is near the target object
-        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])  # [b, 4]
-        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])  # [b, 4]
-        corner_signs = torch.tensor([
-            [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
-            [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1]
-        ], device=self.device)
-
-        # carrot
-        carrot_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])  # [b, 3]
-        c_bbox_half = carrot_bbox_world / 2  # [b, 3]
-        c_bbox_corners = c_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
-
-        c_q_matrix = rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle)  # [b, 3, 3]
-        c_bbox_corners_rot = torch.matmul(c_bbox_corners, c_q_matrix.transpose(1, 2))  # [b, 8, 3]
-        c_rotated_bbox_size = c_bbox_corners_rot.max(dim=1).values - c_bbox_corners_rot.min(dim=1).values  # [b, 3]
-        self.carrot_bbox_world = c_rotated_bbox_size  # [b, 3]
-
-        # plate
-        plate_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_plate])  # [b, 3]
-        p_bbox_half = plate_bbox_world / 2  # [b, 3]
-        p_bbox_corners = p_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
-
-        p_q_matrix = rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle)  # [b, 3, 3]
-        p_bbox_corners_rot = torch.matmul(p_bbox_corners, p_q_matrix.transpose(1, 2))  # [b, 8, 3]
-        p_rotated_bbox_size = p_bbox_corners_rot.max(dim=1).values - p_bbox_corners_rot.min(dim=1).values  # [b, 3]
-        self.plate_bbox_world = p_rotated_bbox_size  # [b, 3]
-
-        # stats to track
-        self.consecutive_grasp = torch.zeros((b,), dtype=torch.int32, device=self.device)
-        self.episode_stats = dict(
-            # all_obj_keep_height=torch.zeros((b,), dtype=torch.bool),
-            # moved_correct_obj=torch.zeros((b,), dtype=torch.bool),
-            # moved_wrong_obj=torch.zeros((b,), dtype=torch.bool),
-            # near_tgt_obj=torch.zeros((b,), dtype=torch.bool),
-            is_src_obj_grasped=torch.zeros((b,), dtype=torch.bool, device=self.device),
-            # is_closest_to_tgt=torch.zeros((b,), dtype=torch.bool),
-            consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
-            src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
-
-            gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-            gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-            carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
-        )
-
+# --- V0.2 M2 Phase B: legacy TwoObjectOneReceptacle and OneObjectTwoReceptacle
+# classes were deleted here. Their behavior is preserved by PickPlaceNxM-v1(N=2, M=1)
+# and PickPlaceNxM-v1(N=1, M=2) below; see _NxM_PRESETS.
 
 
 class GenericNxMPickPlace(BaseMultiPickPlace):
@@ -1319,6 +707,13 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
     DEFAULT_OBJ_INDICES: list
     DEFAULT_PLATE_INDICES: list
     SLOT_ORDER: list = None  # None = identity mapping
+    # V0.2 M2 Phase B: V0.1 behavior toggle. The 6 generic shims ride the
+    # `obj_set != "fixed"` branch in _initialize_episode_pre (per-env random
+    # poses on top of the shared episode_id). The 2 legacy *special* shapes
+    # (TwoObjectOneReceptacle, OneObjectTwoReceptacle) did NOT — every env
+    # got the same broadcast layout. PickPlaceNxM-v1 honors this distinction
+    # via the `PER_ENV_RAND_POSE` flag in `_NxM_PRESETS`.
+    PER_ENV_RAND_POSE: bool = True
 
     def _prep_init(self):
         """Override to keep all plates (not filtered to 1), matching TwoObjectTwoReceptacle."""
@@ -1398,51 +793,104 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         return self.get_plate_pose()
 
     def _initialize_episode_pre(self, env_idx, options):
+        """AutoRL-aligned episode initialization.
+
+        Object, receptacle, overlay, position, and quaternion selections are
+        ALL derived from ``episode_id`` via modular arithmetic, matching
+        AutoRL's ``TwoObjectOneReceptacle._initialize_episode_pre`` exactly
+        for N=2, M=1 and generalizing cleanly for other (N, M) shapes.
+        """
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "rand")
+        obj_set = options.get("obj_set", "fixed")
         if obj_set == "rand_ood":
             self._generate_OOD_init_pose()
         else:
             self._generate_init_pose()
 
-        lc = 16
-        lo = len(self.overlay_images_numpy)
+        # --- Object-set branching (matches AutoRL exactly) ---
+        if obj_set == "fixed":
+            lc = 16;  lc_offset = 0
+        elif obj_set in ("rand", "rand_ood"):
+            lc = 9;   lc_offset = 16
+        elif obj_set == "all":
+            lc = 25;  lc_offset = 0
+        else:
+            raise ValueError(f"Unknown obj_set: {obj_set}")
+
+        # --- Factor sizes (AutoRL: le=lc-1, lo=16, lp=len(plate_names)) ---
+        # Object factors: pick N without replacement → lc, lc-1, ..., lc-N+1
+        obj_factors = [lc - i for i in range(self.NUM_OBJECTS)]
+        # Receptacle factors: pick M without replacement → lp, lp-1, ..., lp-M+1
+        lp = len(self.plate_names)
+        rec_factors = [lp - i for i in range(self.NUM_RECEPTACLES)]
+        lo = 16;  lo_offset = 0
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
-        ltt = lc * 16 * lo * l1 * l2
 
+        # ltt = product of all factors (matches AutoRL: lc * le * lp * lo * l1 * l2 for N=2 M=1)
+        all_factors = obj_factors + rec_factors + [lo, l1, l2]
+        ltt = 1
+        for f in all_factors:
+            ltt *= f
+
+        # --- Episode ID ---
         if "episode_id" in options:
             episode_id = options["episode_id"]
         else:
             single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
-            episode_id = torch.full((b,), single_id, device=self.device) % ltt
+            episode_id = torch.full((b,), single_id, device=self.device)
+        episode_id = episode_id.reshape(b) % ltt
 
+        # --- Decompose episode_id into per-factor digits (most-significant first) ---
+        remaining = episode_id
+        digits = []
+        for i, f in enumerate(all_factors):
+            tail = 1
+            for ff in all_factors[i + 1:]:
+                tail *= ff
+            digits.append(remaining // tail)
+            remaining = remaining % tail
+
+        # --- Object selection (episode_id-driven, no-repeat Lehmer code) ---
+        #   For N=2, M=1 this reproduces AutoRL exactly:
+        #     carrot1 = digit[0] + lc_offset
+        #     carrot2 = (carrot1 + digit[1] + 1) % lc + lc_offset
         self._all_carrot_ids = []
         for i in range(self.NUM_OBJECTS):
-            idx = options.get(f"obj{i+1}_index", self.DEFAULT_OBJ_INDICES[i]) - 1
-            ids = torch.full((b,), idx, device=self.device)
+            if i == 0:
+                ids = digits[i] + lc_offset
+            else:
+                ids = (self._all_carrot_ids[0] + digits[i] + 1) % lc + lc_offset
             setattr(self, f"select_carrot{i+1}_ids", ids)
             self._all_carrot_ids.append(ids)
 
+        # --- Receptacle selection (episode_id-driven) ---
         self._all_plate_ids = []
         for i in range(self.NUM_RECEPTACLES):
-            idx = options.get(f"plate{i+1}_index", self.DEFAULT_PLATE_INDICES[i]) - 1
-            ids = torch.full((b,), idx, device=self.device)
+            d = digits[self.NUM_OBJECTS + i]
+            if i == 0:
+                ids = d
+            else:
+                ids = (self._all_plate_ids[0] + d + 1) % lp
             setattr(self, f"select_plate{i+1}_ids", ids)
             self._all_plate_ids.append(ids)
 
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
-        self.select_pos_ids = (episode_id // l2) % l1
-        self.select_quat_ids = episode_id % l2
-        if obj_set != "fixed":
+        # --- Overlay, position, quaternion (matches AutoRL exactly) ---
+        ofs = self.NUM_OBJECTS + self.NUM_RECEPTACLES
+        self.select_overlay_ids = digits[ofs] + lo_offset
+        self.select_pos_ids = digits[ofs + 1]
+        self.select_quat_ids = digits[ofs + 2]
+
+        # --- Optional per-env random pose (V0.1 generic shims only) ---
+        if self.PER_ENV_RAND_POSE and obj_set not in ("fixed", "rand_ood"):
             if obj_set != "rand_8":
-                rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+                rand_id = torch.randint(low=0, high=l1 * l2, size=(b,), device=self.device)
             else:
-                rand_id = torch.randint(low=0, high=ltt, size=(b // 8,), device=self.device)
+                rand_id = torch.randint(low=0, high=l1 * l2, size=(b // 8,), device=self.device)
                 rand_id = rand_id.repeat(8)
-            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_pos_ids = rand_id // l2
             self.select_quat_ids = rand_id % l2
 
     def _slot(self, logical_idx):
@@ -1612,59 +1060,123 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
 
 
 
-@register_env("TwoObjectTwoReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class TwoObjectTwoReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "TwoObjectTwoReceptacle"
-    POSE_PRESET_OOD = "TwoObjectTwoReceptacle_OOD"
-    NUM_OBJECTS = 2
-    NUM_RECEPTACLES = 2
-    DEFAULT_OBJ_INDICES = [7, 2]
-    DEFAULT_PLATE_INDICES = [1, 2]
+# --- V0.2 M2 Phase B: PickPlaceNxM-v1 -------------------------------------
+#
+# Single parametric backbone for every (N, M) shape CRONOS supports. Replaces
+# the 8 legacy `@register_env` shims that lived above. Built on top of
+# `GenericNxMPickPlace`, which already has all the canonical machinery
+# (`_all_carrot_ids`, `_all_plate_ids`, `_slot()`, etc.) — `PickPlaceNxM`
+# just looks up the per-shape preset/slot-order/defaults from a table at
+# construction time and forwards everything else.
+#
+# The `_NxM_PRESETS` table is the single source of truth for shape metadata.
+# Each entry holds:
+#   POSE_PRESET, POSE_PRESET_OOD, SLOT_ORDER, DEFAULT_OBJ_INDICES, DEFAULT_PLATE_INDICES
+#
+# SLOT_ORDER maps logical slot index (carrots first, then plates) to the
+# physical preset slot index defined in `suite.POSE_PRESETS[...]`. For most
+# shapes this is the identity; for (N=2, M=1) the legacy preset has
+# slot_heights=[0.95, 0.92, 1.0] = [carrot, plate, extra_carrot], which
+# requires SLOT_ORDER=[0, 2, 1] to map [carrot, carrot, plate] correctly.
+
+_NxM_PRESETS: dict = {
+    # (N, M) -> dict of class attrs
+    # PER_ENV_RAND_POSE: True for the 6 generic shapes (every env gets a
+    # different per-env random pose sample); False for the 2 legacy *special*
+    # shapes that broadcast a single shared-episode_id pose to all envs.
+    (2, 1): dict(
+        POSE_PRESET="TwoObjectOneReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=[0, 2, 1],  # [carrot1, carrot2, plate] -> preset [0, 2, 1]
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1],
+        PER_ENV_RAND_POSE=False,
+    ),
+    (1, 2): dict(
+        POSE_PRESET="OneObjectTwoReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,  # identity: [carrot, plate1, plate2] -> preset [0, 1, 2]
+        DEFAULT_OBJ_INDICES=[7],
+        DEFAULT_PLATE_INDICES=[1, 2],
+        PER_ENV_RAND_POSE=False,
+    ),
+    (2, 2): dict(
+        POSE_PRESET="TwoObjectTwoReceptacle",
+        POSE_PRESET_OOD="TwoObjectTwoReceptacle_OOD",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1, 2],
+        PER_ENV_RAND_POSE=True,
+    ),
+    (3, 3): dict(
+        POSE_PRESET="ThreeObjectThreeReceptacle",
+        POSE_PRESET_OOD="ThreeObjectThreeReceptacle_OOD",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+        PER_ENV_RAND_POSE=True,
+    ),
+    (3, 1): dict(
+        POSE_PRESET="ThreeObjectOneReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1],
+        PER_ENV_RAND_POSE=True,
+    ),
+    (1, 3): dict(
+        POSE_PRESET="OneObjectThreeReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+        PER_ENV_RAND_POSE=True,
+    ),
+    (3, 2): dict(
+        POSE_PRESET="ThreeObjectTwoReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1, 2],
+        PER_ENV_RAND_POSE=True,
+    ),
+    (2, 3): dict(
+        POSE_PRESET="TwoObjectThreeReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+        PER_ENV_RAND_POSE=True,
+    ),
+}
 
 
+@register_env("PickPlaceNxM-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
+class PickPlaceNxM(GenericNxMPickPlace):
+    """Parametric pick-place env. `N` carrots and `M` receptacles per env.
 
-@register_env("ThreeObjectThreeReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class ThreeObjectThreeReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "ThreeObjectThreeReceptacle"
-    POSE_PRESET_OOD = "ThreeObjectThreeReceptacle_OOD"
-    NUM_OBJECTS = 3
-    NUM_RECEPTACLES = 3
-    DEFAULT_OBJ_INDICES = [7, 2, 10]
-    DEFAULT_PLATE_INDICES = [1, 2, 3]
+    Usage:
+        gym.make("PickPlaceNxM-v1", num_envs=64, N=2, M=1, ...)
 
+    Defaults to (N=2, M=1) for parity with the V0.1 baseline run. The
+    accepted (N, M) pairs are exactly the 8 shapes in `_NxM_PRESETS`.
+    """
 
-
-@register_env("ThreeObjectOneReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class ThreeObjectOneReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "ThreeObjectOneReceptacle"
-    NUM_OBJECTS = 3
-    NUM_RECEPTACLES = 1
-    DEFAULT_OBJ_INDICES = [7, 2, 10]
-    DEFAULT_PLATE_INDICES = [1]
-
-
-@register_env("OneObjectThreeReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class OneObjectThreeReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "OneObjectThreeReceptacle"
-    NUM_OBJECTS = 1
-    NUM_RECEPTACLES = 3
-    DEFAULT_OBJ_INDICES = [7]
-    DEFAULT_PLATE_INDICES = [1, 2, 3]
-
-
-@register_env("ThreeObjectTwoReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class ThreeObjectTwoReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "ThreeObjectTwoReceptacle"
-    NUM_OBJECTS = 3
-    NUM_RECEPTACLES = 2
-    DEFAULT_OBJ_INDICES = [7, 2, 10]
-    DEFAULT_PLATE_INDICES = [1, 2]
-
-
-@register_env("TwoObjectThreeReceptacle-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
-class TwoObjectThreeReceptacle(GenericNxMPickPlace):
-    POSE_PRESET = "TwoObjectThreeReceptacle"
-    NUM_OBJECTS = 2
-    NUM_RECEPTACLES = 3
-    DEFAULT_OBJ_INDICES = [7, 2]
-    DEFAULT_PLATE_INDICES = [1, 2, 3]
+    def __init__(self, *args, N: int = 2, M: int = 1, **kwargs):
+        if (N, M) not in _NxM_PRESETS:
+            raise ValueError(
+                f"PickPlaceNxM-v1 does not support (N={N}, M={M}). "
+                f"Supported shapes: {sorted(_NxM_PRESETS.keys())}"
+            )
+        spec = _NxM_PRESETS[(N, M)]
+        # Bind the per-shape attributes to the *instance* so this single
+        # class can multiplex across shapes within one process.
+        self.NUM_OBJECTS = N
+        self.NUM_RECEPTACLES = M
+        self.POSE_PRESET = spec["POSE_PRESET"]
+        self.POSE_PRESET_OOD = spec["POSE_PRESET_OOD"]
+        self.SLOT_ORDER = spec["SLOT_ORDER"]
+        self.DEFAULT_OBJ_INDICES = spec["DEFAULT_OBJ_INDICES"]
+        self.DEFAULT_PLATE_INDICES = spec["DEFAULT_PLATE_INDICES"]
+        self.PER_ENV_RAND_POSE = spec["PER_ENV_RAND_POSE"]
+        super().__init__(*args, **kwargs)

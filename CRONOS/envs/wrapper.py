@@ -24,21 +24,35 @@ class CronosWrapper:
             max_episode_steps=args.segment_len,
             sensor_configs={"shader_pack": "default"},
         )
+        # V0.2 M2 Phase B: PickPlaceNxM-v1 takes (N, M) construction kwargs.
+        # gym.make forwards extra kwargs to the env constructor, so any future
+        # parametric env can opt in by adding the same Args fields.
+        if args.env_id == "PickPlaceNxM-v1":
+            env_config["N"] = getattr(args, "env_n", 2)
+            env_config["M"] = getattr(args, "env_m", 1)
         self.env = gym.make(**env_config)
         
         import random
         random.seed(self.args.seed)
         self.rand_episode_id = random.randint(0, 1000)
         
-        # AutoRL compatibility: Explicitly seed the env with an initial reset
-        options = {}
-        options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device)
+        # AutoRL compatibility: Explicitly seed the env with an initial reset.
+        # Pass obj_set so the task pool built from this reset matches training.
+        options = {
+            "obj_set": self.args.obj_set,
+            "episode_id": torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device),
+        }
         self.env.reset(seed=[self.args.seed * 1000 + i for i in range(self.args.num_envs)], options=options)
         
         # Integrated Modules
         self.suite = task_suite
         self.scheduler = task_scheduler
-        self.reset_strategy = ResetStrategy(self.env, self.num_envs, self.device)
+        self.reset_strategy = ResetStrategy(
+            self.env,
+            self.num_envs,
+            self.device,
+            detector=getattr(args, "unsuitable_detector", "low_z"),
+        )
         self.reward_shaper = RewardShaper(self.num_envs, self.device)
         
         # Binning for action processing
@@ -71,56 +85,46 @@ class CronosWrapper:
         return action
 
     def step(self, raw_action):
-        """Unified step function using decoupled reward shaping."""
+        """Step matching AutoRL: use env's native info for reward and episode reporting."""
         action = self._process_action(raw_action)
-        obs, _, _, truncated, info = self.env.step(action)
-        
+        obs, _reward, _terminated, truncated, info = self.env.step(action)
+
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
-        
-        # Centralized info computation in RewardShaper
-        info = self.reward_shaper.compute_info(self.env)
+        truncated = truncated.reshape(-1, 1)
+
+        # Reward from env's native info (AutoRL: self.get_reward(info))
         reward = self.reward_shaper.compute_reward(info)
-        
-        truncated_reshaped = truncated.reshape(-1, 1)
-        if truncated_reshaped.any():
-            info["episode"] = {
-                "success": info["success"].float().tolist(),
-                "is_src_obj_grasped": self.reward_shaper.is_src_obj_grasped_ever.float().tolist(),
-                "consecutive_grasp": self.reward_shaper.consecutive_grasp_ever.float().tolist(),
-                "src_on_table": info["src_on_table"].float().tolist(),
-                "dist_tcp_to_obj": info["gripper_carrot_dist"].tolist(),
-                "dist_obj_to_recep": info["dist_obj_to_recep"].tolist()
-            }
-            
-        return obs_image, reward, truncated_reshaped, info
+
+        # Episode info at truncation: instantaneous values (matching AutoRL exactly)
+        if truncated.any():
+            info["episode"] = {}
+            for k in ["is_src_obj_grasped", "consecutive_grasp", "success"]:
+                v = [info[k][idx].item() for idx in range(self.num_envs)]
+                info["episode"][k] = v
+
+        return obs_image, reward, truncated, info
 
     def reset(self, same_init=True, obj_set_override=None, **kwargs):
-        """Unified reset function using suite and reset strategy."""
+        """Unified reset matching AutoRL: env.reset → set_task → zero reward_old."""
         options = {
             "obj_set": obj_set_override if obj_set_override else self.args.obj_set,
-            "obj1_index": self.args.obj1_index,
-            "obj2_index": self.args.obj2_index,
-            "obj3_index": getattr(self.args, "obj3_index", 3),
-            "plate1_index": self.args.plate1_index,
-            "plate2_index": self.args.plate2_index,
-            "plate3_index": getattr(self.args, "plate3_index", 3),
         }
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
-            
+
         obs, info = self.env.reset(options=options)
-        
+
         # Set tasks from scheduler if available
         if self.scheduler:
             objs, receps = self.scheduler.get_next_tasks()
             self.env.unwrapped.set_current_task(objs, receps)
-        
-        self.reward_shaper.reset_reward_stats()
-        # Compute rich info from reward_shaper so all keys exist at step 0
-        info = self.reward_shaper.compute_info(self.env)
+
+        # AutoRL alignment: only zero reward_old on reset
+        self.reward_shaper.reward_old.zero_()
         obs_image = obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
-        
-        return obs_image, self.get_language_instructions(), info
+        instruction = self.get_language_instructions()
+
+        return obs_image, instruction, info
 
     def get_language_instructions(self):
         """Generates instructions based on current objects and receptacles."""
@@ -140,14 +144,20 @@ class CronosWrapper:
         return instructions
 
     def set_forward(self):
-        """Sets all environments to forward mode."""
+        """Sets all environments to forward mode.
+
+        AutoRL alignment: only zero reward_old, not consecutive_grasp.
+        """
         self.reward_shaper.set_backward_mask(torch.zeros(self.num_envs, dtype=torch.bool, device=self.device))
-        self.reward_shaper.reset_reward_stats()
+        self.reward_shaper.reward_old.zero_()
 
     def set_backward(self):
-        """Sets all environments to backward mode."""
+        """Sets all environments to backward mode.
+
+        AutoRL alignment: only zero reward_old, not consecutive_grasp.
+        """
         self.reward_shaper.set_backward_mask(torch.ones(self.num_envs, dtype=torch.bool, device=self.device))
-        self.reward_shaper.reset_reward_stats()
+        self.reward_shaper.reward_old.zero_()
 
     def reset_robot(self):
         """Performs a partial reset (robot only) for non-episodic transitions."""
@@ -166,9 +176,13 @@ class CronosWrapper:
         return self.get_obs_image()
 
     def set_task(self, objects, receptacles):
-        """Manually sets the current task for all environments."""
+        """Manually sets the current task for all environments.
+
+        AutoRL alignment: only zero reward_old on task switch.
+        Do NOT reset consecutive_grasp — it persists across task boundaries.
+        """
         self.env.unwrapped.set_current_task(objects, receptacles)
-        self.reward_shaper.reset_reward_stats()
+        self.reward_shaper.reward_old.zero_()
 
     def get_task_pool(self):
         """Exposes the internal environment's task pool."""
@@ -182,5 +196,5 @@ class CronosWrapper:
         """Returns current obs, instructions, and info without resetting the env."""
         obs = self.get_obs_image()
         instruct = self.get_language_instructions()
-        info = self.reward_shaper.compute_info(self.env)
+        info = self.env.unwrapped.get_info()
         return obs, instruct, info

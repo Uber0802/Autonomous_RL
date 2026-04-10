@@ -37,7 +37,12 @@ class Args:
     resume_episode: int = 0
 
     # --- Environment ---
-    env_id: str = "TwoObjectOneReceptacle-v1"
+    # V0.2 M2 Phase B: PickPlaceNxM-v1 replaces the 8 legacy registered IDs.
+    # Pick the (N, M) shape via --env_n / --env_m (defaults to (2, 1), the
+    # V0.1 baseline shape from train.sh).
+    env_id: str = "PickPlaceNxM-v1"
+    env_n: int = 2  # number of objects (carrots)
+    env_m: int = 2  # number of receptacles (plates)
     num_envs: int = 64
     obj_set: str = "rand"
     obj1_index: int = 7
@@ -61,6 +66,7 @@ class Args:
     # --- Non-episodic reset ---
     reset_robot: bool = True
     reset_unsuitable: bool = False
+    unsuitable_detector: str = "low_z"  # V0.2 M2 Phase A: pluggable detector name (see envs/unsuitable.py)
     enable_backward: bool = False
     backward_interval: int = 1
     num_groups: int = 0             # 0 = dynamically scale with available tasks
