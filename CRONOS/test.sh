@@ -16,6 +16,9 @@
 
 set -e
 
+# N=2, M=2 matches train.sh. Objects/plates are determined by the NxM shape
+# spec (DEFAULT_OBJ_INDICES=[7,2], DEFAULT_PLATE_INDICES=[1,2]) and the
+# episode_id-driven Lehmer code — no per-run index args needed.
 ENV_ARGS="--env-id PickPlaceNxM-v1 --env-n 2 --env-m 2 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
 
 MODE=${1:-t80a}

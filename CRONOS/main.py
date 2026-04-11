@@ -45,10 +45,10 @@ class Args:
     env_m: int = 2  # number of receptacles (plates)
     num_envs: int = 64
     obj_set: str = "rand"
-    obj1_index: int = 7
+    obj1_index: int = 7             # 1-based object indices (passed to env via options)
     obj2_index: int = 2
-    obj3_index: int = 3
-    plate1_index: int = 1
+    obj3_index: int = 10
+    plate1_index: int = 1           # 1-based plate indices
     plate2_index: int = 2
     plate3_index: int = 3
 

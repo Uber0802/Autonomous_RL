@@ -707,13 +707,6 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
     DEFAULT_OBJ_INDICES: list
     DEFAULT_PLATE_INDICES: list
     SLOT_ORDER: list = None  # None = identity mapping
-    # V0.2 M2 Phase B: V0.1 behavior toggle. The 6 generic shims ride the
-    # `obj_set != "fixed"` branch in _initialize_episode_pre (per-env random
-    # poses on top of the shared episode_id). The 2 legacy *special* shapes
-    # (TwoObjectOneReceptacle, OneObjectTwoReceptacle) did NOT — every env
-    # got the same broadcast layout. PickPlaceNxM-v1 honors this distinction
-    # via the `PER_ENV_RAND_POSE` flag in `_NxM_PRESETS`.
-    PER_ENV_RAND_POSE: bool = True
 
     def _prep_init(self):
         """Override to keep all plates (not filtered to 1), matching TwoObjectTwoReceptacle."""
@@ -795,45 +788,30 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
     def _initialize_episode_pre(self, env_idx, options):
         """AutoRL-aligned episode initialization.
 
-        Object, receptacle, overlay, position, and quaternion selections are
-        ALL derived from ``episode_id`` via modular arithmetic, matching
-        AutoRL's ``TwoObjectOneReceptacle._initialize_episode_pre`` exactly
-        for N=2, M=1 and generalizing cleanly for other (N, M) shapes.
+        Matches AutoRL's ``TwoObjectTwoReceptacle._initialize_episode_pre``:
+        - Objects and plates are FIXED from ``DEFAULT_OBJ_INDICES`` /
+          ``DEFAULT_PLATE_INDICES`` (1-based, converted to 0-based here).
+        - Overlay is derived from ``episode_id``.
+        - Position and quaternion: from ``episode_id`` when obj_set=="fixed",
+          per-env random otherwise (matching AutoRL's ``rand_id`` path).
         """
         b = len(env_idx)
         assert b == self.num_envs
 
-        obj_set = options.get("obj_set", "fixed")
+        obj_set = options.get("obj_set", "rand")
         if obj_set == "rand_ood":
             self._generate_OOD_init_pose()
         else:
             self._generate_init_pose()
 
-        # --- Object-set branching (matches AutoRL exactly) ---
-        if obj_set == "fixed":
-            lc = 16;  lc_offset = 0
-        elif obj_set in ("rand", "rand_ood"):
-            lc = 9;   lc_offset = 16
-        elif obj_set == "all":
-            lc = 25;  lc_offset = 0
-        else:
-            raise ValueError(f"Unknown obj_set: {obj_set}")
-
-        # --- Factor sizes (AutoRL: le=lc-1, lo=16, lp=len(plate_names)) ---
-        # Object factors: pick N without replacement → lc, lc-1, ..., lc-N+1
-        obj_factors = [lc - i for i in range(self.NUM_OBJECTS)]
-        # Receptacle factors: pick M without replacement → lp, lp-1, ..., lp-M+1
-        lp = len(self.plate_names)
-        rec_factors = [lp - i for i in range(self.NUM_RECEPTACLES)]
-        lo = 16;  lo_offset = 0
+        # --- Factor sizes (AutoRL: lc=16, lp=1, le=16) ---
+        lc = 16
+        lp = 1
+        le = 16
+        lo = len(self.overlay_images_numpy)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
-
-        # ltt = product of all factors (matches AutoRL: lc * le * lp * lo * l1 * l2 for N=2 M=1)
-        all_factors = obj_factors + rec_factors + [lo, l1, l2]
-        ltt = 1
-        for f in all_factors:
-            ltt *= f
+        ltt = lc * lp * le * lo * l1 * l2
 
         # --- Episode ID ---
         if "episode_id" in options:
@@ -843,54 +821,40 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             episode_id = torch.full((b,), single_id, device=self.device)
         episode_id = episode_id.reshape(b) % ltt
 
-        # --- Decompose episode_id into per-factor digits (most-significant first) ---
-        remaining = episode_id
-        digits = []
-        for i, f in enumerate(all_factors):
-            tail = 1
-            for ff in all_factors[i + 1:]:
-                tail *= ff
-            digits.append(remaining // tail)
-            remaining = remaining % tail
-
-        # --- Object selection (episode_id-driven, no-repeat Lehmer code) ---
-        #   For N=2, M=1 this reproduces AutoRL exactly:
-        #     carrot1 = digit[0] + lc_offset
-        #     carrot2 = (carrot1 + digit[1] + 1) % lc + lc_offset
+        # --- Object selection: from options (CLI args), falling back to preset defaults ---
         self._all_carrot_ids = []
         for i in range(self.NUM_OBJECTS):
-            if i == 0:
-                ids = digits[i] + lc_offset
-            else:
-                ids = (self._all_carrot_ids[0] + digits[i] + 1) % lc + lc_offset
+            key = f"obj{i+1}_index"
+            idx_1based = options.get(key, self.DEFAULT_OBJ_INDICES[i])
+            ids = torch.full((b,), idx_1based - 1, dtype=torch.long, device=self.device)
             setattr(self, f"select_carrot{i+1}_ids", ids)
             self._all_carrot_ids.append(ids)
 
-        # --- Receptacle selection (episode_id-driven) ---
+        # --- Plate selection: from options (CLI args), falling back to preset defaults ---
         self._all_plate_ids = []
         for i in range(self.NUM_RECEPTACLES):
-            d = digits[self.NUM_OBJECTS + i]
-            if i == 0:
-                ids = d
-            else:
-                ids = (self._all_plate_ids[0] + d + 1) % lp
+            key = f"plate{i+1}_index"
+            idx_1based = options.get(key, self.DEFAULT_PLATE_INDICES[i])
+            ids = torch.full((b,), idx_1based - 1, dtype=torch.long, device=self.device)
             setattr(self, f"select_plate{i+1}_ids", ids)
             self._all_plate_ids.append(ids)
 
-        # --- Overlay, position, quaternion (matches AutoRL exactly) ---
-        ofs = self.NUM_OBJECTS + self.NUM_RECEPTACLES
-        self.select_overlay_ids = digits[ofs] + lo_offset
-        self.select_pos_ids = digits[ofs + 1]
-        self.select_quat_ids = digits[ofs + 2]
+        # --- Overlay from episode_id ---
+        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
 
-        # --- Optional per-env random pose (V0.1 generic shims only) ---
-        if self.PER_ENV_RAND_POSE and obj_set not in ("fixed", "rand_ood"):
+        # --- Position & quaternion ---
+        self.select_pos_ids = (episode_id // l2) % l1
+        self.select_quat_ids = episode_id % l2
+
+        # Per-env random pose for non-fixed obj_set (matching AutoRL exactly)
+        if obj_set != "fixed":
             if obj_set != "rand_8":
-                rand_id = torch.randint(low=0, high=l1 * l2, size=(b,), device=self.device)
+                rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             else:
-                rand_id = torch.randint(low=0, high=l1 * l2, size=(b // 8,), device=self.device)
+                rand_id = torch.randint(low=0, high=ltt, size=(b // 8,), device=self.device)
                 rand_id = rand_id.repeat(8)
-            self.select_pos_ids = rand_id // l2
+            rand_id = rand_id.reshape(b)
+            self.select_pos_ids = (rand_id // l2) % l1
             self.select_quat_ids = rand_id % l2
 
     def _slot(self, logical_idx):
@@ -1081,24 +1045,22 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
 
 _NxM_PRESETS: dict = {
     # (N, M) -> dict of class attrs
-    # PER_ENV_RAND_POSE: True for the 6 generic shapes (every env gets a
-    # different per-env random pose sample); False for the 2 legacy *special*
-    # shapes that broadcast a single shared-episode_id pose to all envs.
+    # Object/plate selection: FIXED from DEFAULT_*_INDICES (1-based).
+    # Matches AutoRL's TwoObjectTwoReceptacle design for all shapes.
+    # Position/quaternion: per-env random when obj_set != "fixed".
     (2, 1): dict(
         POSE_PRESET="TwoObjectOneReceptacle",
         POSE_PRESET_OOD="",
-        SLOT_ORDER=[0, 2, 1],  # [carrot1, carrot2, plate] -> preset [0, 2, 1]
+        SLOT_ORDER=[0, 2, 1],
         DEFAULT_OBJ_INDICES=[7, 2],
         DEFAULT_PLATE_INDICES=[1],
-        PER_ENV_RAND_POSE=False,
     ),
     (1, 2): dict(
         POSE_PRESET="OneObjectTwoReceptacle",
         POSE_PRESET_OOD="",
-        SLOT_ORDER=None,  # identity: [carrot, plate1, plate2] -> preset [0, 1, 2]
+        SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7],
         DEFAULT_PLATE_INDICES=[1, 2],
-        PER_ENV_RAND_POSE=False,
     ),
     (2, 2): dict(
         POSE_PRESET="TwoObjectTwoReceptacle",
@@ -1106,7 +1068,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7, 2],
         DEFAULT_PLATE_INDICES=[1, 2],
-        PER_ENV_RAND_POSE=True,
     ),
     (3, 3): dict(
         POSE_PRESET="ThreeObjectThreeReceptacle",
@@ -1114,7 +1075,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7, 2, 10],
         DEFAULT_PLATE_INDICES=[1, 2, 3],
-        PER_ENV_RAND_POSE=True,
     ),
     (3, 1): dict(
         POSE_PRESET="ThreeObjectOneReceptacle",
@@ -1122,7 +1082,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7, 2, 10],
         DEFAULT_PLATE_INDICES=[1],
-        PER_ENV_RAND_POSE=True,
     ),
     (1, 3): dict(
         POSE_PRESET="OneObjectThreeReceptacle",
@@ -1130,7 +1089,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7],
         DEFAULT_PLATE_INDICES=[1, 2, 3],
-        PER_ENV_RAND_POSE=True,
     ),
     (3, 2): dict(
         POSE_PRESET="ThreeObjectTwoReceptacle",
@@ -1138,7 +1096,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7, 2, 10],
         DEFAULT_PLATE_INDICES=[1, 2],
-        PER_ENV_RAND_POSE=True,
     ),
     (2, 3): dict(
         POSE_PRESET="TwoObjectThreeReceptacle",
@@ -1146,7 +1103,6 @@ _NxM_PRESETS: dict = {
         SLOT_ORDER=None,
         DEFAULT_OBJ_INDICES=[7, 2],
         DEFAULT_PLATE_INDICES=[1, 2, 3],
-        PER_ENV_RAND_POSE=True,
     ),
 }
 
@@ -1178,5 +1134,6 @@ class PickPlaceNxM(GenericNxMPickPlace):
         self.SLOT_ORDER = spec["SLOT_ORDER"]
         self.DEFAULT_OBJ_INDICES = spec["DEFAULT_OBJ_INDICES"]
         self.DEFAULT_PLATE_INDICES = spec["DEFAULT_PLATE_INDICES"]
-        self.PER_ENV_RAND_POSE = spec["PER_ENV_RAND_POSE"]
+        # PER_ENV_RAND_POSE removed — all shapes now use per-env random pose
+        # when obj_set != "fixed", matching AutoRL TwoObjectTwoReceptacle.
         super().__init__(*args, **kwargs)

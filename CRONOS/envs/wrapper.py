@@ -37,10 +37,16 @@ class CronosWrapper:
         self.rand_episode_id = random.randint(0, 1000)
         
         # AutoRL compatibility: Explicitly seed the env with an initial reset.
-        # Pass obj_set so the task pool built from this reset matches training.
+        # Pass obj_set + obj/plate indices so the task pool matches training.
         options = {
             "obj_set": self.args.obj_set,
             "episode_id": torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device),
+            "obj1_index": self.args.obj1_index,
+            "obj2_index": self.args.obj2_index,
+            "obj3_index": self.args.obj3_index,
+            "plate1_index": self.args.plate1_index,
+            "plate2_index": self.args.plate2_index,
+            "plate3_index": self.args.plate3_index,
         }
         self.env.reset(seed=[self.args.seed * 1000 + i for i in range(self.args.num_envs)], options=options)
         
@@ -108,6 +114,12 @@ class CronosWrapper:
         """Unified reset matching AutoRL: env.reset → set_task → zero reward_old."""
         options = {
             "obj_set": obj_set_override if obj_set_override else self.args.obj_set,
+            "obj1_index": self.args.obj1_index,
+            "obj2_index": self.args.obj2_index,
+            "obj3_index": self.args.obj3_index,
+            "plate1_index": self.args.plate1_index,
+            "plate2_index": self.args.plate2_index,
+            "plate3_index": self.args.plate3_index,
         }
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
