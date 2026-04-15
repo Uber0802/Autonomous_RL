@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+
+# Model weights (too large for GitHub — download via HuggingFace)
+*.safetensors
+*.pt
+*.bin
+*.ckpt
+*.pth
+
+# HuggingFace cache
+.cache/
+
+# Runtime outputs
+wandb/
+*.log
+*.mp4
+
+# Misc
+.DS_Store
+*.swp
+*.swo
