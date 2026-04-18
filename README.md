@@ -266,6 +266,73 @@ Add `--record_video` to save per-episode video alongside the eval report.
 
 ---
 
+## Checkpoint Testing (`test.sh`)
+
+`test.sh` runs twelve reproducible configs — six for OpenVLA and six for UniVLA, each across two horizons (T80, T320) split into three segments (a/b/c) — so checkpoint resumption can be verified at every stage. All commands run from `CRONOS/`.
+
+```
+Usage: bash test.sh [MODE] [SEED] [CUDA]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `MODE` | `t80a` | See mode table below |
+| `SEED` | `0` | Random seed |
+| `CUDA` | `0` | GPU index (`CUDA_VISIBLE_DEVICES`) |
+
+#### Modes and step counts
+
+| Backbone | Horizon | Mode | Episodes | Steps (this) | Steps (cumul.) |
+|---|---|---|---|---|---|
+| OpenVLA | T80 | `t80a` | 128 | 655,360 | 655,360 |
+| OpenVLA | T80 | `t80b` | 128 | 655,360 | 1,310,720 |
+| OpenVLA | T80 | `t80c` | 320 | 1,638,400 | 2,949,120 |
+| OpenVLA | T320 | `t320a` | 32 | 655,360 | 655,360 |
+| OpenVLA | T320 | `t320b` | 32 | 655,360 | 1,310,720 |
+| OpenVLA | T320 | `t320c` | 80 | 1,638,400 | 2,949,120 |
+| UniVLA | T80 | `univla_t80a` | 128 | 655,360 | 655,360 |
+| UniVLA | T80 | `univla_t80b` | 128 | 655,360 | 1,310,720 |
+| UniVLA | T80 | `univla_t80c` | 320 | 1,638,400 | 2,949,120 |
+| UniVLA | T320 | `univla_t320a` | 32 | 655,360 | 655,360 |
+| UniVLA | T320 | `univla_t320b` | 32 | 655,360 | 1,310,720 |
+| UniVLA | T320 | `univla_t320c` | 80 | 1,638,400 | 2,949,120 |
+
+#### Running a full sequence
+
+**1. Run the first segment (no checkpoint needed):**
+
+```bash
+cd CRONOS
+bash test.sh t320a        0 0   # OpenVLA T320, seed 0, GPU 0
+bash test.sh univla_t320a 0 0   # UniVLA  T320, seed 0, GPU 0
+```
+
+**2. Resume from the previous segment's final checkpoint:**
+
+OpenVLA T320:
+```bash
+CKPT_T320=runs/CRONOS-V0.2-T320-seed0/glob/episode_0032 \
+    bash test.sh t320b 0 0
+
+CKPT_T320=runs/CRONOS-V0.2-T320-seed0/glob/episode_0064 \
+    bash test.sh t320c 0 0
+```
+
+UniVLA T320:
+```bash
+CKPT_UNIVLA_T320=runs/CRONOS-V0.2-UniVLA-T320-seed0/glob/episode_0032 \
+    bash test.sh univla_t320b 0 0
+
+CKPT_UNIVLA_T320=runs/CRONOS-V0.2-UniVLA-T320-seed0/glob/episode_0064 \
+    bash test.sh univla_t320c 0 0
+```
+
+The same pattern applies to T80 horizons using `CKPT_T80` / `CKPT_UNIVLA_T80` with checkpoints at `episode_0128` and `episode_0256`.
+
+> **Note:** Running a `*b` or `*c` segment without the matching `CKPT_*` variable set will print an error and exit before launching any training.
+
+---
+
 ## Key CLI Flags
 
 | Flag | Default | Description |
