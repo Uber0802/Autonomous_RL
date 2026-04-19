@@ -1,0 +1,16 @@
+# Fixed task assignment — only 2 of the 4 possible tasks, pinned (no rotation).
+# Demonstrates custom task_sequence with fewer than NxM combinations.
+cronos_version: V0.2
+task_order: sequential
+num_envs: 64
+
+groups:
+  - name: "subset_2tasks"
+    obj: [7, 2]              # obj1=ketchup bottle, obj2=kitchen shovel
+    recep: [1, 2]            # recep1=yellow plate, recep2=cloth
+    task_sequence:            # only 2 tasks (skip cross-pairs)
+      - "put obj1 on recep1"  # put ketchup bottle on yellow_plate
+      - "put obj2 on recep2"  # put kitchen shovel on cloth
+    eval_tasks:               # eval only these 2
+      - "put obj1 on recep1"
+      - "put obj2 on recep2"

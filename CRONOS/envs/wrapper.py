@@ -30,6 +30,11 @@ class CronosWrapper:
         if args.env_id == "PickPlaceNxM-v1":
             env_config["N"] = getattr(args, "env_n", 2)
             env_config["M"] = getattr(args, "env_m", 1)
+        # V0.2 M4: pass named scene spec to env constructor
+        scene_name = getattr(args, "scene", "")
+        if scene_name:
+            from .scenes import get_scene
+            env_config["scene_spec"] = get_scene(scene_name)
         self.env = gym.make(**env_config)
         
         import random

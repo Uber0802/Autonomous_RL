@@ -1125,8 +1125,6 @@ class PickPlaceNxM(GenericNxMPickPlace):
                 f"Supported shapes: {sorted(_NxM_PRESETS.keys())}"
             )
         spec = _NxM_PRESETS[(N, M)]
-        # Bind the per-shape attributes to the *instance* so this single
-        # class can multiplex across shapes within one process.
         self.NUM_OBJECTS = N
         self.NUM_RECEPTACLES = M
         self.POSE_PRESET = spec["POSE_PRESET"]
@@ -1134,6 +1132,8 @@ class PickPlaceNxM(GenericNxMPickPlace):
         self.SLOT_ORDER = spec["SLOT_ORDER"]
         self.DEFAULT_OBJ_INDICES = spec["DEFAULT_OBJ_INDICES"]
         self.DEFAULT_PLATE_INDICES = spec["DEFAULT_PLATE_INDICES"]
-        # PER_ENV_RAND_POSE removed — all shapes now use per-env random pose
-        # when obj_set != "fixed", matching AutoRL TwoObjectTwoReceptacle.
+        # V0.2 M4: extract scene_spec before it hits ManiSkill's parent chain
+        # (which rejects unknown kwargs). Store on self so BaseEnv.__init__
+        # can read it via getattr(self, '_scene_spec', None).
+        self._scene_spec_arg = kwargs.pop("scene_spec", None)
         super().__init__(*args, **kwargs)

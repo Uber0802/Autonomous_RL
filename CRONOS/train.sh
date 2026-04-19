@@ -5,7 +5,7 @@
 set -e
 
 PYTHON=/mnt/home/ChengDian/miniconda3/envs/cronos_env/bin/python
-COMMON="CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+COMMON="CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 ENV_ARGS="--env_id PickPlaceNxM-v1 --env_n 2 --env_m 2 --vla_path openvla/openvla-7b --vla_unnorm_key bridge_orig"
 
 MODE=${1:-80}

@@ -176,19 +176,30 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         self.target_obj_name = obj_names[1]
         self.xyz_configs = xyz_configs
         self.quat_configs = quat_configs
-        if self.scene_setting == "flat_table":
+
+        # V0.2 M4: scene_spec is popped from kwargs by PickPlaceNxM and stored
+        # on self._scene_spec_arg before ManiSkill's parent chain runs.
+        self._scene_spec = getattr(self, '_scene_spec_arg', None)
+        if scene_spec is not None:
+            self.scene_setting = scene_spec.scene_setting
             self.rgb_overlay_paths = {
-                "3rd_view_camera": str(
-                    BRIDGE_DATASET_ASSET_PATH / "real_inpainting/bridge_real_eval_1.png"
-                )
-            }
+                "3rd_view_camera": scene_spec.overlay_path
+            } if scene_spec.overlay_path else {}
+        if self.scene_setting == "flat_table":
+            if not hasattr(self, 'rgb_overlay_paths') or not self.rgb_overlay_paths:
+                self.rgb_overlay_paths = {
+                    "3rd_view_camera": str(
+                        BRIDGE_DATASET_ASSET_PATH / "real_inpainting/bridge_real_eval_1.png"
+                    )
+                }
             robot_cls = WidowX250SBridgeDatasetFlatTable
         elif self.scene_setting == "sink":
-            self.rgb_overlay_paths = {
-                "3rd_view_camera": str(
-                    BRIDGE_DATASET_ASSET_PATH / "real_inpainting/bridge_sink.png"
-                )
-            }
+            if not hasattr(self, 'rgb_overlay_paths') or not self.rgb_overlay_paths:
+                self.rgb_overlay_paths = {
+                    "3rd_view_camera": str(
+                        BRIDGE_DATASET_ASSET_PATH / "real_inpainting/bridge_sink.png"
+                    )
+                }
             robot_cls = WidowX250SBridgeDatasetSink
 
         self.model_db: Dict[str, Dict] = io_utils.load_json(
@@ -261,16 +272,26 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         return actor
 
     def _load_lighting(self, options: dict):
-        self.scene.set_ambient_light([0.3, 0.3, 0.3])
-        self.scene.add_directional_light(
-            [0, 0, -1],
-            [2.2, 2.2, 2.2],
-            shadow=False,
-            shadow_scale=5,
-            shadow_map_size=2048,
-        )
-        self.scene.add_directional_light([-1, -0.5, -1], [0.7, 0.7, 0.7])
-        self.scene.add_directional_light([1, 1, -1], [0.7, 0.7, 0.7])
+        # V0.2 M4: apply SceneSpec lighting if provided, else default
+        spec = self._scene_spec
+        if spec is not None:
+            self.scene.set_ambient_light(list(spec.ambient))
+            for dl in spec.directional_lights:
+                kwargs = {"shadow": dl.shadow}
+                if dl.shadow:
+                    kwargs.update(shadow_scale=5, shadow_map_size=2048)
+                self.scene.add_directional_light(list(dl.direction), list(dl.color), **kwargs)
+        else:
+            self.scene.set_ambient_light([0.3, 0.3, 0.3])
+            self.scene.add_directional_light(
+                [0, 0, -1],
+                [2.2, 2.2, 2.2],
+                shadow=False,
+                shadow_scale=5,
+                shadow_map_size=2048,
+            )
+            self.scene.add_directional_light([-1, -0.5, -1], [0.7, 0.7, 0.7])
+            self.scene.add_directional_light([1, 1, -1], [0.7, 0.7, 0.7])
 
     def _load_agent(self, options: dict):
         super()._load_agent(

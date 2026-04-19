@@ -1,0 +1,400 @@
+"""CRONOS V0.2 — YAML experiment config loader.
+
+A single YAML file fully describes an experiment: per-group object/receptacle
+indices, task sequences with symbolic refs, eval tasks, and global task ordering.
+
+Three task ordering modes:
+- ``sequential``:       follow task_sequence in order, repeat when exhausted
+- ``pure_random``:      sample randomly each segment (≠ previous), weighted by
+                        frequency in task_sequence
+- ``sequence_random``:  random permutation covering all unique tasks, then reshuffle
+
+Example config::
+
+    cronos_version: V0.2
+    task_order: sequential
+    num_envs: 64
+
+    groups:
+      - name: "default_scene"
+        obj: [7, 2]
+        recep: [1, 2]
+        task_sequence:
+          - "put obj1 on recep1"
+          - "put obj1 on recep2"
+          - "put obj2 on recep1"
+          - "put obj2 on recep2"
+        eval_tasks:
+          - "put obj1 on recep1"
+          - "put obj2 on recep2"
+"""
+
+from __future__ import annotations
+
+import re
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Union
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+VALID_TASK_ORDERS = {"sequential", "pure_random", "sequence_random"}
+
+_KNOWN_TOP_KEYS = {
+    "cronos_version",
+    "task_order",
+    "num_envs",
+    "scene",
+    "groups",
+    # Legacy V0.2 flat keys (still accepted for backward compat / CLI-only mode)
+    "env_n", "env_m",
+    "obj1_index", "obj2_index", "obj3_index",
+    "plate1_index", "plate2_index", "plate3_index",
+    "task_filter",
+}
+
+_KNOWN_GROUP_KEYS = {
+    "name", "obj", "recep", "table", "background",
+    "task_sequence", "eval_tasks",
+    # Legacy single-task format
+    "task",
+}
+
+_SYMBOLIC_RE = re.compile(r'\b(obj\d+|recep\d+)\b')
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GroupSpec:
+    """One env group from the YAML ``groups:`` list."""
+    name: str = ""
+    obj: List[int] = field(default_factory=list)          # 1-based object indices
+    recep: List[int] = field(default_factory=list)        # 1-based receptacle indices
+    table: str = "flat_table"
+    background: str = "default"
+    task_sequence: List[str] = field(default_factory=list) # symbolic or resolved
+    eval_tasks: List[str] = field(default_factory=list)    # symbolic or resolved
+
+
+@dataclass
+class CronosConfig:
+    """Parsed + validated experiment config."""
+    task_order: str = "sequential"
+    num_envs: Optional[int] = None
+    scene: Optional[str] = None
+    groups: List[GroupSpec] = field(default_factory=list)
+
+    # Legacy fields (populated when using old flat format or CLI-only)
+    env_n: Optional[int] = None
+    env_m: Optional[int] = None
+    obj1_index: Optional[int] = None
+    obj2_index: Optional[int] = None
+    obj3_index: Optional[int] = None
+    plate1_index: Optional[int] = None
+    plate2_index: Optional[int] = None
+    plate3_index: Optional[int] = None
+    task_filter: Optional[List[Union[int, str]]] = None
+
+
+# ---------------------------------------------------------------------------
+# Symbolic task resolution
+# ---------------------------------------------------------------------------
+
+def resolve_symbolic_task(
+    task_str: str,
+    obj_names: Dict[str, str],
+    recep_names: Dict[str, str],
+) -> str:
+    """Replace ``obj1``, ``recep2`` etc. with real object/receptacle names."""
+    result = task_str
+    for key in sorted(obj_names.keys(), key=len, reverse=True):
+        result = result.replace(key, obj_names[key])
+    for key in sorted(recep_names.keys(), key=len, reverse=True):
+        result = result.replace(key, recep_names[key])
+    return result
+
+
+def has_symbolic_refs(s: str) -> bool:
+    """Check if a string contains symbolic refs like obj1, recep2."""
+    return bool(_SYMBOLIC_RE.search(s))
+
+
+def build_obj_recep_name_maps(obj_indices: List[int], recep_indices: List[int],
+                               model_db_carrot: dict, model_db_plate: dict
+                               ) -> tuple:
+    """Build {obj1: name, ...} and {recep1: name, ...} from indices + model_db."""
+    obj_names = {}
+    for i, idx_1based in enumerate(obj_indices):
+        idx_0 = idx_1based - 1
+        keys = list(model_db_carrot.keys())
+        if 0 <= idx_0 < len(keys):
+            obj_names[f"obj{i+1}"] = model_db_carrot[keys[idx_0]]["name"]
+    recep_names = {}
+    for i, idx_1based in enumerate(recep_indices):
+        idx_0 = idx_1based - 1
+        keys = list(model_db_plate.keys())
+        if 0 <= idx_0 < len(keys):
+            recep_names[f"recep{i+1}"] = model_db_plate[keys[idx_0]]["name"]
+    return obj_names, recep_names
+
+
+def auto_generate_task_sequence(n_obj: int, n_recep: int) -> List[str]:
+    """Generate all NxM task combinations in canonical order."""
+    tasks = []
+    for i in range(n_obj):
+        for j in range(n_recep):
+            tasks.append(f"put obj{i+1} on recep{j+1}")
+    return tasks
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_config(config: CronosConfig, total_segments: Optional[int] = None):
+    """Run all validation checks. Raises ValueError on failure."""
+    groups = config.groups
+    num_envs = config.num_envs
+
+    # V1: at least one group
+    if len(groups) == 0:
+        raise ValueError("V1: Config must have at least one group")
+
+    # V19: valid task_order
+    if config.task_order not in VALID_TASK_ORDERS:
+        raise ValueError(
+            f"V19: Unknown task_order '{config.task_order}'. "
+            f"Must be one of: {sorted(VALID_TASK_ORDERS)}")
+
+    if num_envs is not None:
+        n_groups = len(groups)
+        # V2: enough envs
+        if num_envs < n_groups:
+            raise ValueError(
+                f"V2: num_envs ({num_envs}) < groups ({n_groups}): "
+                f"not enough envs to cover all groups")
+        # V3: divisible
+        if num_envs % n_groups != 0:
+            suggest = ((num_envs // n_groups) + 1) * n_groups
+            raise ValueError(
+                f"V3: num_envs ({num_envs}) not divisible by groups ({n_groups}). "
+                f"Use num_envs={suggest}")
+
+    for i, g in enumerate(groups):
+        # V4/V5: obj and recep non-empty
+        if len(g.obj) == 0:
+            raise ValueError(f"V4: groups[{i}] ('{g.name}') must have at least one obj index")
+        if len(g.recep) == 0:
+            raise ValueError(f"V5: groups[{i}] ('{g.name}') must have at least one recep index")
+
+        # V6: indices >= 1
+        for j, v in enumerate(g.obj):
+            if v < 1:
+                raise ValueError(f"V6: groups[{i}].obj[{j}] = {v}: indices must be >= 1 (1-based)")
+        for j, v in enumerate(g.recep):
+            if v < 1:
+                raise ValueError(f"V6: groups[{i}].recep[{j}] = {v}: indices must be >= 1 (1-based)")
+
+        # V7/V8: no duplicates
+        if len(g.obj) != len(set(g.obj)):
+            raise ValueError(f"V7: groups[{i}].obj has duplicate indices: {g.obj}")
+        if len(g.recep) != len(set(g.recep)):
+            raise ValueError(f"V8: groups[{i}].recep has duplicate indices: {g.recep}")
+
+        # V12: symbolic refs valid for group's N, M
+        n_obj, n_recep = len(g.obj), len(g.recep)
+        for t in g.task_sequence + g.eval_tasks:
+            for m in _SYMBOLIC_RE.finditer(t):
+                ref = m.group(0)
+                if ref.startswith("obj"):
+                    idx = int(ref[3:])
+                    if idx < 1 or idx > n_obj:
+                        raise ValueError(
+                            f"V12: groups[{i}] task '{t}' references {ref} "
+                            f"but group only has {n_obj} objects (obj1..obj{n_obj})")
+                elif ref.startswith("recep"):
+                    idx = int(ref[5:])
+                    if idx < 1 or idx > n_recep:
+                        raise ValueError(
+                            f"V12: groups[{i}] task '{t}' references {ref} "
+                            f"but group only has {n_recep} receptacles (recep1..recep{n_recep})")
+
+        # V13: task format
+        for t in g.task_sequence + g.eval_tasks:
+            if not re.match(r'^put .+ on .+$', t):
+                raise ValueError(
+                    f"V13: groups[{i}] task '{t}' doesn't match 'put ... on ...' format")
+
+        # V15: pure_random with pool size 1
+        if config.task_order == "pure_random":
+            unique_tasks = set(g.task_sequence) if g.task_sequence else set()
+            if len(unique_tasks) == 1:
+                warnings.warn(
+                    f"V15: groups[{i}] ('{g.name}') has only 1 unique task — "
+                    f"pure_random has no effect")
+
+    # V14: sequence length divides total_segments
+    if total_segments is not None and config.task_order in ("sequential", "sequence_random"):
+        for i, g in enumerate(groups):
+            seq_len = len(g.task_sequence)
+            if seq_len > 0:
+                pool_len = seq_len if config.task_order == "sequential" else len(set(g.task_sequence))
+                if total_segments % pool_len != 0:
+                    divisors = [d for d in range(1, total_segments + 1) if total_segments % d == 0]
+                    raise ValueError(
+                        f"V14: groups[{i}] task pool size {pool_len} does not divide "
+                        f"total_segments {total_segments}. Valid divisors: {divisors}")
+
+    # V16: sequential mode requires equal sequence lengths across groups
+    if config.task_order == "sequential" and len(groups) > 1:
+        lengths = [len(g.task_sequence) for g in groups if g.task_sequence]
+        if lengths and len(set(lengths)) > 1:
+            raise ValueError(
+                f"V16: sequential mode requires all groups to have equal "
+                f"task_sequence length. Got: {lengths}")
+
+    # V17: sequence_random requires equal unique pool sizes
+    if config.task_order == "sequence_random" and len(groups) > 1:
+        pool_sizes = [len(set(g.task_sequence)) for g in groups if g.task_sequence]
+        if pool_sizes and len(set(pool_sizes)) > 1:
+            raise ValueError(
+                f"V17: sequence_random requires equal unique pool sizes across groups. "
+                f"Got: {pool_sizes}")
+
+    # V20: max_reset warning (caller passes this if available)
+    # Handled externally in main.py since we don't have max_reset here.
+
+    # V21: groups + task_filter mutually exclusive
+    if groups and config.task_filter:
+        raise ValueError(
+            "V21: Config has both 'groups' and 'task_filter'. This is redundant — "
+            "groups define your tasks directly. Remove task_filter.")
+
+
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
+
+def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
+    """Load and validate a YAML experiment config.
+
+    Supports both the new per-group format and the legacy flat format.
+    """
+    if yaml is None:
+        raise ImportError("PyYAML is required for --config_path. pip install pyyaml")
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"Config must be a YAML mapping, got {type(raw).__name__}")
+
+    # Reject unknown top-level keys
+    unknown = set(raw.keys()) - _KNOWN_TOP_KEYS
+    if unknown:
+        raise ValueError(f"Unknown config keys: {unknown}. Valid: {sorted(_KNOWN_TOP_KEYS)}")
+
+    # Parse groups
+    groups = []
+    raw_groups = raw.get("groups", [])
+    for i, g in enumerate(raw_groups):
+        if not isinstance(g, dict):
+            raise ValueError(f"groups[{i}] must be a mapping, got {type(g).__name__}")
+
+        # Check for unknown group keys
+        g_unknown = set(g.keys()) - _KNOWN_GROUP_KEYS
+        if g_unknown:
+            raise ValueError(
+                f"groups[{i}] has unknown keys: {g_unknown}. "
+                f"Valid: {sorted(_KNOWN_GROUP_KEYS)}")
+
+        # Legacy format: single "task" string → convert to new format
+        if "task" in g and "task_sequence" not in g:
+            # Old format: groups: [{task: "put obj1 on recep1"}, ...]
+            # Infer obj/recep from global config or defaults
+            obj = g.get("obj", [raw.get("obj1_index", 7), raw.get("obj2_index", 2)])
+            recep = g.get("recep", [raw.get("plate1_index", 1), raw.get("plate2_index", 2)])
+            groups.append(GroupSpec(
+                name=g.get("name", f"group_{i}"),
+                obj=obj,
+                recep=recep,
+                table=g.get("table", "flat_table"),
+                background=g.get("background", "default"),
+                task_sequence=[g["task"]],
+                eval_tasks=g.get("eval_tasks", [g["task"]]),
+            ))
+            continue
+
+        # New format: per-group obj, recep, task_sequence
+        obj = g.get("obj", [])
+        recep = g.get("recep", [])
+
+        task_sequence = g.get("task_sequence", [])
+        if not task_sequence and obj and recep:
+            # Auto-generate all NxM combinations
+            task_sequence = auto_generate_task_sequence(len(obj), len(recep))
+
+        eval_tasks = g.get("eval_tasks", [])
+        if not eval_tasks:
+            # Default: eval all unique tasks in the sequence
+            seen = set()
+            for t in task_sequence:
+                if t not in seen:
+                    eval_tasks.append(t)
+                    seen.add(t)
+
+        groups.append(GroupSpec(
+            name=g.get("name", f"group_{i}"),
+            obj=obj,
+            recep=recep,
+            table=g.get("table", "flat_table"),
+            background=g.get("background", "default"),
+            task_sequence=task_sequence,
+            eval_tasks=eval_tasks,
+        ))
+
+    # Parse task_filter (CLI-only mode, no groups)
+    tf_raw = raw.get("task_filter")
+    task_filter = None
+    if tf_raw is not None:
+        if not isinstance(tf_raw, list):
+            raise ValueError(f"task_filter must be a list, got {type(tf_raw).__name__}")
+        task_filter = tf_raw
+
+    config = CronosConfig(
+        task_order=raw.get("task_order", "sequential"),
+        num_envs=raw.get("num_envs"),
+        scene=raw.get("scene"),
+        groups=groups,
+        # Legacy
+        env_n=raw.get("env_n"),
+        env_m=raw.get("env_m"),
+        obj1_index=raw.get("obj1_index"),
+        obj2_index=raw.get("obj2_index"),
+        obj3_index=raw.get("obj3_index"),
+        plate1_index=raw.get("plate1_index"),
+        plate2_index=raw.get("plate2_index"),
+        plate3_index=raw.get("plate3_index"),
+        task_filter=task_filter,
+    )
+
+    # Run validation (total_segments not known at load time; caller validates V14 later)
+    validate_config(config)
+
+    return config

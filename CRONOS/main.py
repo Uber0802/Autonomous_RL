@@ -51,6 +51,7 @@ class Args:
     plate1_index: int = 1           # 1-based plate indices
     plate2_index: int = 2
     plate3_index: int = 3
+    scene: str = ""                 # V0.2 M4: named scene (empty = default lighting/overlay)
 
     # --- Training lengths ---
     segment_len: int = 80           # ManiSkill horizon — one robot execution segment
@@ -58,15 +59,21 @@ class Args:
     task_len: int = 80              # steps between task switches (usually = segment_len)
     ppo_update_len: int = 160       # steps accumulated before one PPO update
 
-    # --- Stopping conditions ---
-    max_episodes: int = 32
-    max_steps: int = 0              # 0 = derive from max_episodes
-    max_reset: int = 8192
+    # --- Stopping conditions (all RELATIVE to this run, not cumulative) ---
+    max_episodes: int = 32          # how many episodes to run in THIS invocation
+    max_steps: int = 0              # env-step budget for THIS run; 0 = derive from max_episodes
+    max_reset: int = 8192           # reset budget for THIS run; added to prior resets from checkpoint
+
+    # --- Task control (V0.2 M3) ---
+    config_path: str = ""           # YAML experiment config (overrides below when set)
+    task_order: str = "sequential"  # sequential | pure_random | sequence_random
+    task_filter: str = ""           # comma-separated indices or task strings; empty = all
 
     # --- Non-episodic reset ---
+    reset_mode: str = "per_episode"  # per_episode | none (V0.2 M5)
     reset_robot: bool = True
     reset_unsuitable: bool = False
-    unsuitable_detector: str = "low_z"  # V0.2 M2 Phase A: pluggable detector name (see envs/unsuitable.py)
+    unsuitable_detector: str = "low_z"
     enable_backward: bool = False
     backward_interval: int = 1
     num_groups: int = 0             # 0 = dynamically scale with available tasks
@@ -99,6 +106,7 @@ class Args:
     eval_sequential: bool = False
     eval_sequences: int = 5         # permutation sequences (1 training + N-1 random)
     vla_checkpoint_interval: int = 8
+    resume_from: str = ""           # V0.2 M5: path to checkpoint dir (auto-loads config + weights)
 
     # --- Logging ---
     wandb: bool = True
@@ -114,6 +122,18 @@ class CronosRunner:
     
     def __init__(self, args):
         self.args = args
+        # V0.2 M5: --resume_from auto-sets vla_load_path from checkpoint dir
+        if args.resume_from:
+            ckpt = Path(args.resume_from)
+            if not ckpt.exists():
+                raise FileNotFoundError(f"--resume_from path does not exist: {ckpt}")
+            args.vla_load_path = str(ckpt)
+            # Load scheduler state if available
+            sched_path = ckpt / "scheduler_state.json"
+            if sched_path.exists():
+                self._resume_scheduler_state = json.loads(sched_path.read_text())
+            print(f"[RESUME] from {ckpt}, vla_load_path set")
+
         self.iteration = args.resume_episode
         self._validate_args()
 
@@ -174,14 +194,91 @@ class CronosRunner:
         self.suite = TaskSuite()
         self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
 
+        # V0.2 M3: load YAML config if provided, merge with CLI overrides
+        yaml_config = None
+        if args.config_path:
+            from envs.config import load_cronos_config
+            yaml_config = load_cronos_config(args.config_path)
+            # YAML env params → Args (CLI overrides YAML)
+            for field_name in ("env_n", "env_m", "num_envs",
+                               "obj1_index", "obj2_index", "obj3_index",
+                               "plate1_index", "plate2_index", "plate3_index",
+                               "scene", "task_order"):
+                yaml_val = getattr(yaml_config, field_name, None)
+                if yaml_val is not None and not self._cli_provided(field_name):
+                    setattr(args, field_name, yaml_val)
+
+        # Parse task_filter from CLI string or YAML
+        task_filter = None
+        if args.task_filter:
+            parts = [p.strip() for p in args.task_filter.split(",")]
+            task_filter = []
+            for p in parts:
+                try:
+                    task_filter.append(int(p))
+                except ValueError:
+                    task_filter.append(p)
+        elif yaml_config and yaml_config.task_filter:
+            task_filter = yaml_config.task_filter
+
         # Get task pool from env (CronosWrapper.__init__ already performs a seeded reset)
         task_pool = self.env.get_task_pool()
-        self.scheduler = TaskScheduler(
-            task_pool=task_pool,
-            mode="sequential",
-            num_envs=args.num_envs
-        )
+
+        # V0.2: resolve symbolic refs (obj1, recep2, ...) in YAML groups + task_filter
+        from envs.config import resolve_symbolic_task, has_symbolic_refs
+        from envs.scheduler import GroupState
+        obj_names, recep_names = self._build_symbolic_map(task_pool)
+
+        # Build per-group GroupState from YAML or auto-generate from flat task_pool
+        group_states = []
+        if yaml_config and yaml_config.groups:
+            # New per-group format
+            for g in yaml_config.groups:
+                # Build per-group symbolic maps from this group's obj/recep lists
+                g_obj_names = {f"obj{i+1}": obj_names.get(f"obj{i+1}", f"obj{i+1}")
+                                for i in range(len(g.obj))}
+                g_recep_names = {f"recep{i+1}": recep_names.get(f"recep{i+1}", f"recep{i+1}")
+                                  for i in range(len(g.recep))}
+                # Resolve symbolic refs in task_sequence and eval_tasks
+                resolved_seq = [
+                    resolve_symbolic_task(t, g_obj_names, g_recep_names) if has_symbolic_refs(t) else t
+                    for t in g.task_sequence
+                ]
+                resolved_eval = [
+                    resolve_symbolic_task(t, g_obj_names, g_recep_names) if has_symbolic_refs(t) else t
+                    for t in g.eval_tasks
+                ]
+                group_states.append(GroupState.from_sequence(
+                    name=g.name,
+                    task_sequence=resolved_seq,
+                    eval_tasks=resolved_eval,
+                ))
+            self.scheduler = TaskScheduler(
+                group_states=group_states,
+                mode=args.task_order,
+                num_envs=args.num_envs,
+            )
+        else:
+            # Legacy flat path: use env-provided task pool with optional filter
+            if task_filter:
+                task_filter = [
+                    resolve_symbolic_task(t, obj_names, recep_names)
+                    if isinstance(t, str) and has_symbolic_refs(t) else t
+                    for t in task_filter
+                ]
+            self.scheduler = TaskScheduler.from_flat_pool(
+                task_pool=task_pool,
+                mode=args.task_order,
+                num_envs=args.num_envs,
+                task_filter=task_filter,
+            )
         self.env.set_scheduler(self.scheduler)
+
+        # V0.2 M5: restore scheduler cursor from checkpoint if available
+        if hasattr(self, '_resume_scheduler_state'):
+            self.scheduler.load_state(self._resume_scheduler_state)
+            print(f"[SCHEDULER] restored cursor from checkpoint")
+        print(f"[SCHEDULER] mode={args.task_order}, pool={self.scheduler.task_pool}")
 
         self.buffer = CronosReplayBuffer(args)
 
@@ -261,6 +358,26 @@ class CronosRunner:
             # Not in main thread — skip silently.
             pass
 
+    @staticmethod
+    def _build_symbolic_map(task_pool):
+        """Build obj1→name and recep1→name maps from the env's task pool.
+
+        The task pool has strings like "put ketchup bottle on yellow_plate".
+        We extract unique objects and receptacles in the order they first appear,
+        and assign them symbolic names obj1, obj2, ..., recep1, recep2, ...
+        """
+        from envs.scheduler import TaskScheduler
+        objs_seen, receps_seen = [], []
+        for task in task_pool:
+            obj, recep = TaskScheduler._extract_obj_recep(task)
+            if obj and obj not in objs_seen:
+                objs_seen.append(obj)
+            if recep and recep not in receps_seen:
+                receps_seen.append(recep)
+        obj_map = {f"obj{i+1}": name for i, name in enumerate(objs_seen)}
+        recep_map = {f"recep{i+1}": name for i, name in enumerate(receps_seen)}
+        return obj_map, recep_map
+
     def _restore_training_state(self, load_path):
         """Restores training progress from checkpoint (backward-compatible with old checkpoints)."""
         state_path = Path(load_path) / "training_state.pt"
@@ -272,10 +389,21 @@ class CronosRunner:
             self.iteration = self.args.resume_episode
             self.hard_reset_count = state.get("hard_reset_count", 0)
             self.soft_reset_count = state.get("soft_reset_count", 0)
-            prior_steps = self.args.resume_episode * self.args.episode_len * self.args.num_envs
+            # total_steps from checkpoint (correct even if episode_len changes between runs).
+            # Fallback: recompute from resume_episode × current episode_len (old checkpoints).
+            self.prior_total_steps = state.get(
+                "total_steps",
+                self.args.resume_episode * self.args.episode_len * self.args.num_envs
+            )
             prior_resets = self.hard_reset_count + self.soft_reset_count
             print(f"Checkpoint loaded: episode={self.args.resume_episode}, "
-                  f"total_steps={prior_steps}, total_resets={prior_resets}")
+                  f"total_steps={self.prior_total_steps}, total_resets={prior_resets}")
+
+    @staticmethod
+    def _cli_provided(field_name):
+        """Check if a CLI flag was explicitly passed (heuristic: present in sys.argv)."""
+        import sys
+        return any(f"--{field_name}" in arg for arg in sys.argv)
 
     def _validate_args(self):
         args = self.args
@@ -290,6 +418,11 @@ class CronosRunner:
             f"episode_len ({args.episode_len}) must be divisible by task_len ({args.task_len})"
         assert args.ppo_update_len % args.task_len == 0, \
             f"ppo_update_len ({args.ppo_update_len}) must be divisible by task_len ({args.task_len})"
+        assert args.reset_mode in ("per_episode", "none"), \
+            f"reset_mode must be 'per_episode' or 'none', got '{args.reset_mode}'"
+        if args.reset_mode == "none":
+            assert args.reset_unsuitable, \
+                "reset_mode=none requires reset_unsuitable=True (otherwise stuck envs never recover)"
 
     def _write_eval_report(self, header, results):
         """Appends eval results to the eval report file."""
@@ -391,7 +524,15 @@ class CronosRunner:
         """Executes a non-episodic rollout with instruction switching, partial resets,
         and mid-rollout PPO training every ppo_update_len steps (matching AutoRL)."""
         self.policy.prep_rollout()
-        obs, instruct, _ = self.env.reset()
+
+        # V0.2 M5: reset_mode=none skips env.reset() after the first episode.
+        # The sim continues from the live state; only reset_unsuitable + task
+        # switching drive state changes.
+        if self.args.reset_mode == "none" and hasattr(self, '_no_reset_obs'):
+            obs = self._no_reset_obs
+            instruct = self.env.get_language_instructions()
+        else:
+            obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
         print(f"[INIT] obs_mean: {obs.float().mean().item():.6f}, instruction: {instruct[0][:40]}...", flush=True)
 
@@ -490,6 +631,9 @@ class CronosRunner:
             results = self._run_ppo_update(ppo_log_path)
             all_train_results.extend(results)
 
+        # V0.2 M5: stash live obs for reset_mode=none so next episode skips env.reset
+        self._no_reset_obs = obs
+
         return all_train_results
 
     def train(self):
@@ -497,12 +641,26 @@ class CronosRunner:
         start_episode = self.args.resume_episode
         end_episode = start_episode + self.args.max_episodes
 
-        # Derive max_steps from absolute endpoint if not explicitly set
+        # All stopping conditions are RELATIVE (per-run budget).
+        # Convert to absolute ceilings by adding the checkpoint's prior totals.
+        # prior_total_steps is loaded from checkpoint (survives episode_len changes);
+        # falls back to recomputing if no checkpoint was loaded.
+        prior_steps = getattr(self, 'prior_total_steps',
+                              start_episode * self.args.episode_len * self.args.num_envs)
+        prior_resets = self.hard_reset_count + self.soft_reset_count
+
+        # max_steps: 0 = derive from max_episodes (default)
         if self.args.max_steps <= 0:
-            self.args.max_steps = end_episode * self.args.episode_len * self.args.num_envs
+            abs_max_steps = end_episode * self.args.episode_len * self.args.num_envs
+        else:
+            abs_max_steps = prior_steps + self.args.max_steps
+
+        # max_reset: relative budget for THIS run
+        abs_max_reset = prior_resets + self.args.max_reset
 
         print(f"Training {self.args.max_episodes} episodes ({start_episode + 1} → {end_episode}), "
-              f"max_steps={self.args.max_steps}, max_reset={self.args.max_reset}")
+              f"max_steps={abs_max_steps} (prior={prior_steps} + budget={self.args.max_steps}), "
+              f"max_reset={abs_max_reset} (prior={prior_resets} + budget={self.args.max_reset})")
 
         for iteration in range(start_episode, end_episode):
             self.iteration = iteration
@@ -510,8 +668,11 @@ class CronosRunner:
 
             # 1. Collect Experience + Mid-rollout PPO
             ppo_log_path = str(self.glob_dir / self.args.ppo_log)
-            total_steps = episode * self.args.episode_len * self.args.num_envs
-            episode_base_steps = iteration * self.args.episode_len * self.args.num_envs
+            # total_steps = prior (from checkpoint) + steps generated in THIS run.
+            # This is correct even when episode_len changes between runs.
+            episodes_this_run = iteration - start_episode
+            total_steps = prior_steps + (episodes_this_run + 1) * self.args.episode_len * self.args.num_envs
+            episode_base_steps = prior_steps + episodes_this_run * self.args.episode_len * self.args.num_envs
             episode_base_resets = self.hard_reset_count + self.soft_reset_count
             with open(ppo_log_path, "a") as f:
                 f.write(f"step : {total_steps}\n")
@@ -522,7 +683,9 @@ class CronosRunner:
                 episode_base_steps=episode_base_steps,
                 episode_base_resets=episode_base_resets,
             )
-            self.hard_reset_count += self.args.num_envs
+            # Only count hard resets when env.reset() actually fires
+            if self.args.reset_mode != "none" or iteration == start_episode:
+                self.hard_reset_count += self.args.num_envs
             total_resets = self.hard_reset_count + self.soft_reset_count
             print(f"Episode {episode}: total_steps={total_steps}, total_resets={total_resets}")
 
@@ -542,9 +705,9 @@ class CronosRunner:
                     "total_resets": total_resets,
                 }, step=total_steps)
 
-            # 4. Stopping conditions
-            exceed_step_limit = total_steps >= self.args.max_steps
-            exceed_reset_limit = total_resets > self.args.max_reset
+            # 4. Stopping conditions (checked against absolute ceilings)
+            exceed_step_limit = total_steps >= abs_max_steps
+            exceed_reset_limit = total_resets > abs_max_reset
             should_stop = exceed_step_limit or exceed_reset_limit
 
             # 5. In-Training Evaluation
@@ -553,7 +716,9 @@ class CronosRunner:
                            or should_stop)
 
             if should_eval:
-                task_pool = self.env.get_task_pool()
+                # V0.2: per-group eval tasks. Union all groups' eval_tasks (dedup
+                # preserving order) — all envs share the same physical objects
+                # so each unique task is evaluated once across all num_envs envs.
                 eval_log = {"episode": episode, "total_steps": total_steps, "total_resets": total_resets}
                 report_header = (
                     f"{'=' * 50}\n"
@@ -561,10 +726,22 @@ class CronosRunner:
                     f"{'=' * 50}\n"
                 )
 
-                # In-domain eval: same object set as training, randomized scene layout
+                # Collect per-(task, group) eval assignments, deduplicating task strings
+                # but preserving group attribution for CSV logging.
+                per_group_evals = self.scheduler.get_eval_tasks_per_group()
+                # Build ordered list of (group_name, task) pairs, deduplicating repeats
+                seen_tasks = set()
+                eval_pairs = []  # [(group_name, task), ...]
+                for g_name, g_eval_tasks in per_group_evals:
+                    for t in g_eval_tasks:
+                        if t not in seen_tasks:
+                            seen_tasks.add(t)
+                            eval_pairs.append((g_name, t))
+
+                # In-domain eval
                 print(f"Evaluating In-Domain at {total_steps}")
                 in_domain_results = []
-                for task_idx, task in enumerate(task_pool):
+                for task_idx, (group_name, task) in enumerate(eval_pairs):
                     obj, recep = TaskScheduler._extract_obj_recep(task)
                     sval_stats = self.eval(iteration, task_idx, self.args.obj_set, [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"in_domain_{obj}_{recep}")
                     scalars = self.recorder.log_eval(
@@ -572,6 +749,7 @@ class CronosRunner:
                         total_steps=total_steps,
                         total_resets=total_resets,
                         eval_kind="in_domain",
+                        group=group_name,
                         task=task,
                         scene="default",
                         n_envs=self.args.num_envs,
@@ -583,10 +761,10 @@ class CronosRunner:
                     in_domain_results.append((task, sval_stats))
                 eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
 
-                # Out-of-domain eval: different object set, novel scene layout
+                # Out-of-domain eval
                 print(f"Evaluating Out-of-Domain at {total_steps}")
                 ood_results = []
-                for task_idx, task in enumerate(task_pool):
+                for task_idx, (group_name, task) in enumerate(eval_pairs):
                     obj, recep = TaskScheduler._extract_obj_recep(task)
                     sval_stats = self.eval(iteration, task_idx, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"out_of_domain_{obj}_{recep}")
                     scalars = self.recorder.log_eval(
@@ -594,6 +772,7 @@ class CronosRunner:
                         total_steps=total_steps,
                         total_resets=total_resets,
                         eval_kind="out_of_domain",
+                        group=group_name,
                         task=task,
                         scene="default",
                         n_envs=self.args.num_envs,
@@ -614,9 +793,20 @@ class CronosRunner:
                 ckpt_path = self.glob_dir / f"episode_{episode:04d}"
                 self.policy.save(ckpt_path, extra_state={
                     "resume_episode": episode,
+                    "total_steps": total_steps,
                     "hard_reset_count": self.hard_reset_count,
                     "soft_reset_count": self.soft_reset_count,
                 })
+                # V0.2 M5: per-checkpoint config + scheduler state
+                import shutil, json as _json
+                src_cfg = self.glob_dir / "run_config.yaml"
+                if src_cfg.exists():
+                    shutil.copy2(src_cfg, ckpt_path / "run_config.yaml")
+                sched_state = self.scheduler.get_state()
+                sched_state["task_pool"] = self.scheduler.task_pool  # for human inspection
+                (ckpt_path / "scheduler_state.json").write_text(
+                    _json.dumps(sched_state, indent=2) + "\n"
+                )
                 print(f"Checkpoint saved at episode {episode} (steps={total_steps}): {ckpt_path}")
 
             self.buffer.reset()
@@ -624,12 +814,13 @@ class CronosRunner:
             # 7. Break if limit hit (after completing this episode fully)
             if should_stop:
                 reason = "step limit" if exceed_step_limit else "reset limit"
-                print(f"Stopping ({reason}): steps={total_steps}/{self.args.max_steps}, resets={total_resets}/{self.args.max_reset}")
+                print(f"Stopping ({reason}): steps={total_steps}/{abs_max_steps}, resets={total_resets}/{abs_max_reset}")
                 break
 
         # Final summary
         final_episode = self.iteration + 1
-        final_steps = final_episode * self.args.episode_len * self.args.num_envs
+        episodes_done = final_episode - start_episode
+        final_steps = prior_steps + episodes_done * self.args.episode_len * self.args.num_envs
         final_resets = self.hard_reset_count + self.soft_reset_count
         print(f"Training complete: episode={final_episode}, total_steps={final_steps}, total_resets={final_resets}")
 
@@ -650,7 +841,7 @@ def main():
     
     if args.eval_single:
         # Standard Single/All Task Evaluation
-        task_pool = runner.env.get_task_pool()
+        task_pool = runner.scheduler.task_pool
         results = []
         for task_idx, task in enumerate(task_pool):
             obj, recep = TaskScheduler._extract_obj_recep(task)
@@ -662,7 +853,7 @@ def main():
         # Multi-sequence permutation eval
         import random as _random
         runner.env.reset()
-        task_pool = runner.env.get_task_pool()
+        task_pool = runner.scheduler.task_pool
         print(f"Task Pool: {task_pool}")
 
         perms = list(itertools.permutations(task_pool))

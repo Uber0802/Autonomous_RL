@@ -1,0 +1,12 @@
+# Pure random task ordering — each segment samples a different task from the
+# pool (weighted by frequency in task_sequence, never same as previous).
+cronos_version: V0.2
+task_order: pure_random
+num_envs: 64
+
+groups:
+  - name: "random_2x2"
+    obj: [7, 2]              # obj1=ketchup bottle, obj2=kitchen shovel
+    recep: [1, 2]            # recep1=yellow plate, recep2=cloth
+    # task_sequence omitted → auto-generates all 4 NxM combinations
+    # Each task has equal weight (25%) since each appears once

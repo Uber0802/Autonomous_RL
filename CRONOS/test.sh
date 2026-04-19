@@ -1,28 +1,42 @@
 #!/bin/bash
-# test.sh - Six training configs for CRONOS (2 horizons x 3 segments) to exercise
-# resume_episode restoration across segment splits.
-# Usage: bash test.sh [t80a|t80b|t80c|t320a|t320b|t320c] [seed] [cuda]
+# test.sh - CRONOS training configs: 3 horizons × 3 segments × 5 reset modes.
 #
-# num_envs=64, PickPlaceNxM-v1 (N=2, M=2)
+# Usage: bash test.sh <mode> [seed] [cuda] [reset]
 #
-# ┌──────────┬──────────┬───────────────┬─────────────────┬──────────────────┐
-# │ Segment  │ Episodes │ Steps (this)  │ Steps (cumul.)  │ Resets (cumul.)  │
-# ├──────────┼──────────┼───────────────┼─────────────────┼──────────────────┤
-# │ T80  a   │  128     │   655,360     │     655,360     │   8,192          │
-# │ T80  b   │  128     │   655,360     │   1,310,720     │  16,384          │
-# │ T80  c   │  320     │ 1,638,400     │   2,949,120     │  36,864          │
-# ├──────────┼──────────┼───────────────┼─────────────────┼──────────────────┤
-# │ T320 a   │   32     │   655,360     │     655,360     │   2,048          │
-# │ T320 b   │   32     │   655,360     │   1,310,720     │   4,096          │
-# │ T320 c   │   80     │ 1,638,400     │   2,949,120     │   9,216          │
-# └──────────┴──────────┴───────────────┴─────────────────┴──────────────────┘
+#   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c
+#   seed:   random seed (default: 0)
+#   cuda:   GPU device (default: 3)
+#   reset:  normal|LSR|HSR|LSR+HSR|noep (default: normal)
 #
-# Before running *b or *c segments, set the corresponding CKPT_* env var to
-# the final checkpoint dir of the previous segment:
-#   CKPT_T80=.../glob/episode_0128   bash test.sh t80b  0 3
-#   CKPT_T80=.../glob/episode_0256   bash test.sh t80c  0 3
-#   CKPT_T320=.../glob/episode_0032  bash test.sh t320b 0 3
-#   CKPT_T320=.../glob/episode_0064  bash test.sh t320c 0 3
+# Reset modes:
+#   normal   — standard episodic training (hard reset every episode)
+#   LSR      — Low-level State Reset: reset_robot between segments
+#   HSR      — High-level State Reset: reset_unsuitable between segments
+#   LSR+HSR  — both reset_robot + reset_unsuitable
+#   noep     — LSR+HSR without episodic reset (reset_mode=none)
+#
+# Resume: set CKPT to the previous segment's checkpoint dir:
+#   CKPT=.../glob/episode_0128 bash test.sh t80b 0 3
+#   CKPT=.../glob/episode_0032 bash test.sh t320b 0 3 LSR
+#
+# All values are PER-RUN (relative). max_reset = episodes × 64 (exact for non-HSR,
+# ×5 headroom for HSR/LSR+HSR/noep which add soft resets).
+#
+# ┌──────────┬──────────┬───────────────┬─────────────────┬─────────────┬──────────────┐
+# │ Segment  │ Episodes │ Steps (this)  │ Steps (cumul.)  │ Resets (ex) │ Resets (HSR) │
+# ├──────────┼──────────┼───────────────┼─────────────────┼─────────────┼──────────────┤
+# │ T80  a   │  128     │   655,360     │     655,360     │   8,192     │  40,960      │
+# │ T80  b   │  128     │   655,360     │   1,310,720     │   8,192     │  40,960      │
+# │ T80  c   │  320     │ 1,638,400     │   2,949,120     │  20,480     │ 102,400      │
+# ├──────────┼──────────┼───────────────┼─────────────────┼─────────────┼──────────────┤
+# │ T320 a   │   32     │   655,360     │     655,360     │   2,048     │  10,240      │
+# │ T320 b   │   32     │   655,360     │   1,310,720     │   2,048     │  10,240      │
+# │ T320 c   │   80     │ 1,638,400     │   2,949,120     │   5,120     │  25,600      │
+# ├──────────┼──────────┼───────────────┼─────────────────┼─────────────┼──────────────┤
+# │ T1280 a  │    8     │   655,360     │     655,360     │     512     │   2,560      │
+# │ T1280 b  │    8     │   655,360     │   1,310,720     │     512     │   2,560      │
+# │ T1280 c  │   20     │ 1,638,400     │   2,949,120     │   1,280     │   6,400      │
+# └──────────┴──────────┴───────────────┴─────────────────┴─────────────┴──────────────┘
 
 set -e
 
@@ -30,107 +44,153 @@ ENV_ARGS="--env-id PickPlaceNxM-v1 --env-n 2 --env-m 2 --vla-path openvla/openvl
 
 MODE=${1:-t80a}
 SEED=${2:-0}
-CUDA=${3:-0}
+CUDA=${3:-3}
+RESET=${4:-normal}
 
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA}
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$PYTHONPATH:$(pwd)"
 
+# --- Horizon tag ---
 case $MODE in
-  t80a|t80b|t80c)   HORIZON_TAG="T80"  ;;
-  t320a|t320b|t320c) HORIZON_TAG="T320" ;;
+  t80a|t80b|t80c)       HORIZON_TAG="T80"   ;;
+  t320a|t320b|t320c)     HORIZON_TAG="T320"  ;;
+  t1280a|t1280b|t1280c)  HORIZON_TAG="T1280" ;;
+  *) echo "Unknown mode: $MODE"; echo "Usage: bash test.sh [t80a|...|t1280c] [seed] [cuda] [reset]"; exit 1 ;;
 esac
-RUN_TAG="CRONOS-V0.2-${HORIZON_TAG}-seed${SEED}"
-WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
-CKPT_T80="${CKPT_T80:-/PATH/TO/t80_prev/glob/episode_XXXX}"
-CKPT_T320="${CKPT_T320:-/PATH/TO/t320_prev/glob/episode_XXXX}"
 
-# max_reset covers full a+b+c cumulative resets with headroom for soft resets
-T80_MAX_RESET=40960      # 576 ep * 64 = 36,864 hard + headroom
-T320_MAX_RESET=16384     # 144 ep * 64 =  9,216 hard + headroom
+# --- Reset mode → CLI flags ---
+case $RESET in
+  normal)
+    RESET_TAG="normal"
+    RESET_ARGS=""
+    ;;
+  LSR)
+    RESET_TAG="LSR"
+    RESET_ARGS="--reset-robot"
+    ;;
+  HSR)
+    RESET_TAG="HSR"
+    RESET_ARGS="--reset-unsuitable --no-reset-robot"
+    ;;
+  LSR+HSR)
+    RESET_TAG="LSR+HSR"
+    RESET_ARGS="--reset-robot --reset-unsuitable"
+    ;;
+  noep)
+    RESET_TAG="noep"
+    RESET_ARGS="--reset-robot --reset-unsuitable --reset-mode none"
+    ;;
+  *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
+esac
+
+RUN_TAG="CRONOS-V0.2-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
+WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
+CKPT="${CKPT:-}"
+
+# --- Per-segment max_reset (relative, = max_episodes × num_envs) ---
+# HSR/LSR+HSR/noep modes add soft resets → use 5× headroom.
+_num_envs=64
+_hsr_multiplier=5
+
+case $MODE in
+  t80a|t80b) _max_ep=128 ;;
+  t80c)      _max_ep=320 ;;
+  t320a|t320b) _max_ep=32 ;;
+  t320c)     _max_ep=80 ;;
+  t1280a|t1280b) _max_ep=8 ;;
+  t1280c)    _max_ep=20 ;;
+esac
+
+_exact_resets=$(( _max_ep * _num_envs ))
+
+case $RESET in
+  HSR|LSR+HSR|noep) MAX_RESET=$(( _exact_resets * _hsr_multiplier )) ;;
+  *)                MAX_RESET=$_exact_resets ;;
+esac
 
 _require_ckpt() {
-  local ckpt="$1" label="$2"
-  if [ ! -d "$ckpt" ]; then
-    echo "${label} not found: $ckpt"
-    echo "Set ${label}=... or edit test.sh before running ${MODE}."
+  if [ -z "$CKPT" ] || [ ! -d "$CKPT" ]; then
+    echo "CKPT not found: '${CKPT:-<not set>}'"
+    echo "Set CKPT=.../glob/episode_XXXX before running ${MODE}."
     exit 1
   fi
 }
 
+COMMON="conda run -n cronos_env python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --num-envs 64 $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
+
 case $MODE in
-  # ── T80 ─────────────────────────────────────────────────────────────────
+  # ── T80 ───────────────────────────────────────────────────────────────
   t80a)
-    # 128 episodes | 0 → 655,360 steps
-    python main.py \
-        --name "$RUN_TAG" --seed $SEED $ENV_ARGS --num-envs 64 \
+    eval $COMMON \
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
-        --max-episodes 128 --max-reset $T80_MAX_RESET \
-        --eval-interval 4 --vla-checkpoint-interval 32 \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --max-episodes 128 --max-reset $MAX_RESET \
+        --eval-interval 4 --vla-checkpoint-interval 32
     ;;
   t80b)
-    # 128 episodes | 655,360 → 1,310,720 steps, resumes from t80a
-    _require_ckpt "$CKPT_T80" "CKPT_T80"
-    python main.py \
-        --name "${RUN_TAG}-b" --seed $SEED $ENV_ARGS --num-envs 64 \
+    _require_ckpt
+    eval $COMMON \
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
-        --max-episodes 128 --max-reset $T80_MAX_RESET \
+        --max-episodes 128 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 32 \
-        --vla-load-path "$CKPT_T80" \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --vla-load-path "$CKPT"
     ;;
   t80c)
-    # 320 episodes | 1,310,720 → 2,949,120 steps, resumes from t80b
-    _require_ckpt "$CKPT_T80" "CKPT_T80"
-    python main.py \
-        --name "${RUN_TAG}-c" --seed $SEED $ENV_ARGS --num-envs 64 \
+    _require_ckpt
+    eval $COMMON \
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
-        --max-episodes 320 --max-reset $T80_MAX_RESET \
+        --max-episodes 320 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 32 \
-        --vla-load-path "$CKPT_T80" \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --vla-load-path "$CKPT"
     ;;
 
-  # ── T320 ────────────────────────────────────────────────────────────────
+  # ── T320 ──────────────────────────────────────────────────────────────
   t320a)
-    # 32 episodes | 0 → 655,360 steps
-    python main.py \
-        --name "$RUN_TAG" --seed $SEED $ENV_ARGS --num-envs 64 \
+    eval $COMMON \
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
-        --max-episodes 32 --max-reset $T320_MAX_RESET \
-        --eval-interval 4 --vla-checkpoint-interval 8 \
-        --reset-robot \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --max-episodes 32 --max-reset $MAX_RESET \
+        --eval-interval 4 --vla-checkpoint-interval 8
     ;;
   t320b)
-    # 32 episodes | 655,360 → 1,310,720 steps, resumes from t320a
-    _require_ckpt "$CKPT_T320" "CKPT_T320"
-    python main.py \
-        --name "${RUN_TAG}-b" --seed $SEED $ENV_ARGS --num-envs 64 \
+    _require_ckpt
+    eval $COMMON \
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
-        --max-episodes 32 --max-reset $T320_MAX_RESET \
+        --max-episodes 32 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 8 \
-        --reset-robot \
-        --vla-load-path "$CKPT_T320" \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --vla-load-path "$CKPT"
     ;;
   t320c)
-    # 80 episodes | 1,310,720 → 2,949,120 steps, resumes from t320b
-    _require_ckpt "$CKPT_T320" "CKPT_T320"
-    python main.py \
-        --name "${RUN_TAG}-c" --seed $SEED $ENV_ARGS --num-envs 64 \
+    _require_ckpt
+    eval $COMMON \
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
-        --max-episodes 80 --max-reset $T320_MAX_RESET \
+        --max-episodes 80 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 8 \
-        --reset-robot \
-        --vla-load-path "$CKPT_T320" \
-        --record-video --wandb-dir "$WANDB_DIR"
+        --vla-load-path "$CKPT"
     ;;
 
-  *)
-    echo "Usage: bash test.sh [t80a|t80b|t80c|t320a|t320b|t320c] [seed] [cuda]"
-    exit 1
+  # ── T1280 ─────────────────────────────────────────────────────────────
+  t1280a)
+    eval $COMMON \
+        --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 8 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 2
+    ;;
+  t1280b)
+    _require_ckpt
+    eval $COMMON \
+        --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 8 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 2 \
+        --vla-load-path "$CKPT"
+    ;;
+  t1280c)
+    _require_ckpt
+    eval $COMMON \
+        --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 20 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 2 \
+        --vla-load-path "$CKPT"
     ;;
 esac

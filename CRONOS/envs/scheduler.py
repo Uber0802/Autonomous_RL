@@ -1,55 +1,278 @@
+"""CRONOS V0.2 — Task scheduler with per-group state.
+
+Supports three ordering modes:
+- ``sequential``:       cycle through task_sequence in order
+- ``pure_random``:      sample randomly each segment (≠ previous),
+                        weighted by frequency in task_sequence
+- ``sequence_random``:  random permutation of unique tasks, reshuffle when exhausted
+
+Each group maintains its own cursor, permutation, and last-task state via
+``GroupState``.  The scheduler returns flat ``(objects, receptacles)`` lists
+of length ``num_envs`` where each group's envs are contiguous.
+"""
+
+from __future__ import annotations
+
 import random
 import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Union
+
+
+# ---------------------------------------------------------------------------
+# Per-group state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GroupState:
+    """Mutable scheduling state for one group."""
+    name: str
+    task_sequence: List[str]          # resolved task strings (may have repeats)
+    eval_tasks: List[str]             # resolved eval task strings
+    task_pool: List[str]              # unique tasks (deduplicated from sequence)
+    weights: List[float]              # sampling weights for pure_random (from frequency)
+    cursor: int = 0                   # current position in sequence (sequential)
+    shuffle_perm: List[int] = field(default_factory=list)  # current permutation (sequence_random)
+    shuffle_cursor: int = 0           # position in current permutation
+    last_task_idx: int = -1           # previous task pool index (pure_random: avoid repeat)
+
+    @staticmethod
+    def from_sequence(name: str, task_sequence: List[str],
+                      eval_tasks: List[str]) -> "GroupState":
+        """Create a GroupState from a resolved task_sequence."""
+        # Build deduplicated pool preserving first-occurrence order
+        seen = set()
+        pool = []
+        for t in task_sequence:
+            if t not in seen:
+                seen.add(t)
+                pool.append(t)
+
+        # Compute weights from frequency in task_sequence
+        counts = {t: 0.0 for t in pool}
+        for t in task_sequence:
+            counts[t] += 1.0
+        total = sum(counts.values())
+        weights = [counts[t] / total for t in pool]
+
+        return GroupState(
+            name=name,
+            task_sequence=task_sequence,
+            eval_tasks=eval_tasks,
+            task_pool=pool,
+            weights=weights,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
 
 class TaskScheduler:
-    """Manages task sequencing for multi-task robotic manipulation."""
-    
-    def __init__(self, task_pool, mode="sequential", num_envs=64):
-        self.task_pool = task_pool  # List of task strings
+    """Per-group task scheduler supporting 3 ordering modes."""
+
+    def __init__(
+        self,
+        group_states: List[GroupState],
+        mode: str = "sequential",
+        num_envs: int = 64,
+    ):
+        self.group_states = group_states
         self.mode = mode
         self.num_envs = num_envs
+
+        # Flat task_pool for backward compat (union of all groups' pools)
+        seen = set()
+        self.task_pool: List[str] = []
+        for gs in group_states:
+            for t in gs.task_pool:
+                if t not in seen:
+                    seen.add(t)
+                    self.task_pool.append(t)
+
+        # Legacy compat
         self.current_task_idx = 0
-        
+
+    # ------------------------------------------------------------------
+    # Class methods for backward-compatible construction
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_flat_pool(
+        cls,
+        task_pool: List[str],
+        mode: str = "sequential",
+        num_envs: int = 64,
+        task_filter: Optional[List[Union[int, str]]] = None,
+    ) -> "TaskScheduler":
+        """Legacy constructor: single flat task pool → one group with all tasks."""
+        if task_filter is not None:
+            filtered = cls._apply_filter(task_pool, task_filter)
+        else:
+            filtered = list(task_pool)
+        if not filtered:
+            raise ValueError("task_pool is empty after applying task_filter")
+
+        gs = GroupState.from_sequence(
+            name="default",
+            task_sequence=filtered,
+            eval_tasks=filtered,
+        )
+        return cls(group_states=[gs], mode=mode, num_envs=num_envs)
+
     @staticmethod
-    def _extract_obj_recep(task_str):
+    def _apply_filter(pool: List[str], filt: List[Union[int, str]]) -> List[str]:
+        """Restrict pool to entries matching filt (indices or task strings)."""
+        result = []
+        for entry in filt:
+            if isinstance(entry, int):
+                if 0 <= entry < len(pool):
+                    result.append(pool[entry])
+                else:
+                    raise ValueError(
+                        f"task_filter index {entry} out of range "
+                        f"(pool has {len(pool)} tasks)")
+            elif isinstance(entry, str):
+                matches = [t for t in pool if t == entry]
+                if not matches:
+                    raise ValueError(
+                        f"task_filter string '{entry}' not found in pool: {pool}")
+                result.extend(matches)
+            else:
+                raise ValueError(
+                    f"task_filter entries must be int or str, got {type(entry)}")
+        seen = set()
+        return [t for t in result if not (t in seen or seen.add(t))]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_obj_recep(task_str: str) -> Tuple[Optional[str], Optional[str]]:
         """Extracts object and receptacle from a task string."""
-        pattern = r"put (.*?) on (.*)"
-        match = re.search(pattern, task_str)
-        if match:
-            return match.group(1), match.group(2)
+        m = re.search(r"put (.*?) on (.*)", task_str)
+        if m:
+            return m.group(1), m.group(2)
         return None, None
 
-    def get_next_tasks(self, num_groups=None):
-        """Returns the next batch of (objects, receptacles) for all environments."""
-        objects, receptacles = [], []
-        if num_groups is None:
-            num_groups = len(self.task_pool)
-        
-        num_groups = min(num_groups, self.num_envs)
-        group_size = self.num_envs // num_groups
-        
+    def _pick_task_for_group(self, gs: GroupState) -> str:
+        """Pick the next task for a group based on the current mode."""
         if self.mode == "sequential":
-            for i in range(num_groups):
-                task = self.task_pool[(self.current_task_idx + i) % len(self.task_pool)]
-                obj, recep = self._extract_obj_recep(task)
-                objects.extend([obj] * group_size)
-                receptacles.extend([recep] * group_size)
-            # Handle remainder envs if any
-            remainder = self.num_envs % num_groups
-            if remainder > 0:
-                objects.extend([objects[-1]] * remainder)
-                receptacles.extend([receptacles[-1]] * remainder)
-                
-        elif self.mode == "random":
-            for _ in range(self.num_envs):
-                rand_idx = random.randint(0, min(num_groups - 1, len(self.task_pool) - 1))
-                task = self.task_pool[(self.current_task_idx + rand_idx) % len(self.task_pool)]
-                obj, recep = self._extract_obj_recep(task)
-                objects.append(obj)
-                receptacles.append(recep)
-                
+            task = gs.task_sequence[gs.cursor % len(gs.task_sequence)]
+            return task
+
+        elif self.mode == "pure_random":
+            pool = gs.task_pool
+            if len(pool) == 1:
+                return pool[0]
+            # Weighted sample, different from last
+            attempts = 0
+            while attempts < 100:
+                idx = random.choices(range(len(pool)), weights=gs.weights, k=1)[0]
+                if idx != gs.last_task_idx or len(pool) == 1:
+                    gs.last_task_idx = idx
+                    return pool[idx]
+                attempts += 1
+            # Fallback (shouldn't happen)
+            gs.last_task_idx = (gs.last_task_idx + 1) % len(pool)
+            return pool[gs.last_task_idx]
+
+        elif self.mode == "sequence_random":
+            pool = gs.task_pool
+            # Generate new permutation if needed
+            if not gs.shuffle_perm or gs.shuffle_cursor >= len(gs.shuffle_perm):
+                gs.shuffle_perm = list(range(len(pool)))
+                random.shuffle(gs.shuffle_perm)
+                gs.shuffle_cursor = 0
+            idx = gs.shuffle_perm[gs.shuffle_cursor]
+            return pool[idx]
+
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+    # ------------------------------------------------------------------
+    # Core API
+    # ------------------------------------------------------------------
+
+    def get_next_tasks(self, num_groups: Optional[int] = None
+                       ) -> Tuple[List[str], List[str]]:
+        """Returns (objects, receptacles) for all envs.
+
+        Each group's envs are contiguous: envs[0:group_size] = group 0, etc.
+        """
+        n_groups = len(self.group_states)
+        if num_groups is not None:
+            n_groups = min(num_groups, n_groups)
+        n_groups = min(n_groups, self.num_envs)
+        group_size = self.num_envs // n_groups
+
+        objects: List[str] = []
+        receptacles: List[str] = []
+
+        for g_idx in range(n_groups):
+            gs = self.group_states[g_idx % len(self.group_states)]
+            task = self._pick_task_for_group(gs)
+            obj, recep = self._extract_obj_recep(task)
+            objects.extend([obj] * group_size)
+            receptacles.extend([recep] * group_size)
+
+        # Remainder envs get the last group's task
+        remainder = self.num_envs - len(objects)
+        if remainder > 0:
+            objects.extend([objects[-1]] * remainder)
+            receptacles.extend([receptacles[-1]] * remainder)
+
         return objects, receptacles
 
     def update_index(self):
-        """Moves to the next task sequence."""
-        self.current_task_idx = (self.current_task_idx + 1) % len(self.task_pool)
+        """Advance all groups' cursors by one step."""
+        for gs in self.group_states:
+            if self.mode == "sequential":
+                gs.cursor = (gs.cursor + 1) % len(gs.task_sequence)
+            elif self.mode == "sequence_random":
+                gs.shuffle_cursor += 1
+
+        # Legacy compat
+        if self.task_pool:
+            self.current_task_idx = (self.current_task_idx + 1) % len(self.task_pool)
+
+    def get_eval_tasks_per_group(self) -> List[Tuple[str, List[str]]]:
+        """Returns [(group_name, [eval_task_strings]), ...] for all groups."""
+        return [(gs.name, gs.eval_tasks) for gs in self.group_states]
+
+    def get_max_eval_rounds(self) -> int:
+        """Max eval tasks across all groups (determines number of eval rounds)."""
+        if not self.group_states:
+            return 0
+        return max(len(gs.eval_tasks) for gs in self.group_states)
+
+    # ------------------------------------------------------------------
+    # State save/restore (for checkpoint resume)
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> Dict:
+        """Serialize scheduler state for checkpoint."""
+        return {
+            "mode": self.mode,
+            "current_task_idx": self.current_task_idx,
+            "groups": [
+                {
+                    "name": gs.name,
+                    "cursor": gs.cursor,
+                    "shuffle_perm": gs.shuffle_perm,
+                    "shuffle_cursor": gs.shuffle_cursor,
+                    "last_task_idx": gs.last_task_idx,
+                }
+                for gs in self.group_states
+            ],
+        }
+
+    def load_state(self, state: Dict):
+        """Restore scheduler state from checkpoint."""
+        self.current_task_idx = state.get("current_task_idx", 0)
+        for gs, gs_state in zip(self.group_states, state.get("groups", [])):
+            gs.cursor = gs_state.get("cursor", 0)
+            gs.shuffle_perm = gs_state.get("shuffle_perm", [])
+            gs.shuffle_cursor = gs_state.get("shuffle_cursor", 0)
+            gs.last_task_idx = gs_state.get("last_task_idx", -1)
