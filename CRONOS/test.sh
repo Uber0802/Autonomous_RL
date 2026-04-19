@@ -119,7 +119,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="conda run -n cronos_env python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --num-envs 64 $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
+COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --num-envs 64 $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────
