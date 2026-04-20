@@ -84,6 +84,16 @@ def _uniform_spacing(n, d):
 # Pre-defined pose configurations matching AutoRL's environments exactly.
 # Verified: each produces identical xyz_configs as the original _generate_init_pose().
 POSE_PRESETS = {
+    # 2 slots: carrot(z=1.0), plate(z=0.92)
+    "OneObjectOneReceptacle": dict(
+        slot_heights=[1.0, 0.92],
+        half_edge_length=(0.075, 0.075),
+        spacing_matrix=[
+            [0.0, 0.12],
+            [0.12, 0.0],
+        ],
+    ),
+
     # 3 slots: carrot(z=0.95), plate(z=0.92), extra_carrot(z=1.0)
     # Non-uniform: carrot-plate 0.07, plate-extra 0.07, carrot-extra 0.15
     "TwoObjectOneReceptacle": dict(

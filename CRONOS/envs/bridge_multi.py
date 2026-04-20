@@ -1048,6 +1048,13 @@ _NxM_PRESETS: dict = {
     # Object/plate selection: FIXED from DEFAULT_*_INDICES (1-based).
     # Matches AutoRL's TwoObjectTwoReceptacle design for all shapes.
     # Position/quaternion: per-env random when obj_set != "fixed".
+    (1, 1): dict(
+        POSE_PRESET="OneObjectOneReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[1],
+        DEFAULT_PLATE_INDICES=[1],
+    ),
     (2, 1): dict(
         POSE_PRESET="TwoObjectOneReceptacle",
         POSE_PRESET_OOD="",
