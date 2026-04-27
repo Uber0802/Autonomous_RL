@@ -1,0 +1,27 @@
+# One group, 2x2, only half the tasks for training, all for eval.
+# Sequential task order, fan-out enabled (default).
+#
+# Train tasks: obj1→recep1, obj2→recep2 (2 tasks)
+# Eval tasks:  all 4 combinations (obj1→recep1, obj1→recep2, obj2→recep1, obj2→recep2)
+#
+# This tests generalization: the policy trains on 2 tasks but is evaluated on 4.
+# V24 constraint: 4 eval tasks, so num_envs must be divisible by 4.
+# V25 constraint: 4 eval tasks % 2 train tasks == 0. ✓
+
+cronos_version: V0.3
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "half_train"
+    num_envs: 64
+    obj: [7, 2]              # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]            # yellow_plate, cloth
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

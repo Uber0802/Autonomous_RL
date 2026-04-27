@@ -102,6 +102,8 @@ class Args:
 
     # --- Evaluation ---
     eval_interval: int = 4
+    num_eval_episode: int = 4       # V0.3: episodes per eval round (more = better stats)
+    eval_at_start: bool = False     # V0.3: run eval before first training episode
     eval_single: bool = False
     eval_sequential: bool = False
     eval_sequences: int = 5         # permutation sequences (1 training + N-1 random)
@@ -157,11 +159,12 @@ class CronosRunner:
         wandb.define_metric("eval_*", step_metric="total_steps")
         self.glob_dir = Path(run.dir).parent / "glob"
         self.glob_dir.mkdir(parents=True, exist_ok=True)
+        self.files_dir = Path(run.dir)  # wandb files/ dir (auto-synced)
 
-        # Tee stdout to a log file so the terminal stream is minimal and the full
-        # run record lives on disk. tqdm/wandb still write to stderr untouched.
+        # Tee stdout to a log file in wandb files/ dir (auto-synced by wandb).
+        # tqdm/wandb still write to stderr untouched.
         if args.log_file:
-            log_path = self.glob_dir / args.log_file
+            log_path = self.files_dir / args.log_file
             log_fp = open(log_path, "a", buffering=1)
             class _Tee:
                 def __init__(self, *streams): self.streams = streams
@@ -178,6 +181,23 @@ class CronosRunner:
         # constructed, so a crash during env init still leaves an on-disk
         # snapshot of exactly what was attempted.
         self._dump_run_config()
+
+        # V0.3 M5: config_history.jsonl — append initial or resume entry.
+        # Load previous config from checkpoint's run_config.json for diff.
+        prev_config = None
+        if args.resume_from:
+            prev_config_path = Path(args.resume_from).parent / "run_config.json"
+            if prev_config_path.exists():
+                try:
+                    prev_config = json.loads(prev_config_path.read_text())
+                except Exception:
+                    pass
+        history_path = self.glob_dir / "config_history.jsonl"
+        if not history_path.exists():
+            self._append_config_history("initial", episode=args.resume_episode)
+        if args.resume_from and prev_config is not None:
+            self._append_config_history("resume", episode=args.resume_episode,
+                                         prev_config=prev_config)
 
         # Device Management (AutoRL style)
         device_id = 0
@@ -207,6 +227,11 @@ class CronosRunner:
                 yaml_val = getattr(yaml_config, field_name, None)
                 if yaml_val is not None and not self._cli_provided(field_name):
                     setattr(args, field_name, yaml_val)
+            # V0.3 M2: env_n/env_m = max across groups (mixed N/M support)
+            if yaml_config.groups and not self._cli_provided("env_n"):
+                args.env_n = max(len(g.obj) for g in yaml_config.groups)
+            if yaml_config.groups and not self._cli_provided("env_m"):
+                args.env_m = max(len(g.recep) for g in yaml_config.groups)
 
         # Parse task_filter from CLI string or YAML
         task_filter = None
@@ -224,21 +249,24 @@ class CronosRunner:
         # Get task pool from env (CronosWrapper.__init__ already performs a seeded reset)
         task_pool = self.env.get_task_pool()
 
-        # V0.2: resolve symbolic refs (obj1, recep2, ...) in YAML groups + task_filter
-        from envs.config import resolve_symbolic_task, has_symbolic_refs
+        # V0.2/V0.3: resolve symbolic refs (obj1, recep2, ...) in YAML groups + task_filter
+        from envs.config import resolve_symbolic_task, has_symbolic_refs, build_obj_recep_name_maps
         from envs.scheduler import GroupState
         obj_names, recep_names = self._build_symbolic_map(task_pool)
 
         # Build per-group GroupState from YAML or auto-generate from flat task_pool
         group_states = []
         if yaml_config and yaml_config.groups:
+            # V0.3 M1: access model_db for per-group symbolic resolution
+            env_unwrapped = self.env.env.unwrapped
+            model_db_carrot = env_unwrapped.model_db_carrot
+            model_db_plate = env_unwrapped.model_db_plate
+
             # New per-group format
             for g in yaml_config.groups:
-                # Build per-group symbolic maps from this group's obj/recep lists
-                g_obj_names = {f"obj{i+1}": obj_names.get(f"obj{i+1}", f"obj{i+1}")
-                                for i in range(len(g.obj))}
-                g_recep_names = {f"recep{i+1}": recep_names.get(f"recep{i+1}", f"recep{i+1}")
-                                  for i in range(len(g.recep))}
+                # V0.3 M1: per-group symbolic maps from this group's own obj/recep indices
+                g_obj_names, g_recep_names = build_obj_recep_name_maps(
+                    g.obj, g.recep, model_db_carrot, model_db_plate)
                 # Resolve symbolic refs in task_sequence and eval_tasks
                 resolved_seq = [
                     resolve_symbolic_task(t, g_obj_names, g_recep_names) if has_symbolic_refs(t) else t
@@ -252,12 +280,16 @@ class CronosRunner:
                     name=g.name,
                     task_sequence=resolved_seq,
                     eval_tasks=resolved_eval,
+                    num_envs=g.num_envs,
                 ))
             self.scheduler = TaskScheduler(
                 group_states=group_states,
                 mode=args.task_order,
                 num_envs=args.num_envs,
+                fan_out=yaml_config.fan_out,
             )
+            # V0.3 M1: pass group specs to wrapper for per-env object indices
+            self.env.set_group_specs(yaml_config.groups)
         else:
             # Legacy flat path: use env-provided task pool with optional filter
             if task_filter:
@@ -307,7 +339,7 @@ class CronosRunner:
         record of exactly what the user attempted."""
         cfg = dict(self.args.__dict__)
         cfg["start_time"] = datetime.datetime.utcnow().isoformat() + "Z"
-        cfg["cronos_version"] = "V0.2"
+        cfg["cronos_version"] = "V0.3"
         try:
             rev = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"],
@@ -330,6 +362,51 @@ class CronosRunner:
         except Exception:
             # yaml is a soft dep — the .json file is the authoritative snapshot.
             pass
+
+    def _append_config_history(self, event: str, episode: int = 0,
+                                prev_config: dict = None, reason: str = ""):
+        """V0.3 M5: Append an entry to config_history.jsonl.
+
+        Args:
+            event: "initial" or "resume"
+            episode: current episode count at time of event
+            prev_config: previous config dict (for diff on resume)
+            reason: optional human reason for the config change
+        """
+        import datetime as _dt
+        history_path = self.glob_dir / "config_history.jsonl"
+
+        entry = {
+            "episode": episode,
+            "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "event": event,
+        }
+
+        current_cfg = dict(self.args.__dict__)
+        # Coerce non-serializable values
+        for k, v in current_cfg.items():
+            if isinstance(v, Path):
+                current_cfg[k] = str(v)
+
+        if event == "initial":
+            entry["config"] = current_cfg
+        elif event == "resume" and prev_config is not None:
+            # Compute diff: keys where values changed
+            diff = {}
+            all_keys = set(current_cfg.keys()) | set(prev_config.keys())
+            for k in all_keys:
+                old_v = prev_config.get(k)
+                new_v = current_cfg.get(k)
+                if old_v != new_v:
+                    diff[k] = [old_v, new_v]
+            entry["diff"] = diff
+            if reason:
+                entry["reason"] = reason
+        else:
+            entry["config"] = current_cfg
+
+        with open(history_path, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
 
     def _install_sigint_handler(self):
         """Ensure buffer.cleanup() runs synchronously on Ctrl-C before the
@@ -401,9 +478,13 @@ class CronosRunner:
 
     @staticmethod
     def _cli_provided(field_name):
-        """Check if a CLI flag was explicitly passed (heuristic: present in sys.argv)."""
+        """Check if a CLI flag was explicitly passed (heuristic: present in sys.argv).
+
+        Handles both --field_name and --field-name variants (tyro uses dashes).
+        """
         import sys
-        return any(f"--{field_name}" in arg for arg in sys.argv)
+        dash_name = field_name.replace("_", "-")
+        return any(f"--{field_name}" in arg or f"--{dash_name}" in arg for arg in sys.argv)
 
     def _validate_args(self):
         args = self.args
@@ -456,58 +537,137 @@ class CronosRunner:
 
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
-    def eval(self, iteration, task_idx, obj_set, envs_object, envs_recep, prefix="eval", reset=True):
-        """Evaluates one task episode, matching AutoRL's eval() behavior."""
+    def eval_all_groups(self, iteration, obj_set, prefix="eval"):
+        """V0.3 M4: Evaluate all groups using per-env rotation.
+
+        Assignment formula:
+            task_for_env_i_at_episode_e = eval_tasks[(i % n_eval_tasks + e) % n_eval_tasks]
+        where i is the env index within its group.
+
+        Each env resets between episodes. Results are accumulated per (group, task)
+        and averaged at the end.
+
+        Returns: list of (g_idx, group_name, task, n_samples, stats_dict) tuples.
+        """
         self.policy.prep_rollout()
 
-        if reset:
-            obs, _, info = self.env.reset(obj_set_override=obj_set)
-            # Re-apply eval task: wrapper.reset() may override via scheduler
-            self.env.set_task(envs_object, envs_recep)
+        per_group_evals = self.scheduler.get_eval_tasks_per_group()
+        n_groups = len(per_group_evals)
+        num_eps = self.args.num_eval_episode
+
+        # Pre-extract (obj, recep) for each group's eval tasks + per-group sizes
+        group_eval_info = []  # [(g_name, g_size, [(task_str, obj, recep), ...]), ...]
+        group_starts = []     # cumulative env start indices
+        offset = 0
+        for g_name, g_size, g_tasks in per_group_evals:
+            tasks_info = []
+            for task in g_tasks:
+                obj, recep = TaskScheduler._extract_obj_recep(task)
+                tasks_info.append((task, obj, recep))
+            group_eval_info.append((g_name, g_size, tasks_info))
+            group_starts.append(offset)
+            offset += g_size
+
+        # Accumulate results: (g_name, task_str) -> {"success": [0,1,1,...], ...}
+        accum = {}
+        for g_name, g_size, tasks_info in group_eval_info:
+            for task_str, _, _ in tasks_info:
+                accum[(g_name, task_str)] = defaultdict(list)
+
+        # Log rotation table on first call
+        print(f"  Eval rotation: {num_eps} episodes, {n_groups} groups")
+        for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
+            n_tasks = len(tasks_info)
+            print(f"  [{g_name}] {n_tasks} eval tasks, {g_size} envs "
+                  f"({g_size // n_tasks} envs/task/ep, "
+                  f"{num_eps * g_size // n_tasks} samples/task total)")
+            for t_idx, (task_str, _, _) in enumerate(tasks_info):
+                print(f"    T{t_idx}: {task_str}")
+
+        for ep in range(num_eps):
+            # Build per-env task assignment for this episode using rotation formula
+            envs_obj = []
+            envs_recep = []
+            env_task_map = [None] * self.args.num_envs  # env_idx -> (g_idx, task_str)
+
+            for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
+                n_tasks = len(tasks_info)
+                g_start = group_starts[g_idx]
+                for local_i in range(g_size):
+                    t_idx = (local_i % n_tasks + ep) % n_tasks
+                    task_str, obj, recep = tasks_info[t_idx]
+                    envs_obj.append(obj)
+                    envs_recep.append(recep)
+                    env_task_map[g_start + local_i] = (g_idx, g_name, task_str)
+
+            # Pad remainder envs (if total per-group sizes < num_envs)
+            while len(envs_obj) < self.args.num_envs:
+                envs_obj.append(envs_obj[-1])
+                envs_recep.append(envs_recep[-1])
+
+            # Reset env and assign tasks
+            obs, _, _ = self.env.reset(obj_set_override=obj_set, skip_scheduler=True)
+            self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
-        else:
-            self.env.set_task(envs_object, envs_recep)
-            obs, instruct, info = self.env.get_obs_instruct_info()
 
-        print("Evaluating:", instruct[0])
+            # Record video for first env of each group (first episode only)
+            record_this_ep = self.args.record_video and ep == 0
+            if record_this_ep:
+                video_envs = [group_starts[g_idx] for g_idx in range(n_groups)]
+                video_frames = {env_i: [] for env_i in video_envs}
 
-        env_infos = defaultdict(list)
+            # Rollout one episode
+            env_infos = defaultdict(list)
+            for _ in tqdm(range(self.args.segment_len),
+                          desc=f"eval {prefix} ep{ep+1}/{num_eps}", leave=False):
+                with torch.no_grad():
+                    val, action, logp = self._get_action(obs, instruct, deterministic=True)
+                if record_this_ep:
+                    for env_i in video_envs:
+                        video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+                obs, reward, truncated, env_info = self.env.step(action)
+                if "episode" in env_info:
+                    for k, v in env_info["episode"].items():
+                        env_infos[k] += v
 
-        if self.args.record_video:
-            video_frames = [[] for _ in range(self.args.num_envs)]
-            for i in range(self.args.num_envs):
-                video_frames[i].append(obs[i].cpu().numpy().copy())
+            # Save eval videos to glob/eval_videos/
+            if record_this_ep:
+                eval_video_dir = self.glob_dir / "eval_videos" / prefix
+                eval_video_dir.mkdir(parents=True, exist_ok=True)
+                for env_i, frames in video_frames.items():
+                    if frames:
+                        entry = env_task_map[env_i]
+                        g_name_v = entry[1] if entry else f"g{env_i}"
+                        images_to_video(frames, str(eval_video_dir),
+                                        f"{g_name_v}_env{env_i}", fps=10, verbose=False)
 
-        for _ in tqdm(range(self.args.segment_len), desc="eval", leave=False):
-            with torch.no_grad():
-                val, action, logp = self._get_action(obs, instruct, deterministic=True)
+            # Distribute per-env results to per-(group, task) accumulators
+            total_group_envs = sum(gs for _, gs, _ in group_eval_info)
+            for env_idx in range(min(len(env_task_map), total_group_envs)):
+                entry = env_task_map[env_idx]
+                if entry is None:
+                    continue
+                _, g_name_r, task_str = entry
+                for k, vals in env_infos.items():
+                    if env_idx < len(vals):
+                        accum[(g_name_r, task_str)][k].append(vals[env_idx])
 
-            obs, reward, truncated, env_info = self.env.step(action)
+        # Compute mean stats per (group, task) and build results
+        results = []
+        for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
+            n_tasks = len(tasks_info)
+            n_samples = num_eps * g_size // n_tasks
+            for task_str, _, _ in tasks_info:
+                key = (g_name, task_str)
+                stats = {k: float(np.mean(v)) for k, v in accum[key].items()}
+                actual_samples = len(accum[key].get("success", []))
+                print(f"  [{g_name}] {task_str} "
+                      f"({actual_samples} samples): "
+                      f"success={stats.get('success', 0.0):.4f} "
+                      f"grasp={stats.get('consecutive_grasp', 0.0):.4f}")
+                results.append((g_idx, g_name, task_str, n_samples, stats))
 
-            # Collect terminal episode stats (fires when any env truncates)
-            if "episode" in env_info:
-                for k, v in env_info["episode"].items():
-                    env_infos[k] += v  # v is a list of per-env values
-
-            if self.args.record_video:
-                for i in range(self.args.num_envs):
-                    video_frames[i].append(obs[i].cpu().numpy().copy())
-
-        env_stats = {k: float(np.mean(v)) for k, v in env_infos.items()}
-        print(pprint.pformat({k: round(v, 4) for k, v in env_stats.items()}))
-        print()
-
-        if self.args.record_video:
-            render_dir = self.glob_dir / f"eval_{prefix}_ep{iteration + 1}_task{task_idx + 1}"
-            render_dir.mkdir(parents=True, exist_ok=True)
-            obj = envs_object[0]
-            recep = envs_recep[0]
-            for i in range(self.args.num_envs):
-                success_val = int(env_infos["success"][i]) if "success" in env_infos and i < len(env_infos["success"]) else 0
-                video_name = f"video_{i}-{obj}_{recep}-s_{success_val}"
-                images_to_video(video_frames[i], str(render_dir), video_name, fps=10, verbose=False)
-
-        return env_stats
+        return results
 
     def _run_ppo_update(self, ppo_log_path):
         """Runs one PPO update on the current buffer, then resets it."""
@@ -538,8 +698,13 @@ class CronosRunner:
 
         self.video_frames = [[] for _ in range(self.args.num_envs)]
 
-        # Determine number of active environmental groups dynamically
-        self.num_groups = self.args.num_groups if self.args.num_groups > 0 else len(self.scheduler.task_pool)
+        # V0.3 M3: with fan_out, each YAML group is internally split by the scheduler.
+        # num_groups here = total sub-groups across all YAML groups (for logging only).
+        if self.scheduler.fan_out:
+            self.num_groups = sum(
+                len(gs.task_pool) for gs in self.scheduler.group_states)
+        else:
+            self.num_groups = self.args.num_groups if self.args.num_groups > 0 else len(self.scheduler.task_pool)
 
         forward_count = 1
         segment_id = 0
@@ -547,8 +712,7 @@ class CronosRunner:
         all_train_results = []
 
         # Track current tasks for logging/naming
-        active_groups = self.args.num_groups if self.args.num_groups > 0 else None
-        objs, receps = self.scheduler.get_next_tasks(active_groups)
+        objs, receps = self.scheduler.get_next_tasks()
         self.last_info = {}
         info = {}
 
@@ -598,8 +762,7 @@ class CronosRunner:
                 else:
                     self.scheduler.update_index()
                     self.env.set_forward()
-                    active_groups = self.args.num_groups if self.args.num_groups > 0 else None
-                    objs, receps = self.scheduler.get_next_tasks(active_groups)
+                    objs, receps = self.scheduler.get_next_tasks()
                     self.env.set_task(objs, receps)
                     forward_count += 1
 
@@ -613,8 +776,9 @@ class CronosRunner:
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()
-                group_size = self.args.num_envs // self.num_groups
-                group_instrs = [instruct[g * group_size] for g in range(self.num_groups)]
+                from envs.config import get_group_starts
+                g_starts = get_group_starts(self.yaml_config.groups) if self.yaml_config else [g * (self.args.num_envs // max(self.num_groups, 1)) for g in range(self.num_groups)]
+                group_instrs = [instruct[g_starts[g]] for g in range(self.num_groups)]
                 print(f"Step {step_idx + 1}: switch instruction to  {' '.join(group_instrs)}")
 
                 # GPU Memory Management
@@ -661,6 +825,49 @@ class CronosRunner:
         print(f"Training {self.args.max_episodes} episodes ({start_episode + 1} → {end_episode}), "
               f"max_steps={abs_max_steps} (prior={prior_steps} + budget={self.args.max_steps}), "
               f"max_reset={abs_max_reset} (prior={prior_resets} + budget={self.args.max_reset})")
+
+        # V0.3: eval before first training episode (e.g. to measure pretrained checkpoint)
+        if self.args.eval_at_start:
+            total_steps_0 = prior_steps
+            total_resets_0 = prior_resets
+            eval_log = {"episode": start_episode, "total_steps": total_steps_0, "total_resets": total_resets_0}
+            report_header = (
+                f"{'=' * 50}\n"
+                f"Eval-at-start | Steps {total_steps_0} | Resets {total_resets_0}\n"
+                f"{'=' * 50}\n"
+            )
+
+            def _run_eval_start(obj_set, kind_prefix, kind_label):
+                print(f"Evaluating {kind_label} at start (steps={total_steps_0}, "
+                      f"{self.args.num_eval_episode} episodes)")
+                results_raw = self.eval_all_groups(start_episode, obj_set, prefix=kind_prefix)
+                results = []
+                for g_idx, g_name, task, n_samples, stats in results_raw:
+                    scalars = self.recorder.log_eval(
+                        episode=start_episode,
+                        total_steps=total_steps_0,
+                        total_resets=total_resets_0,
+                        eval_kind=kind_label,
+                        group=g_name,
+                        task=task,
+                        scene="default",
+                        n_envs=n_samples,
+                        success=stats.get("success", 0.0),
+                        grasp=stats.get("consecutive_grasp", 0.0),
+                        obj_grasped=stats.get("is_src_obj_grasped", 0.0),
+                    )
+                    eval_log.update(scalars)
+                    results.append((task, stats))
+                return results
+
+            in_domain_results = _run_eval_start(self.args.obj_set, "in_domain", "in_domain")
+            eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
+            ood_results = _run_eval_start("rand_ood", "out_of_domain", "out_of_domain")
+            eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
+            wandb.log(eval_log, step=total_steps_0)
+            self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
+            self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
+            print("Eval-at-start complete.\n")
 
         for iteration in range(start_episode, end_episode):
             self.iteration = iteration
@@ -716,9 +923,9 @@ class CronosRunner:
                            or should_stop)
 
             if should_eval:
-                # V0.2: per-group eval tasks. Union all groups' eval_tasks (dedup
-                # preserving order) — all envs share the same physical objects
-                # so each unique task is evaluated once across all num_envs envs.
+                # V0.3 M4: per-env rotation eval — each env rotates through
+                # eval tasks across num_eval_episode episodes.
+                # Formula: eval_tasks[(i % n_eval_tasks + ep) % n_eval_tasks]
                 eval_log = {"episode": episode, "total_steps": total_steps, "total_resets": total_resets}
                 report_header = (
                     f"{'=' * 50}\n"
@@ -726,62 +933,36 @@ class CronosRunner:
                     f"{'=' * 50}\n"
                 )
 
-                # Collect per-(task, group) eval assignments, deduplicating task strings
-                # but preserving group attribution for CSV logging.
-                per_group_evals = self.scheduler.get_eval_tasks_per_group()
-                # Build ordered list of (group_name, task) pairs, deduplicating repeats
-                seen_tasks = set()
-                eval_pairs = []  # [(group_name, task), ...]
-                for g_name, g_eval_tasks in per_group_evals:
-                    for t in g_eval_tasks:
-                        if t not in seen_tasks:
-                            seen_tasks.add(t)
-                            eval_pairs.append((g_name, t))
+                def _run_eval_pass(obj_set, kind_prefix, kind_label):
+                    """V0.3: All groups × all tasks simultaneously, num_eval_episode episodes."""
+                    print(f"Evaluating {kind_label} at {total_steps} "
+                          f"({self.args.num_eval_episode} episodes)")
+                    results_raw = self.eval_all_groups(iteration, obj_set, prefix=kind_prefix)
+                    results = []
+                    for g_idx, g_name, task, n_samples, stats in results_raw:
+                        scalars = self.recorder.log_eval(
+                            episode=episode,
+                            total_steps=total_steps,
+                            total_resets=total_resets,
+                            eval_kind=kind_label,
+                            group=g_name,
+                            task=task,
+                            scene="default",
+                            n_envs=n_samples,
+                            success=stats.get("success", 0.0),
+                            grasp=stats.get("consecutive_grasp", 0.0),
+                            obj_grasped=stats.get("is_src_obj_grasped", 0.0),
+                        )
+                        eval_log.update(scalars)
+                        results.append((task, stats))
+                    return results
 
                 # In-domain eval
-                print(f"Evaluating In-Domain at {total_steps}")
-                in_domain_results = []
-                for task_idx, (group_name, task) in enumerate(eval_pairs):
-                    obj, recep = TaskScheduler._extract_obj_recep(task)
-                    sval_stats = self.eval(iteration, task_idx, self.args.obj_set, [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"in_domain_{obj}_{recep}")
-                    scalars = self.recorder.log_eval(
-                        episode=episode,
-                        total_steps=total_steps,
-                        total_resets=total_resets,
-                        eval_kind="in_domain",
-                        group=group_name,
-                        task=task,
-                        scene="default",
-                        n_envs=self.args.num_envs,
-                        success=sval_stats.get("success", 0.0),
-                        grasp=sval_stats.get("consecutive_grasp", 0.0),
-                        obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
-                    )
-                    eval_log.update(scalars)
-                    in_domain_results.append((task, sval_stats))
+                in_domain_results = _run_eval_pass(self.args.obj_set, "in_domain", "in_domain")
                 eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
 
                 # Out-of-domain eval
-                print(f"Evaluating Out-of-Domain at {total_steps}")
-                ood_results = []
-                for task_idx, (group_name, task) in enumerate(eval_pairs):
-                    obj, recep = TaskScheduler._extract_obj_recep(task)
-                    sval_stats = self.eval(iteration, task_idx, "rand_ood", [obj]*self.args.num_envs, [recep]*self.args.num_envs, prefix=f"out_of_domain_{obj}_{recep}")
-                    scalars = self.recorder.log_eval(
-                        episode=episode,
-                        total_steps=total_steps,
-                        total_resets=total_resets,
-                        eval_kind="out_of_domain",
-                        group=group_name,
-                        task=task,
-                        scene="default",
-                        n_envs=self.args.num_envs,
-                        success=sval_stats.get("success", 0.0),
-                        grasp=sval_stats.get("consecutive_grasp", 0.0),
-                        obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
-                    )
-                    eval_log.update(scalars)
-                    ood_results.append((task, sval_stats))
+                ood_results = _run_eval_pass("rand_ood", "out_of_domain", "out_of_domain")
                 eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
 
                 wandb.log(eval_log, step=total_steps)
@@ -825,8 +1006,8 @@ class CronosRunner:
         print(f"Training complete: episode={final_episode}, total_steps={final_steps}, total_resets={final_resets}")
 
     def save_video_segment(self, iteration, segment_id):
-        """Saves current video buffer and clears it."""
-        render_dir = self.glob_dir / f"rollout_ep{iteration + 1}_seg{segment_id + 1}"
+        """Saves current video buffer to glob/train_videos/."""
+        render_dir = self.glob_dir / "train_videos" / f"rollout_ep{iteration + 1}_seg{segment_id + 1}"
         render_dir.mkdir(parents=True, exist_ok=True)
         
         for i in range(self.args.num_envs):

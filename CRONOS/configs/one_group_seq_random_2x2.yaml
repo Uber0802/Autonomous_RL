@@ -1,0 +1,23 @@
+# One group, 2x2, sequence_random task order.
+# Each epoch: random permutation of all 4 unique tasks, then reshuffle.
+# Fan-out enabled (default).
+
+cronos_version: V0.3
+task_order: sequence_random
+fan_out: true
+
+groups:
+  - name: "seq_random"
+    num_envs: 64
+    obj: [7, 2]              # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]            # yellow_plate, cloth
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

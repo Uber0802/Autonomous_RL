@@ -6,13 +6,14 @@ from .reward import RewardShaper
 
 class CronosWrapper:
     """Unified environment wrapper for CRONOS, integrating decoupled modules."""
-    
-    def __init__(self, args, unnorm_state, task_suite, device=None, task_scheduler=None):
+
+    def __init__(self, args, unnorm_state, task_suite, device=None, task_scheduler=None,
+                 group_specs=None):
         self.args = args
         self.unnorm_state = unnorm_state
         self.num_envs = args.num_envs
         self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
+
         # Core Env
         env_config = dict(
             id=args.env_id,
@@ -36,23 +37,19 @@ class CronosWrapper:
             from .scenes import get_scene
             env_config["scene_spec"] = get_scene(scene_name)
         self.env = gym.make(**env_config)
-        
+
         import random
         random.seed(self.args.seed)
         self.rand_episode_id = random.randint(0, 1000)
-        
+
+        # V0.3 M1: per-group object/receptacle indices → per-env tensors
+        self.group_specs = group_specs  # List[GroupSpec] or None
+        self._build_per_env_indices()
+
         # AutoRL compatibility: Explicitly seed the env with an initial reset.
         # Pass obj_set + obj/plate indices so the task pool matches training.
-        options = {
-            "obj_set": self.args.obj_set,
-            "episode_id": torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device),
-            "obj1_index": self.args.obj1_index,
-            "obj2_index": self.args.obj2_index,
-            "obj3_index": self.args.obj3_index,
-            "plate1_index": self.args.plate1_index,
-            "plate2_index": self.args.plate2_index,
-            "plate3_index": self.args.plate3_index,
-        }
+        options = self._build_options()
+        options["episode_id"] = torch.full((self.num_envs,), self.rand_episode_id, dtype=torch.long, device=self.device)
         self.env.reset(seed=[self.args.seed * 1000 + i for i in range(self.args.num_envs)], options=options)
         
         # Integrated Modules
@@ -69,6 +66,99 @@ class CronosWrapper:
         # Binning for action processing
         bins = np.linspace(-1, 1, 256)
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
+
+    def _build_per_env_indices(self):
+        """V0.3 M1: Build per-env object/plate index tensors from group_specs.
+
+        When group_specs is provided and groups have per-group obj/recep,
+        creates per-env tensors. Otherwise falls back to global args scalars.
+        """
+        if not self.group_specs or len(self.group_specs) <= 1:
+            # Single group or no group specs — use global scalar args (V0.2 path)
+            self._per_env_obj = None
+            self._per_env_plate = None
+            return
+
+        from envs.config import get_group_starts
+        group_starts = get_group_starts(self.group_specs)
+        env_n = getattr(self.args, "env_n", 2)
+        env_m = getattr(self.args, "env_m", 1)
+
+        # Per-env obj indices (1-based, 0 = hidden), shape (num_slots, num_envs)
+        self._per_env_obj = []
+        for slot in range(env_n):
+            t = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            for gi, g in enumerate(self.group_specs):
+                start, end = group_starts[gi], group_starts[gi + 1]
+                if slot < len(g.obj):
+                    t[start:end] = g.obj[slot]
+                else:
+                    t[start:end] = 0  # V0.3 M2: hidden slot marker (0 → -1 after -1 in env)
+            self._per_env_obj.append(t)
+
+        # Per-env plate indices (1-based, 0 = hidden), shape (num_slots, num_envs)
+        self._per_env_plate = []
+        for slot in range(env_m):
+            t = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            for gi, g in enumerate(self.group_specs):
+                start, end = group_starts[gi], group_starts[gi + 1]
+                if slot < len(g.recep):
+                    t[start:end] = g.recep[slot]
+                else:
+                    t[start:end] = 0  # V0.3 M2: hidden slot marker
+            self._per_env_plate.append(t)
+
+        # Per-env overlay indices (0-based) — only when ALL groups specify int background
+        all_custom_bg = all(isinstance(g.background, int) for g in self.group_specs)
+        if all_custom_bg:
+            self._per_env_overlay = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            for gi, g in enumerate(self.group_specs):
+                start, end = group_starts[gi], group_starts[gi + 1]
+                self._per_env_overlay[start:end] = g.background
+        else:
+            self._per_env_overlay = None
+
+    def _build_options(self, obj_set_override=None, group_idx_override=None):
+        """Build the env reset options dict with per-env or scalar indices.
+
+        Args:
+            obj_set_override: Override obj_set (e.g. "rand_ood" for OOD eval).
+            group_idx_override: If set, use this group's obj/recep for ALL envs
+                (scalar broadcast). Used during eval to ensure all envs have
+                the correct physical objects for the group being evaluated.
+        """
+        options = {
+            "obj_set": obj_set_override if obj_set_override else self.args.obj_set,
+        }
+        if group_idx_override is not None and self.group_specs:
+            # V0.3 eval path: broadcast one group's indices to all envs
+            g = self.group_specs[group_idx_override]
+            env_n = getattr(self.args, "env_n", 2)
+            env_m = getattr(self.args, "env_m", 1)
+            for i in range(env_n):
+                options[f"obj{i+1}_index"] = g.obj[i] if i < len(g.obj) else 0  # 0 = hidden
+            for i in range(env_m):
+                options[f"plate{i+1}_index"] = g.recep[i] if i < len(g.recep) else 0
+            if isinstance(g.background, int):
+                options["select_overlay_ids"] = torch.full(
+                    (self.num_envs,), g.background, dtype=torch.long, device=self.device)
+        elif self._per_env_obj is not None:
+            # V0.3 training path: per-env tensors
+            for i, t in enumerate(self._per_env_obj):
+                options[f"obj{i+1}_index"] = t
+            for i, t in enumerate(self._per_env_plate):
+                options[f"plate{i+1}_index"] = t
+            if self._per_env_overlay is not None:
+                options["select_overlay_ids"] = self._per_env_overlay
+        else:
+            # V0.2: global scalars
+            options["obj1_index"] = self.args.obj1_index
+            options["obj2_index"] = self.args.obj2_index
+            options["obj3_index"] = self.args.obj3_index
+            options["plate1_index"] = self.args.plate1_index
+            options["plate2_index"] = self.args.plate2_index
+            options["plate3_index"] = self.args.plate3_index
+        return options
 
     def _process_action(self, raw_actions: torch.Tensor) -> torch.Tensor:
         """Processes raw action tokens into executable continuous actions."""
@@ -115,24 +205,19 @@ class CronosWrapper:
 
         return obs_image, reward, truncated, info
 
-    def reset(self, same_init=True, obj_set_override=None, **kwargs):
+    def reset(self, same_init=True, obj_set_override=None, group_idx_override=None,
+              skip_scheduler=False, **kwargs):
         """Unified reset matching AutoRL: env.reset → set_task → zero reward_old."""
-        options = {
-            "obj_set": obj_set_override if obj_set_override else self.args.obj_set,
-            "obj1_index": self.args.obj1_index,
-            "obj2_index": self.args.obj2_index,
-            "obj3_index": self.args.obj3_index,
-            "plate1_index": self.args.plate1_index,
-            "plate2_index": self.args.plate2_index,
-            "plate3_index": self.args.plate3_index,
-        }
+        options = self._build_options(obj_set_override=obj_set_override,
+                                      group_idx_override=group_idx_override)
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
 
         obs, info = self.env.reset(options=options)
 
-        # Set tasks from scheduler if available
-        if self.scheduler:
+        # Set tasks from scheduler if available.
+        # Skip when: eval with group_idx_override, or caller will set tasks explicitly.
+        if self.scheduler and group_idx_override is None and not skip_scheduler:
             objs, receps = self.scheduler.get_next_tasks()
             self.env.unwrapped.set_current_task(objs, receps)
 
@@ -208,6 +293,11 @@ class CronosWrapper:
     def set_scheduler(self, scheduler):
         """Assigns a TaskScheduler to the wrapper."""
         self.scheduler = scheduler
+
+    def set_group_specs(self, group_specs):
+        """V0.3 M1: Set per-group specs and rebuild per-env index tensors."""
+        self.group_specs = group_specs
+        self._build_per_env_indices()
 
     def get_obs_instruct_info(self):
         """Returns current obs, instructions, and info without resetting the env."""

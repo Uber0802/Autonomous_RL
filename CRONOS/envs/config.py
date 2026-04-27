@@ -55,6 +55,7 @@ _KNOWN_TOP_KEYS = {
     "num_envs",
     "scene",
     "groups",
+    "fan_out",  # V0.3 M3: sub-group fan-out (default True)
     # Legacy V0.2 flat keys (still accepted for backward compat / CLI-only mode)
     "env_n", "env_m",
     "obj1_index", "obj2_index", "obj3_index",
@@ -63,7 +64,7 @@ _KNOWN_TOP_KEYS = {
 }
 
 _KNOWN_GROUP_KEYS = {
-    "name", "obj", "recep", "table", "background",
+    "name", "num_envs", "obj", "recep", "table", "background",
     "task_sequence", "eval_tasks",
     # Legacy single-task format
     "task",
@@ -80,10 +81,11 @@ _SYMBOLIC_RE = re.compile(r'\b(obj\d+|recep\d+)\b')
 class GroupSpec:
     """One env group from the YAML ``groups:`` list."""
     name: str = ""
-    obj: List[int] = field(default_factory=list)          # 1-based object indices
-    recep: List[int] = field(default_factory=list)        # 1-based receptacle indices
+    num_envs: int = 0                                      # envs allocated to this group
+    obj: List[int] = field(default_factory=list)           # 1-based object indices
+    recep: List[int] = field(default_factory=list)         # 1-based receptacle indices
     table: str = "flat_table"
-    background: str = "default"
+    background: Union[str, int] = "default"  # "default" = episode_id, int = fixed overlay index
     task_sequence: List[str] = field(default_factory=list) # symbolic or resolved
     eval_tasks: List[str] = field(default_factory=list)    # symbolic or resolved
 
@@ -94,6 +96,7 @@ class CronosConfig:
     task_order: str = "sequential"
     num_envs: Optional[int] = None
     scene: Optional[str] = None
+    fan_out: bool = True              # V0.3 M3: sub-group fan-out (default True)
     groups: List[GroupSpec] = field(default_factory=list)
 
     # Legacy fields (populated when using old flat format or CLI-only)
@@ -150,6 +153,14 @@ def build_obj_recep_name_maps(obj_indices: List[int], recep_indices: List[int],
     return obj_names, recep_names
 
 
+def get_group_starts(groups: List[GroupSpec]) -> List[int]:
+    """Return cumulative env start indices: [0, g0.num_envs, g0+g1, ...]."""
+    starts = [0]
+    for g in groups:
+        starts.append(starts[-1] + g.num_envs)
+    return starts
+
+
 def auto_generate_task_sequence(n_obj: int, n_recep: int) -> List[str]:
     """Generate all NxM task combinations in canonical order."""
     tasks = []
@@ -178,19 +189,19 @@ def validate_config(config: CronosConfig, total_segments: Optional[int] = None):
             f"V19: Unknown task_order '{config.task_order}'. "
             f"Must be one of: {sorted(VALID_TASK_ORDERS)}")
 
-    if num_envs is not None:
-        n_groups = len(groups)
-        # V2: enough envs
-        if num_envs < n_groups:
+    # V2: every group must have num_envs >= 1
+    for i, g in enumerate(groups):
+        if g.num_envs < 1:
             raise ValueError(
-                f"V2: num_envs ({num_envs}) < groups ({n_groups}): "
-                f"not enough envs to cover all groups")
-        # V3: divisible
-        if num_envs % n_groups != 0:
-            suggest = ((num_envs // n_groups) + 1) * n_groups
-            raise ValueError(
-                f"V3: num_envs ({num_envs}) not divisible by groups ({n_groups}). "
-                f"Use num_envs={suggest}")
+                f"V2: groups[{i}] ('{g.name}') has num_envs={g.num_envs}. "
+                f"Each group must have at least 1 env.")
+
+    # V3: sum of per-group num_envs must equal config.num_envs (if set)
+    group_total = sum(g.num_envs for g in groups)
+    if num_envs is not None and group_total != num_envs:
+        raise ValueError(
+            f"V3: sum of per-group num_envs ({group_total}) != config.num_envs ({num_envs}). "
+            f"Set num_envs: {group_total} or adjust per-group num_envs.")
 
     for i, g in enumerate(groups):
         # V4/V5: obj and recep non-empty
@@ -257,21 +268,50 @@ def validate_config(config: CronosConfig, total_segments: Optional[int] = None):
                         f"V14: groups[{i}] task pool size {pool_len} does not divide "
                         f"total_segments {total_segments}. Valid divisors: {divisors}")
 
-    # V16: sequential mode requires equal sequence lengths across groups
+    # V22/V23: fan_out validation — group_envs must accommodate all unique tasks
+    if config.fan_out and len(groups) > 0:
+        for i, g in enumerate(groups):
+            n_unique = len(set(g.task_sequence)) if g.task_sequence else 1
+            if n_unique > 1:
+                if g.num_envs < n_unique:
+                    raise ValueError(
+                        f"V22: groups[{i}] has {n_unique} unique tasks but only "
+                        f"{g.num_envs} envs. fan_out requires group_envs >= unique_tasks.")
+                if g.num_envs % n_unique != 0:
+                    raise ValueError(
+                        f"V23: groups[{i}] has {n_unique} unique tasks and "
+                        f"{g.num_envs} envs. fan_out requires group_envs % unique_tasks == 0.")
+
+    # V16: sequential mode — warn if groups have unequal sequence lengths
+    # (V0.3: relaxed from error to warning; scheduler handles per-group cursors)
     if config.task_order == "sequential" and len(groups) > 1:
         lengths = [len(g.task_sequence) for g in groups if g.task_sequence]
         if lengths and len(set(lengths)) > 1:
-            raise ValueError(
-                f"V16: sequential mode requires all groups to have equal "
-                f"task_sequence length. Got: {lengths}")
+            warnings.warn(
+                f"V16: sequential mode with unequal task_sequence lengths "
+                f"across groups: {lengths}. Groups will desynchronize.")
 
-    # V17: sequence_random requires equal unique pool sizes
+    # V17: sequence_random — warn if groups have unequal pool sizes
     if config.task_order == "sequence_random" and len(groups) > 1:
         pool_sizes = [len(set(g.task_sequence)) for g in groups if g.task_sequence]
         if pool_sizes and len(set(pool_sizes)) > 1:
-            raise ValueError(
-                f"V17: sequence_random requires equal unique pool sizes across groups. "
-                f"Got: {pool_sizes}")
+            warnings.warn(
+                f"V17: sequence_random with unequal unique pool sizes "
+                f"across groups: {pool_sizes}. Groups will desynchronize.")
+
+    # V24/V25: eval task divisibility constraints
+    for i, g in enumerate(groups):
+        n_eval = len(g.eval_tasks) if g.eval_tasks else 0
+        n_train = len(set(g.task_sequence)) if g.task_sequence else 1
+        if n_eval > 0:
+            if g.num_envs % n_eval != 0:
+                raise ValueError(
+                    f"V24: groups[{i}] has {n_eval} eval tasks but "
+                    f"{g.num_envs} envs. Requires group_envs % n_eval_tasks == 0.")
+            if n_eval % n_train != 0:
+                raise ValueError(
+                    f"V25: groups[{i}] has {n_eval} eval tasks and "
+                    f"{n_train} unique train tasks. Requires n_eval_tasks % n_train_tasks == 0.")
 
     # V20: max_reset warning (caller passes this if available)
     # Handled externally in main.py since we don't have max_reset here.
@@ -332,6 +372,7 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
             recep = g.get("recep", [raw.get("plate1_index", 1), raw.get("plate2_index", 2)])
             groups.append(GroupSpec(
                 name=g.get("name", f"group_{i}"),
+                num_envs=g.get("num_envs", 0),
                 obj=obj,
                 recep=recep,
                 table=g.get("table", "flat_table"),
@@ -361,6 +402,7 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
 
         groups.append(GroupSpec(
             name=g.get("name", f"group_{i}"),
+            num_envs=g.get("num_envs", 0),
             obj=obj,
             recep=recep,
             table=g.get("table", "flat_table"),
@@ -368,6 +410,26 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
             task_sequence=task_sequence,
             eval_tasks=eval_tasks,
         ))
+
+    # Resolve per-group num_envs: either from per-group fields or legacy top-level
+    group_total = sum(g.num_envs for g in groups)
+    top_num_envs = raw.get("num_envs")
+    if group_total > 0:
+        # Per-group num_envs specified — use their sum
+        if top_num_envs is not None and top_num_envs != group_total:
+            raise ValueError(
+                f"Top-level num_envs ({top_num_envs}) != sum of per-group "
+                f"num_envs ({group_total}). Remove top-level num_envs or fix the mismatch.")
+        top_num_envs = group_total
+    elif top_num_envs is not None and len(groups) > 0:
+        # Legacy: top-level num_envs only — split equally among groups
+        if top_num_envs % len(groups) != 0:
+            raise ValueError(
+                f"Top-level num_envs ({top_num_envs}) not divisible by "
+                f"{len(groups)} groups. Use per-group num_envs instead.")
+        per_group = top_num_envs // len(groups)
+        for grp in groups:
+            grp.num_envs = per_group
 
     # Parse task_filter (CLI-only mode, no groups)
     tf_raw = raw.get("task_filter")
@@ -379,8 +441,9 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
 
     config = CronosConfig(
         task_order=raw.get("task_order", "sequential"),
-        num_envs=raw.get("num_envs"),
+        num_envs=top_num_envs,
         scene=raw.get("scene"),
+        fan_out=raw.get("fan_out", True),
         groups=groups,
         # Legacy
         env_n=raw.get("env_n"),

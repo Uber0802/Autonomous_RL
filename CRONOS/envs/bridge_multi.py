@@ -821,26 +821,35 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             episode_id = torch.full((b,), single_id, device=self.device)
         episode_id = episode_id.reshape(b) % ltt
 
-        # --- Object selection: from options (CLI args), falling back to preset defaults ---
+        # --- Object selection: per-env tensor or scalar, falling back to preset defaults ---
         self._all_carrot_ids = []
         for i in range(self.NUM_OBJECTS):
             key = f"obj{i+1}_index"
-            idx_1based = options.get(key, self.DEFAULT_OBJ_INDICES[i])
-            ids = torch.full((b,), idx_1based - 1, dtype=torch.long, device=self.device)
+            val = options.get(key, self.DEFAULT_OBJ_INDICES[i])
+            if isinstance(val, torch.Tensor):
+                ids = (val.reshape(b) - 1).long().to(self.device)
+            else:
+                ids = torch.full((b,), val - 1, dtype=torch.long, device=self.device)
             setattr(self, f"select_carrot{i+1}_ids", ids)
             self._all_carrot_ids.append(ids)
 
-        # --- Plate selection: from options (CLI args), falling back to preset defaults ---
+        # --- Plate selection: per-env tensor or scalar, falling back to preset defaults ---
         self._all_plate_ids = []
         for i in range(self.NUM_RECEPTACLES):
             key = f"plate{i+1}_index"
-            idx_1based = options.get(key, self.DEFAULT_PLATE_INDICES[i])
-            ids = torch.full((b,), idx_1based - 1, dtype=torch.long, device=self.device)
+            val = options.get(key, self.DEFAULT_PLATE_INDICES[i])
+            if isinstance(val, torch.Tensor):
+                ids = (val.reshape(b) - 1).long().to(self.device)
+            else:
+                ids = torch.full((b,), val - 1, dtype=torch.long, device=self.device)
             setattr(self, f"select_plate{i+1}_ids", ids)
             self._all_plate_ids.append(ids)
 
-        # --- Overlay from episode_id ---
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
+        # --- Overlay: from options override or episode_id ---
+        if "select_overlay_ids" in options:
+            self.select_overlay_ids = options["select_overlay_ids"].reshape(b).to(self.device) % lo
+        else:
+            self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
 
         # --- Position & quaternion ---
         self.select_pos_ids = (episode_id // l2) % l1
@@ -869,6 +878,8 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             found = False
             for i in range(self.NUM_OBJECTS):
                 cid = self._all_carrot_ids[i][env_idx]
+                if cid < 0:
+                    continue  # V0.3 M2: hidden slot
                 if object[env_idx] == self.model_db_carrot[self.carrot_names[cid]]["name"]:
                     new_carrot_ids.append(cid)
                     found = True
@@ -881,6 +892,8 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             found = False
             for i in range(self.NUM_RECEPTACLES):
                 pid = self._all_plate_ids[i][env_idx]
+                if pid < 0:
+                    continue  # V0.3 M2: hidden slot
                 if receptacle[env_idx] == self.model_db_plate[self.plate_names[pid]]["name"]:
                     new_plate_ids.append(pid)
                     found = True
@@ -903,16 +916,24 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
     def object_name(self):
         result = []
         for env_idx in range(self.num_envs):
-            names = [self.model_db_carrot[self.carrot_names[self._all_carrot_ids[i][env_idx]]]["name"]
-                     for i in range(self.NUM_OBJECTS)]
+            names = []
+            for i in range(self.NUM_OBJECTS):
+                cid = self._all_carrot_ids[i][env_idx]
+                if cid < 0:
+                    continue  # V0.3 M2: hidden slot
+                names.append(self.model_db_carrot[self.carrot_names[cid]]["name"])
             result.append(names)
         return result
 
     def receptacle_name(self):
         result = []
         for env_idx in range(self.num_envs):
-            names = [self.model_db_plate[self.plate_names[self._all_plate_ids[i][env_idx]]]["name"]
-                     for i in range(self.NUM_RECEPTACLES)]
+            names = []
+            for i in range(self.NUM_RECEPTACLES):
+                pid = self._all_plate_ids[i][env_idx]
+                if pid < 0:
+                    continue  # V0.3 M2: hidden slot
+                names.append(self.model_db_plate[self.plate_names[pid]]["name"])
             result.append(names)
         return result
 
