@@ -321,9 +321,14 @@ class EvalRunner:
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
 
+            # Record video: first env of each task within each group (first episode only)
             record_this_ep = self.args.record_video and ep == 0
             if record_this_ep:
-                video_envs = [group_starts[g_idx] for g_idx in range(n_groups)]
+                video_envs = []
+                for g_idx, (_, g_size, tasks_info) in enumerate(group_eval_info):
+                    g_start = group_starts[g_idx]
+                    for t_idx in range(len(tasks_info)):
+                        video_envs.append(g_start + t_idx)
                 video_frames = {env_i: [] for env_i in video_envs}
 
             env_infos = defaultdict(list)
@@ -345,8 +350,9 @@ class EvalRunner:
                     if frames:
                         entry = env_task_map[env_i]
                         g_name_v = entry[1] if entry else f"g{env_i}"
+                        task_v = entry[2].replace(" ", "_") if entry else "unknown"
                         images_to_video(frames, str(eval_video_dir),
-                                        f"{g_name_v}_env{env_i}", fps=10, verbose=False)
+                                        f"{g_name_v}_{task_v}", fps=10, verbose=False)
 
             total_group_envs = sum(gs for _, gs, _ in group_eval_info)
             for env_idx in range(min(len(env_task_map), total_group_envs)):

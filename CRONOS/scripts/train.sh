@@ -128,7 +128,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 --eval-at-start $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
+COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────
