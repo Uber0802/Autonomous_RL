@@ -209,12 +209,7 @@ class CronosRunner:
         self.policy = OpenVLAPolicy(args, device_id=device_id_other)
         self.ppo = CronosPPO(args, self.policy)
 
-        # Initialize Env AFTER policy (matching AutoRL order)
-        unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
-        self.suite = TaskSuite()
-        self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
-
-        # V0.2 M3: load YAML config if provided, merge with CLI overrides
+        # V0.2 M3: load YAML config BEFORE env creation (env_n/env_m must be set first)
         self.yaml_config = None
         if args.config_path:
             from envs.config import load_cronos_config
@@ -232,6 +227,11 @@ class CronosRunner:
                 args.env_n = max(len(g.obj) for g in self.yaml_config.groups)
             if self.yaml_config.groups and not self._cli_provided("env_m"):
                 args.env_m = max(len(g.recep) for g in self.yaml_config.groups)
+
+        # Initialize Env AFTER config + policy (env_n/env_m now correct)
+        unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
+        self.suite = TaskSuite()
+        self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
 
         # Parse task_filter from CLI string or YAML
         task_filter = None
