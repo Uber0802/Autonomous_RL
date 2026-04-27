@@ -215,23 +215,23 @@ class CronosRunner:
         self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
 
         # V0.2 M3: load YAML config if provided, merge with CLI overrides
-        yaml_config = None
+        self.yaml_config = None
         if args.config_path:
             from envs.config import load_cronos_config
-            yaml_config = load_cronos_config(args.config_path)
+            self.yaml_config = load_cronos_config(args.config_path)
             # YAML env params → Args (CLI overrides YAML)
             for field_name in ("env_n", "env_m", "num_envs",
                                "obj1_index", "obj2_index", "obj3_index",
                                "plate1_index", "plate2_index", "plate3_index",
                                "scene", "task_order"):
-                yaml_val = getattr(yaml_config, field_name, None)
+                yaml_val = getattr(self.yaml_config, field_name, None)
                 if yaml_val is not None and not self._cli_provided(field_name):
                     setattr(args, field_name, yaml_val)
             # V0.3 M2: env_n/env_m = max across groups (mixed N/M support)
-            if yaml_config.groups and not self._cli_provided("env_n"):
-                args.env_n = max(len(g.obj) for g in yaml_config.groups)
-            if yaml_config.groups and not self._cli_provided("env_m"):
-                args.env_m = max(len(g.recep) for g in yaml_config.groups)
+            if self.yaml_config.groups and not self._cli_provided("env_n"):
+                args.env_n = max(len(g.obj) for g in self.yaml_config.groups)
+            if self.yaml_config.groups and not self._cli_provided("env_m"):
+                args.env_m = max(len(g.recep) for g in self.yaml_config.groups)
 
         # Parse task_filter from CLI string or YAML
         task_filter = None
@@ -243,8 +243,8 @@ class CronosRunner:
                     task_filter.append(int(p))
                 except ValueError:
                     task_filter.append(p)
-        elif yaml_config and yaml_config.task_filter:
-            task_filter = yaml_config.task_filter
+        elif self.yaml_config and self.yaml_config.task_filter:
+            task_filter = self.yaml_config.task_filter
 
         # Get task pool from env (CronosWrapper.__init__ already performs a seeded reset)
         task_pool = self.env.get_task_pool()
@@ -256,14 +256,14 @@ class CronosRunner:
 
         # Build per-group GroupState from YAML or auto-generate from flat task_pool
         group_states = []
-        if yaml_config and yaml_config.groups:
+        if self.yaml_config and self.yaml_config.groups:
             # V0.3 M1: access model_db for per-group symbolic resolution
             env_unwrapped = self.env.env.unwrapped
             model_db_carrot = env_unwrapped.model_db_carrot
             model_db_plate = env_unwrapped.model_db_plate
 
             # New per-group format
-            for g in yaml_config.groups:
+            for g in self.yaml_config.groups:
                 # V0.3 M1: per-group symbolic maps from this group's own obj/recep indices
                 g_obj_names, g_recep_names = build_obj_recep_name_maps(
                     g.obj, g.recep, model_db_carrot, model_db_plate)
@@ -286,10 +286,10 @@ class CronosRunner:
                 group_states=group_states,
                 mode=args.task_order,
                 num_envs=args.num_envs,
-                fan_out=yaml_config.fan_out,
+                fan_out=self.yaml_config.fan_out,
             )
             # V0.3 M1: pass group specs to wrapper for per-env object indices
-            self.env.set_group_specs(yaml_config.groups)
+            self.env.set_group_specs(self.yaml_config.groups)
         else:
             # Legacy flat path: use env-provided task pool with optional filter
             if task_filter:
