@@ -73,8 +73,8 @@ class CronosWrapper:
         When group_specs is provided and groups have per-group obj/recep,
         creates per-env tensors. Otherwise falls back to global args scalars.
         """
-        if not self.group_specs or len(self.group_specs) <= 1:
-            # Single group or no group specs — use global scalar args (V0.2 path)
+        if not self.group_specs:
+            # No group specs — use global scalar args (V0.2 path)
             self._per_env_obj = None
             self._per_env_plate = None
             return
