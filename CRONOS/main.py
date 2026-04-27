@@ -789,9 +789,14 @@ class CronosRunner:
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()
-                from envs.config import get_group_starts
-                g_starts = get_group_starts(self.yaml_config.groups) if self.yaml_config else [g * (self.args.num_envs // max(self.num_groups, 1)) for g in range(self.num_groups)]
-                group_instrs = [instruct[g_starts[g]] for g in range(self.num_groups)]
+                if self.yaml_config and self.yaml_config.groups:
+                    from envs.config import get_group_starts
+                    g_starts = get_group_starts(self.yaml_config.groups)
+                    n_yaml_groups = len(self.yaml_config.groups)
+                else:
+                    n_yaml_groups = 1
+                    g_starts = [0]
+                group_instrs = [instruct[g_starts[g]] for g in range(n_yaml_groups)]
                 print(f"Step {step_idx + 1}: switch instruction to  {' '.join(group_instrs)}")
 
                 # GPU Memory Management
