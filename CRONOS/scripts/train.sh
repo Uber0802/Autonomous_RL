@@ -19,7 +19,7 @@
 #   CKPT=.../glob/episode_0128 bash test.sh t80b 0 3
 #   CKPT=.../glob/episode_0032 bash test.sh t320b 0 3 LSR
 #
-# All values are PER-RUN (relative). max_reset = episodes × 64 (exact for non-HSR,
+# All values are PER-RUN (relative). max_reset = episodes x 64 (exact for non-HSR,
 # ×5 headroom for HSR/LSR+HSR/noep which add soft resets).
 #
 # ┌──────────┬──────────┬───────────────┬─────────────────┬─────────────┬──────────────┐
@@ -40,7 +40,7 @@
 
 set -e
 
-ENV_ARGS="--env-id PickPlaceNxM-v1 --env-n 2 --env-m 2 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
+ENV_ARGS="--env-id PickPlaceNxM-v1 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
 
 MODE=${1:-t80a}
 SEED=${2:-0}
@@ -91,9 +91,17 @@ RUN_TAG="CRONOS-V0.3-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
 WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
 CKPT="${CKPT:-}"
 
-# --- Per-segment max_reset (relative, = max_episodes × num_envs) ---
-# HSR/LSR+HSR/noep modes add soft resets → use 5× headroom.
-_num_envs=64
+# --- Per-segment max_reset (relative, = max_episodes x num_envs) ---
+# HSR/LSR+HSR/noep modes add soft resets → use ×5 headroom.
+# Extract total num_envs from config (sum of per-group num_envs).
+_num_envs=$(python3 -c "
+import yaml, sys
+cfg = yaml.safe_load(open('$CONFIG'))
+groups = cfg.get('groups', [])
+total = sum(g.get('num_envs', 0) for g in groups)
+if total == 0: total = cfg.get('num_envs', 64)
+print(total)
+")
 _hsr_multiplier=5
 
 case $MODE in
