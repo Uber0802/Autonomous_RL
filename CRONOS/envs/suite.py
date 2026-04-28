@@ -122,17 +122,19 @@ POSE_PRESETS = {
     ),
 
     # 6 slots: 3 carrots(z=1.0), 3 plates(z=0.95)
-    # Uniform: all pairs > 0.1. Uses 4×4 grid (16 points) instead of 6×6.
+    # AutoRL-aligned: same (0.075, 0.075) workspace as 2x1/1x2/2x2.
+    # Uses 4×4 grid (16 points). Uniform 0.07 spacing keeps objects close
+    # but not overlapping (grid min dist = 0.0495 at this scale).
     "ThreeObjectThreeReceptacle": dict(
         slot_heights=[1.0, 1.0, 1.0, 0.95, 0.95, 0.95],
-        half_edge_length=(0.13, 0.12),
-        spacing_matrix=_uniform_spacing(6, 0.1),
+        half_edge_length=(0.075, 0.075),
+        spacing_matrix=_uniform_spacing(6, 0.07),
         grid=GRID_POS_4x4,
     ),
     "ThreeObjectThreeReceptacle_OOD": dict(
         slot_heights=[1.0, 1.0, 1.0, 0.95, 0.95, 0.95],
         half_edge_length=(0.11, 0.13),
-        spacing_matrix=_uniform_spacing(6, 0.1),
+        spacing_matrix=_uniform_spacing(6, 0.07),
         grid=GRID_POS_4x4,
     ),
 

@@ -321,22 +321,18 @@ class EvalRunner:
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
 
-            # Record video: first env of each task within each group (first episode only)
+            # Record video for all envs (first episode only)
             record_this_ep = self.args.record_video and ep == 0
+            total_group_envs_count = sum(gs for _, gs, _ in group_eval_info)
             if record_this_ep:
-                video_envs = []
-                for g_idx, (_, g_size, tasks_info) in enumerate(group_eval_info):
-                    g_start = group_starts[g_idx]
-                    for t_idx in range(len(tasks_info)):
-                        video_envs.append(g_start + t_idx)
-                video_frames = {env_i: [] for env_i in video_envs}
+                video_frames = {i: [] for i in range(total_group_envs_count)}
 
             env_infos = defaultdict(list)
             for _ in tqdm(range(self.args.segment_len),
                           desc=f"eval {prefix} ep{ep+1}/{num_eps}", leave=False):
                 val, action, logp = self._get_action(obs, instruct)
                 if record_this_ep:
-                    for env_i in video_envs:
+                    for env_i in range(total_group_envs_count):
                         video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
                 obs, reward, truncated, env_info = self.env.step(action)
                 if "episode" in env_info:
@@ -352,7 +348,7 @@ class EvalRunner:
                         g_name_v = entry[1] if entry else f"g{env_i}"
                         task_v = entry[2].replace(" ", "_") if entry else "unknown"
                         images_to_video(frames, str(eval_video_dir),
-                                        f"{g_name_v}_{task_v}", fps=10, verbose=False)
+                                        f"{g_name_v}_{task_v}_env{env_i}", fps=10, verbose=False)
 
             total_group_envs = sum(gs for _, gs, _ in group_eval_info)
             for env_idx in range(min(len(env_task_map), total_group_envs)):

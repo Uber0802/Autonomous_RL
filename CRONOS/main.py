@@ -610,17 +610,11 @@ class CronosRunner:
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
 
-            # Record video: first env of each task within each group (first episode only)
-            # At ep0, env local_i evaluates task (local_i % n_tasks), so envs 0..n_tasks-1
-            # within each group each get a different task — record those.
+            # Record video for all envs (first episode only)
             record_this_ep = self.args.record_video and ep == 0
+            total_group_envs_count = sum(gs for _, gs, _ in group_eval_info)
             if record_this_ep:
-                video_envs = []
-                for g_idx, (_, g_size, tasks_info) in enumerate(group_eval_info):
-                    g_start = group_starts[g_idx]
-                    for t_idx in range(len(tasks_info)):
-                        video_envs.append(g_start + t_idx)
-                video_frames = {env_i: [] for env_i in video_envs}
+                video_frames = {i: [] for i in range(total_group_envs_count)}
 
             # Rollout one episode
             env_infos = defaultdict(list)
@@ -629,7 +623,7 @@ class CronosRunner:
                 with torch.no_grad():
                     val, action, logp = self._get_action(obs, instruct, deterministic=True)
                 if record_this_ep:
-                    for env_i in video_envs:
+                    for env_i in range(total_group_envs_count):
                         video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
                 obs, reward, truncated, env_info = self.env.step(action)
                 if "episode" in env_info:
@@ -646,7 +640,7 @@ class CronosRunner:
                         g_name_v = entry[1] if entry else f"g{env_i}"
                         task_v = entry[2].replace(" ", "_") if entry else "unknown"
                         images_to_video(frames, str(eval_video_dir),
-                                        f"{g_name_v}_{task_v}", fps=10, verbose=False)
+                                        f"{g_name_v}_{task_v}_env{env_i}", fps=10, verbose=False)
 
             # Distribute per-env results to per-(group, task) accumulators
             total_group_envs = sum(gs for _, gs, _ in group_eval_info)
@@ -703,12 +697,8 @@ class CronosRunner:
         self.buffer.warmup(obs, instruct)
         print(f"[INIT] obs_mean: {obs.float().mean().item():.6f}, instruction: {instruct[0][:40]}...", flush=True)
 
-        # Record video for first env of each group only (not all envs)
-        from envs.config import get_group_starts
-        if self.yaml_config and self.yaml_config.groups:
-            self._video_envs = get_group_starts(self.yaml_config.groups)[:-1]  # first env per group
-        else:
-            self._video_envs = [0]
+        # Record video for all envs
+        self._video_envs = list(range(self.args.num_envs))
         self.video_frames = {i: [] for i in self._video_envs}
 
         # V0.3 M3: with fan_out, each YAML group is internally split by the scheduler.
