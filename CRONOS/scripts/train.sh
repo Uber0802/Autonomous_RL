@@ -87,7 +87,9 @@ case $RESET in
   *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
 esac
 
-RUN_TAG="CRONOS-V0.3-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
+# Derive config name from filename (e.g. configs/one_group_sequential_3x3.yaml → one_group_sequential_3x3)
+CONFIG_NAME=$(basename "$CONFIG" .yaml)
+RUN_TAG="CRONOS-V0.3-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
 WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
 CKPT="${CKPT:-}"
 

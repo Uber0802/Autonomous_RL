@@ -1,14 +1,8 @@
-# Two groups with different objects, receptacles, background, and table.
+# Two groups with different objects, receptacles, and background.
 # Sequential task order, fan-out enabled (default).
 #
-# Group A: ketchup bottle (7) + kitchen shovel (2) on yellow_plate (1) + cloth (2)
-# Group B: bread (3) + 7up can (5) on yellow_plate (1) + cloth (2)
-#
-# Object index reference (1-based):
-#   1=spatula, 2=kitchen_shovel, 3=bread, 4=spoon, 5=7up_can,
-#   6=eggplant, 7=ketchup_bottle, 8=sushi, 9=banana, 10=orange
-# Receptacle index reference (1-based):
-#   1=yellow_plate, 2=cloth
+# Group A: ketchup_bottle (7) + kitchen_shovel (2) on yellow_plate (1) + cloth (2)
+# Group B: bread (3) + 7up_can (5) on newspaper (4) + carpet (3)
 
 cronos_version: V0.3
 task_order: sequential
@@ -19,14 +13,8 @@ groups:
     num_envs: 32
     obj: [7, 2]              # ketchup_bottle, kitchen_shovel
     recep: [1, 2]            # yellow_plate, cloth
-    table: "flat_table"
-    background: 0            # fixed overlay index 0
+    background: 0
     task_sequence:
-      - "put obj1 on recep1"
-      - "put obj1 on recep2"
-      - "put obj2 on recep1"
-      - "put obj2 on recep2"
-    eval_tasks:
       - "put obj1 on recep1"
       - "put obj1 on recep2"
       - "put obj2 on recep1"
@@ -35,15 +23,9 @@ groups:
   - name: "group_B"
     num_envs: 32
     obj: [3, 5]              # bread, 7up_can
-    recep: [1, 2]            # yellow_plate, cloth
-    table: "flat_table"
-    background: 1            # fixed overlay index 1
+    recep: [4, 3]            # newspaper, carpet
+    background: 1
     task_sequence:
-      - "put obj1 on recep1"
-      - "put obj1 on recep2"
-      - "put obj2 on recep1"
-      - "put obj2 on recep2"
-    eval_tasks:
       - "put obj1 on recep1"
       - "put obj1 on recep2"
       - "put obj2 on recep1"

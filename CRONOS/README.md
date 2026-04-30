@@ -90,13 +90,30 @@ Each entry in the `groups:` list defines one group:
 | `task_sequence` | list[str] | no | Training task list using symbolic refs (`obj1`, `recep2`). Auto-generated if omitted. |
 | `eval_tasks` | list[str] | no | Eval task list. Defaults to unique tasks from `task_sequence`. |
 
-### Object / receptacle index reference (1-based)
+### Object index reference (1-based)
 
-```
-Objects:  1=spatula  2=kitchen_shovel  3=bread   4=spoon  5=7up_can
-          6=eggplant 7=ketchup_bottle  8=sushi   9=banana 10=orange
-Receptacles: 1=yellow_plate  2=cloth  3=blue_plate
-```
+| Index | Name | Index | Name | Index | Name |
+|---|---|---|---|---|---|
+| 1 | carrot | 10 | toy bear | 19 | nonstop can |
+| 2 | kitchen shovel | 11 | fast food cup | 20 | potato |
+| 3 | bread | 12 | plant | 21 | baguette |
+| 4 | plastic bottle | 13 | banana | 22 | champagne glass |
+| 5 | 7up can | 14 | hamburger | 23 | kitchen spoon |
+| 6 | zuchinni | 15 | golf ball | 24 | onion |
+| 7 | ketchup bottle | 16 | BBQ sauce | 25 | cup |
+| 8 | watering can | 17 | travel cup | | |
+| 9 | pipe | 18 | pepper | | |
+
+### Receptacle index reference (1-based)
+
+| Index | Name | Index | Name | Index | Name |
+|---|---|---|---|---|---|
+| 1 | yellow plate | 7 | tomato slice | 13 | cutting board |
+| 2 | cloth | 8 | pizza | 14 | chess board |
+| 3 | carpet | 9 | flat bowl | 15 | manhole cover |
+| 4 | newspaper | 10 | gramophone disk | 16 | envelope |
+| 5 | sheet metal | 11 | frying pan | 17 | notepad |
+| 6 | drawing tablet | 12 | mouse pad | | |
 
 ### Symbolic task format
 
@@ -137,7 +154,7 @@ groups:
     # task_sequence and eval_tasks auto-generated: all 4 NxM combinations
 ```
 
-### Two-group config with different objects
+### Two-group config with different objects and receptacles
 
 ```yaml
 cronos_version: V0.3
@@ -147,7 +164,7 @@ groups:
   - name: "group_A"
     num_envs: 32
     obj: [7, 2]              # ketchup_bottle, kitchen_shovel
-    recep: [1, 2]
+    recep: [1, 2]            # yellow_plate, cloth
     background: 0
     task_sequence:
       - "put obj1 on recep1"
@@ -158,7 +175,7 @@ groups:
   - name: "group_B"
     num_envs: 32
     obj: [3, 5]              # bread, 7up_can
-    recep: [1, 2]
+    recep: [4, 3]            # newspaper, carpet
     background: 1
     task_sequence:
       - "put obj1 on recep1"
