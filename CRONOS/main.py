@@ -610,8 +610,8 @@ class CronosRunner:
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
 
-            # Record video for all envs (first episode only)
-            record_this_ep = self.args.record_video and ep == 0
+            # Record video for all envs across ALL eval episodes
+            record_this_ep = self.args.record_video
             total_group_envs_count = sum(gs for _, gs, _ in group_eval_info)
             if record_this_ep:
                 video_frames = {i: [] for i in range(total_group_envs_count)}
@@ -630,17 +630,15 @@ class CronosRunner:
                     for k, v in env_info["episode"].items():
                         env_infos[k] += v
 
-            # Save eval videos to glob/eval_videos/
+            # Save eval videos: eval_videos/ep{outer_ep}/{prefix}/eval_ep{ep+1}/env{i}.mp4
             if record_this_ep:
-                eval_video_dir = self.glob_dir / "eval_videos" / prefix
+                eval_video_dir = (self.glob_dir / "eval_videos"
+                                  / f"ep{iteration + 1}" / prefix / f"eval_ep{ep + 1}")
                 eval_video_dir.mkdir(parents=True, exist_ok=True)
                 for env_i, frames in video_frames.items():
                     if frames:
-                        entry = env_task_map[env_i]
-                        g_name_v = entry[1] if entry else f"g{env_i}"
-                        task_v = entry[2].replace(" ", "_") if entry else "unknown"
                         images_to_video(frames, str(eval_video_dir),
-                                        f"{g_name_v}_{task_v}_env{env_i}", fps=10, verbose=False)
+                                        f"env{env_i}", fps=10, verbose=False)
 
             # Distribute per-env results to per-(group, task) accumulators
             total_group_envs = sum(gs for _, gs, _ in group_eval_info)
