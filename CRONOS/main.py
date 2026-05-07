@@ -704,6 +704,12 @@ class CronosRunner:
 
             # Save eval videos: eval_videos/ep{outer_ep}/{prefix}/eval_ep{ep+1}/env{i}.mp4
             if record_this_ep:
+                # V0.3.1: append the final post-step obs so each eval video has
+                # T+1 frames (matches AutoRL `render` and the standalone-eval
+                # `runner.eval`). Otherwise the recorded video ends at the input
+                # to the last action and the natural end-state is missing.
+                for env_i in range(total_group_envs_count):
+                    video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
                 eval_video_dir = (self.glob_dir / "eval_videos"
                                   / f"ep{iteration + 1}" / prefix / f"eval_ep{ep + 1}")
                 eval_video_dir.mkdir(parents=True, exist_ok=True)
@@ -806,8 +812,16 @@ class CronosRunner:
 
             # 5. Segment & Task Switching Logic
             if (step_idx + 1) % self.args.task_len == 0:
-                # Save video segment before switch
+                # V0.3.1: append the post-step `next_obs` as the final frame of
+                # this segment BEFORE the reset overwrites it. Matches AutoRL
+                # `render`'s "data dump: last image" pattern (T+1 frames per
+                # segment: T pre-step + 1 final post-step). Without this, the
+                # segment video ends at the input to the last action — its
+                # natural result is missing — and the seg N → seg N+1 boundary
+                # looks visually disjoint.
                 if self.args.record_video:
+                    for i in self._video_envs:
+                        self.video_frames[i].append(next_obs[i].cpu().numpy().copy())
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
                 segment_id += 1
 

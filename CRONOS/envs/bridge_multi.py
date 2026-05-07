@@ -497,6 +497,20 @@ class BasePickPlace(BaseEnv):
                 a.scene._reset_mask = prev_mask
 
         self._settle(0.5)
+
+        # V0.3.1 fix: re-snap the robot's qpos to initial after the settle.
+        # The caller (`ResetStrategy.reset_unsuitable_envs`) already called
+        # `reset_robot` to set the arm to initial pose, but the `_settle(0.5)`
+        # above runs another 0.5s of physics during which the controller can't
+        # perfectly hold initial qpos and the arm drifts. Without this re-snap,
+        # the first frame of the new segment renders the drifted pose instead
+        # of the cleanly-reset pose, making seg-N → seg-N+1 look like the
+        # reset never happened.
+        self.agent.reset(init_qpos=self.initial_qpos)
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+
         print(f"Reset Unsuitable. Obj: {obj_low_z_list}, Recep: {recep_low_z_list}")
         reset_env_count = len(set(obj_low_z_list) | set(recep_low_z_list))
         return reset_env_count
