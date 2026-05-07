@@ -14,6 +14,7 @@ Usage:
 import logging
 logging.getLogger("mani_skill").setLevel(logging.ERROR)
 
+import itertools
 import json
 import random
 import sys
@@ -24,6 +25,9 @@ import wandb
 from pathlib import Path
 from dataclasses import dataclass
 from collections import defaultdict
+from tqdm import tqdm
+
+from mani_skill.utils.visualization.misc import images_to_video
 
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
@@ -54,7 +58,9 @@ class EvalArgs:
 
     # --- Eval control ---
     segment_len: int = 80
-    num_eval_episode: int = 4
+    num_eval_episode: int = 4               # legacy / unused in single+sequential modes
+    eval_mode: str = "sequential"           # "sequential" (AutoRL default) | "single"
+    eval_sequences: int = 5                 # sequential mode: training_seq + (N-1) random perms
     config_path: str = ""
     task_order: str = "sequential"
     task_filter: str = ""
@@ -127,13 +133,14 @@ class EvalRunner:
         # Build a minimal args object that OpenVLAPolicy expects
         self.policy = OpenVLAPolicy(self._policy_args(), device_id=device_id_other)
 
-        # Config (load BEFORE env creation so env_n/env_m are correct)
+        # Config (load BEFORE env creation so env_n/env_m/num_envs are correct).
+        # V0.3: num_envs is authoritative from the YAML (sum of per-group num_envs);
+        # the CLI default is only a fallback when no config is provided.
         yaml_config = None
         if args.config_path:
             from envs.config import load_cronos_config
             yaml_config = load_cronos_config(args.config_path)
-            # Apply config fields but NOT num_envs (CLI wins for eval flexibility)
-            for field_name in ("env_n", "env_m",
+            for field_name in ("env_n", "env_m", "num_envs",
                                "obj1_index", "obj2_index", "obj3_index",
                                "plate1_index", "plate2_index", "plate3_index",
                                "scene", "task_order"):
@@ -231,7 +238,6 @@ class EvalRunner:
         wa.unsuitable_detector = "low_z"
         wa.enable_backward = False
         wa.backward_interval = 1
-        wa.debug_rollout = False
         return wa
 
     @torch.no_grad()
@@ -261,145 +267,132 @@ class EvalRunner:
                 f.write(f"  {task_name:<45s} success: {success:.4f}  grasp: {grasp:.4f}  obj_grasped: {obj_grasped:.4f}\n")
             f.write("\n")
 
-    def eval_all_groups(self, obj_set, prefix="eval"):
-        """Eval all groups using per-env rotation. Same logic as main.py."""
-        from tqdm import tqdm
-        from mani_skill.utils.visualization.misc import images_to_video
+    @torch.no_grad()
+    def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
+        """V0.3.1 — Standalone evaluation (port of AutoRL `render`).
 
-        self.policy.prep_rollout()
+        Mirrors `CronosRunner.eval` in main.py. All envs run the SAME (object[i],
+        receptacle[i]) — the caller broadcasts a single task. No fan-out. This is
+        the eval mode for `eval_only.py`; `eval_all_groups` (fan-out rotation) is
+        reserved for training-time eval inside `main.py:train()` and is intentionally
+        absent here.
+        """
+        if reset:
+            self.policy.prep_rollout()
+            obs, _, _ = self.env.reset(
+                obj_set_override=obj_set,
+                group_idx_override=group_idx,
+                skip_scheduler=True,
+            )
+            self.env.set_task(object, receptacle)
+        else:
+            self.env.set_task(object, receptacle)
+            obs = self.env.get_obs_image()
+        instruction = self.env.get_language_instructions()
 
-        per_group_evals = self.scheduler.get_eval_tasks_per_group()
-        n_groups = len(per_group_evals)
-        num_eps = self.args.num_eval_episode
+        print(f"  [{prefix}] {object[0]} -> {receptacle[0]}")
 
-        group_eval_info = []
-        group_starts = []
-        offset = 0
-        for g_name, g_size, g_tasks in per_group_evals:
-            tasks_info = []
-            for task in g_tasks:
-                obj, recep = TaskScheduler._extract_obj_recep(task)
-                tasks_info.append((task, obj, recep))
-            group_eval_info.append((g_name, g_size, tasks_info))
-            group_starts.append(offset)
-            offset += g_size
+        record = self.args.record_video
+        if record:
+            video_frames = [[] for _ in range(self.args.num_envs)]
 
-        accum = {}
-        for g_name, g_size, tasks_info in group_eval_info:
-            for task_str, _, _ in tasks_info:
-                accum[(g_name, task_str)] = defaultdict(list)
+        env_infos = defaultdict(list)
+        for _ in tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False):
+            if record:
+                for env_i in range(self.args.num_envs):
+                    video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+            val, action, logp = self._get_action(obs, instruction)
+            obs, reward, truncated, env_info = self.env.step(action)
+            if "episode" in env_info:
+                for k, v in env_info["episode"].items():
+                    env_infos[k] += v
 
-        print(f"  Eval rotation: {num_eps} episodes, {n_groups} groups")
-        for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
-            n_tasks = len(tasks_info)
-            print(f"  [{g_name}] {n_tasks} eval tasks, {g_size} envs "
-                  f"({g_size // n_tasks} envs/task/ep, "
-                  f"{num_eps * g_size // n_tasks} samples/task total)")
-            for t_idx, (task_str, _, _) in enumerate(tasks_info):
-                print(f"    T{t_idx}: {task_str}")
+        if record:
+            for env_i in range(self.args.num_envs):
+                video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+            render_dir = self.glob_dir / "eval_videos" / prefix
+            render_dir.mkdir(parents=True, exist_ok=True)
+            successes = env_infos.get("success", [0] * self.args.num_envs)
+            for i in range(self.args.num_envs):
+                s = int(successes[i]) if i < len(successes) else 0
+                obj_safe = str(object[i]).replace(" ", "_")
+                rec_safe = str(receptacle[i]).replace(" ", "_")
+                images_to_video(
+                    video_frames[i], str(render_dir),
+                    f"task{task_idx}-env{i}-{obj_safe}_{rec_safe}-s{s}",
+                    fps=10, verbose=False,
+                )
 
-        for ep in range(num_eps):
-            envs_obj = []
-            envs_recep = []
-            env_task_map = [None] * self.args.num_envs
+        return {k: float(np.mean(v)) for k, v in env_infos.items() if v}
 
-            for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
-                n_tasks = len(tasks_info)
-                g_start = group_starts[g_idx]
-                for local_i in range(g_size):
-                    t_idx = (local_i % n_tasks + ep) % n_tasks
-                    task_str, obj, recep = tasks_info[t_idx]
-                    envs_obj.append(obj)
-                    envs_recep.append(recep)
-                    env_task_map[g_start + local_i] = (g_idx, g_name, task_str)
+    def _build_sequences(self, task_pool):
+        """Return list of task orderings to evaluate.
 
-            while len(envs_obj) < self.args.num_envs:
-                envs_obj.append(envs_obj[-1])
-                envs_recep.append(envs_recep[-1])
+        Sequential mode: [training_seq] + (N-1) random distinct permutations.
+        Single mode: one one-task "sequence" per task in the pool.
+        """
+        if self.args.eval_mode == "single":
+            return [[t] for t in task_pool]
 
-            obs, _, _ = self.env.reset(obj_set_override=obj_set, skip_scheduler=True)
-            self.env.set_task(envs_obj, envs_recep)
-            instruct = self.env.get_language_instructions()
-
-            # Record video for all envs across ALL eval episodes
-            record_this_ep = self.args.record_video
-            total_group_envs_count = sum(gs for _, gs, _ in group_eval_info)
-            if record_this_ep:
-                video_frames = {i: [] for i in range(total_group_envs_count)}
-
-            env_infos = defaultdict(list)
-            for _ in tqdm(range(self.args.segment_len),
-                          desc=f"eval {prefix} ep{ep+1}/{num_eps}", leave=False):
-                val, action, logp = self._get_action(obs, instruct)
-                if record_this_ep:
-                    for env_i in range(total_group_envs_count):
-                        video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-                obs, reward, truncated, env_info = self.env.step(action)
-                if "episode" in env_info:
-                    for k, v in env_info["episode"].items():
-                        env_infos[k] += v
-
-            # Save eval videos: eval_videos/{prefix}/eval_ep{ep+1}/env{i}.mp4
-            if record_this_ep:
-                eval_video_dir = (self.glob_dir / "eval_videos"
-                                  / prefix / f"eval_ep{ep + 1}")
-                eval_video_dir.mkdir(parents=True, exist_ok=True)
-                for env_i, frames in video_frames.items():
-                    if frames:
-                        images_to_video(frames, str(eval_video_dir),
-                                        f"env{env_i}", fps=10, verbose=False)
-
-            total_group_envs = sum(gs for _, gs, _ in group_eval_info)
-            for env_idx in range(min(len(env_task_map), total_group_envs)):
-                entry = env_task_map[env_idx]
-                if entry is None:
-                    continue
-                _, g_name_r, task_str = entry
-                for k, vals in env_infos.items():
-                    if env_idx < len(vals):
-                        accum[(g_name_r, task_str)][k].append(vals[env_idx])
-
-        results = []
-        for g_idx, (g_name, g_size, tasks_info) in enumerate(group_eval_info):
-            n_tasks = len(tasks_info)
-            n_samples = num_eps * g_size // n_tasks
-            for task_str, _, _ in tasks_info:
-                key = (g_name, task_str)
-                stats = {k: float(np.mean(v)) for k, v in accum[key].items()}
-                actual_samples = len(accum[key].get("success", []))
-                print(f"  [{g_name}] {task_str} "
-                      f"({actual_samples} samples): "
-                      f"success={stats.get('success', 0.0):.4f} "
-                      f"grasp={stats.get('consecutive_grasp', 0.0):.4f}")
-                results.append((g_idx, g_name, task_str, n_samples, stats))
-
-        return results
+        all_perms = list(itertools.permutations(task_pool))
+        training_seq = tuple(task_pool)
+        other_perms = [p for p in all_perms if p != training_seq]
+        n_random = max(0, self.args.eval_sequences - 1)
+        random.seed(self.args.seed)
+        sampled = random.sample(other_perms, min(n_random, len(other_perms)))
+        return [list(training_seq)] + [list(p) for p in sampled]
 
     def run(self):
-        """Run in-domain and out-of-domain eval, log to wandb + CSV."""
+        """Run AutoRL-style eval (sequential default) for in-domain + out-of-domain."""
+        task_pool = list(self.scheduler.task_pool)
+        sequences = self._build_sequences(task_pool)
+        group_name = (self.scheduler.group_states[0].name
+                      if getattr(self.scheduler, "group_states", None)
+                      else "default")
+
+        print(f"\nEval mode: {self.args.eval_mode}, "
+              f"{len(sequences)} sequence(s), num_envs={self.args.num_envs}")
+        for i, seq in enumerate(sequences):
+            tag = "training" if (i == 0 and self.args.eval_mode == "sequential") else "task" if self.args.eval_mode == "single" else "random"
+            print(f"  seq{i} ({tag}): {seq}")
+
         eval_log = {"episode": 0, "total_steps": 0, "total_resets": 0}
 
         for kind_label, obj_set in [("in_domain", self.args.obj_set),
                                      ("out_of_domain", "rand_ood")]:
-            print(f"\nEvaluating {kind_label} ({self.args.num_eval_episode} episodes)")
-            results_raw = self.eval_all_groups(obj_set, prefix=kind_label)
+            print(f"\nEvaluating {kind_label}")
             report_results = []
-            for g_idx, g_name, task, n_samples, stats in results_raw:
-                scalars = self.recorder.log_eval(
-                    episode=0,
-                    total_steps=0,
-                    total_resets=0,
-                    eval_kind=kind_label,
-                    group=g_name,
-                    task=task,
-                    scene="default",
-                    n_envs=n_samples,
-                    success=stats.get("success", 0.0),
-                    grasp=stats.get("consecutive_grasp", 0.0),
-                    obj_grasped=stats.get("is_src_obj_grasped", 0.0),
-                )
-                eval_log.update(scalars)
-                report_results.append((task, stats))
+            for seq_idx, sequence in enumerate(sequences):
+                for task_idx, task_str in enumerate(sequence):
+                    obj, recep = TaskScheduler._extract_obj_recep(task_str)
+                    reset = (task_idx == 0)  # only at sequence start
+                    stats = self.eval(
+                        iteration=seq_idx,
+                        task_idx=task_idx,
+                        obj_set=obj_set,
+                        object=[obj] * self.args.num_envs,
+                        receptacle=[recep] * self.args.num_envs,
+                        prefix=f"{kind_label}_seq{seq_idx}_task{task_idx}",
+                        reset=reset,
+                    )
+                    print(f"    seq{seq_idx} task{task_idx}: {task_str} "
+                          f"success={stats.get('success', 0.0):.4f} "
+                          f"grasp={stats.get('consecutive_grasp', 0.0):.4f}")
+                    scalars = self.recorder.log_eval(
+                        episode=0,
+                        total_steps=seq_idx,
+                        total_resets=0,
+                        eval_kind=kind_label,
+                        group=group_name,
+                        task=task_str,
+                        scene="default",
+                        n_envs=self.args.num_envs,
+                        success=stats.get("success", 0.0),
+                        grasp=stats.get("consecutive_grasp", 0.0),
+                        obj_grasped=stats.get("is_src_obj_grasped", 0.0),
+                    )
+                    eval_log.update(scalars)
+                    report_results.append((f"seq{seq_idx}_task{task_idx}: {task_str}", stats))
             eval_log.update(self.recorder.build_wandb_eval_panel(kind_label))
             self._write_eval_report(f"{kind_label.replace('_', ' ').title()} Evaluation:\n",
                                     report_results)

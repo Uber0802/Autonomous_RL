@@ -3,7 +3,7 @@
 #
 # Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config]
 #
-#   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c
+#   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c | t2560a|t2560b|t2560c
 #   seed:   random seed (default: 0)
 #   cuda:   GPU device (default: 3)
 #   reset:  normal|LSR|HSR|LSR+HSR|noep (default: normal)
@@ -16,8 +16,8 @@
 #   noep     — LSR+HSR without episodic reset (reset_mode=none)
 #
 # Resume: set CKPT to the previous segment's checkpoint dir:
-#   CKPT=.../glob/episode_0128 bash test.sh t80b 0 3
-#   CKPT=.../glob/episode_0032 bash test.sh t320b 0 3 LSR
+#   CKPT=.../glob/episode_0128 bash scripts/train.sh t80b 0 3
+#   CKPT=.../glob/episode_0032 bash scripts/train.sh t320b 0 3 LSR
 #
 # All values are PER-RUN (relative). max_reset = episodes x 64 (exact for non-HSR,
 # ×5 headroom for HSR/LSR+HSR/noep which add soft resets).
@@ -36,6 +36,10 @@
 # │ T1280 a  │    8     │   655,360     │     655,360     │     512     │   2,560      │
 # │ T1280 b  │    8     │   655,360     │   1,310,720     │     512     │   2,560      │
 # │ T1280 c  │   20     │ 1,638,400     │   2,949,120     │   1,280     │   6,400      │
+# ├──────────┼──────────┼───────────────┼─────────────────┼─────────────┼──────────────┤
+# │ T2560 a  │    4     │   655,360     │     655,360     │     256     │   1,280      │
+# │ T2560 b  │    4     │   655,360     │   1,310,720     │     256     │   1,280      │
+# │ T2560 c  │   10     │ 1,638,400     │   2,949,120     │     640     │   3,200      │
 # └──────────┴──────────┴───────────────┴─────────────────┴─────────────┴──────────────┘
 
 set -e
@@ -59,7 +63,8 @@ case $MODE in
   t80a|t80b|t80c)       HORIZON_TAG="T80"   ;;
   t320a|t320b|t320c)     HORIZON_TAG="T320"  ;;
   t1280a|t1280b|t1280c)  HORIZON_TAG="T1280" ;;
-  *) echo "Unknown mode: $MODE"; echo "Usage: bash test.sh [t80a|...|t1280c] [seed] [cuda] [reset]"; exit 1 ;;
+  t2560a|t2560b|t2560c)  HORIZON_TAG="T2560" ;;
+  *) echo "Unknown mode: $MODE"; echo "Usage: bash scripts/train.sh [t80a|...|t2560c] [seed] [cuda] [reset]"; exit 1 ;;
 esac
 
 # --- Reset mode → CLI flags ---
@@ -113,6 +118,8 @@ case $MODE in
   t320c)     _max_ep=80 ;;
   t1280a|t1280b) _max_ep=8 ;;
   t1280c)    _max_ep=20 ;;
+  t2560a|t2560b) _max_ep=4 ;;
+  t2560c)    _max_ep=10 ;;
 esac
 
 _exact_resets=$(( _max_ep * _num_envs ))
@@ -202,6 +209,30 @@ case $MODE in
         --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
         --max-episodes 20 --max-reset $MAX_RESET \
         --eval-interval 1 --vla-checkpoint-interval 2 \
+        --vla-load-path "$CKPT"
+    ;;
+
+  # ── T2560 ─────────────────────────────────────────────────────────────
+  t2560a)
+    eval $COMMON \
+        --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 4 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 1
+    ;;
+  t2560b)
+    _require_ckpt
+    eval $COMMON \
+        --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 4 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 1 \
+        --vla-load-path "$CKPT"
+    ;;
+  t2560c)
+    _require_ckpt
+    eval $COMMON \
+        --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
+        --max-episodes 10 --max-reset $MAX_RESET \
+        --eval-interval 1 --vla-checkpoint-interval 1 \
         --vla-load-path "$CKPT"
     ;;
 esac

@@ -1,0 +1,53 @@
+# Eval config for `configs/two_group_sequential_2x2.yaml`.
+#
+# CAVEAT — multi-group standalone eval is NOT FULLY SUPPORTED in V0.3.1.
+# `eval_only.py` (and main.py --eval-single / --eval-sequential) broadcasts ONE
+# (object, receptacle) to all envs, but with two groups the env loads different
+# physical objects per env-range — set_task("kitchen shovel", ...) succeeds for
+# group_A's envs (which have it) and FAILS for group_B's envs. This config is
+# included for completeness; multi-group eval is V0.4 M2 work.
+#
+# For now, to evaluate a checkpoint trained on this two-group config, run two
+# single-group eval passes — one per group:
+#   bash scripts/eval.sh /path/ckpt configs/eval/two_group_sequential_2x2_groupA.yaml 0 5
+#   bash scripts/eval.sh /path/ckpt configs/eval/two_group_sequential_2x2_groupB.yaml 0 5
+# (or train using `configs/two_group_sequential_2x2.yaml` and rely on
+# `--eval-at-start` / training-time eval, which uses fan-out rotation and supports
+# multi-group natively.)
+
+cronos_version: V0.3
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "group_A"
+    num_envs: 8
+    obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]                    # yellow_plate, cloth
+    background: 0
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  - name: "group_B"
+    num_envs: 8
+    obj: [3, 5]                      # bread, 7up_can
+    recep: [4, 3]                    # newspaper, carpet
+    background: 1
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

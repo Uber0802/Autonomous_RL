@@ -117,7 +117,6 @@ class Args:
     ppo_log: str = "ppo_log.txt"            # per-minibatch PPO progress (in glob_dir)
     eval_report: str = "eval_report.txt"    # per-eval success rate summary (in glob_dir)
     log_file: str = "run.log"               # tee of stdout for the whole run (in glob_dir); empty string disables
-    debug_rollout: bool = False             # per-step [ROLLOUT] dump during iteration 0 (verbose)
 
 class CronosRunner:
     """Coordinates the CRONOS training workflow."""
@@ -537,6 +536,79 @@ class CronosRunner:
 
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
+    @torch.no_grad()
+    def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
+        """V0.3.1 — Standalone evaluation (port of AutoRL `render`).
+
+        All envs run the SAME (object[i], receptacle[i]) — typically the caller broadcasts
+        a single task as `[object_str]*num_envs / [receptacle_str]*num_envs`. Runs one
+        `segment_len`-step rollout with deterministic policy, records per-env videos,
+        and returns aggregated stats. **No fan-out** — that's `eval_all_groups`.
+
+        This is the eval mode used by `--eval-single`, `--eval-sequential`, and
+        `eval_only.py`; `eval_all_groups` (fan-out rotation) is reserved for
+        training-time eval (`--eval-at-start` and the periodic eval inside `train()`).
+
+        Args:
+            iteration: epoch / sequence index (logging only)
+            task_idx: task index within iteration (logging + video name)
+            obj_set: physics randomization set (e.g. "rand", "rand_ood")
+            object: list[str] of length num_envs — object names
+            receptacle: list[str] of length num_envs — receptacle names
+            prefix: video sub-dir name under `glob/eval_videos/`
+            reset: True → env.reset (start of a sequence); False → continue from
+                   current state (chained sequence steps, AutoRL-aligned)
+            group_idx: which YAML group's physical objects to broadcast to all envs
+                       (default 0; multi-group sequential eval is V0.4 work)
+        """
+        if reset:
+            self.policy.prep_rollout()
+            obs, _, _ = self.env.reset(
+                obj_set_override=obj_set,
+                group_idx_override=group_idx,
+                skip_scheduler=True,
+            )
+            self.env.set_task(object, receptacle)
+        else:
+            self.env.set_task(object, receptacle)
+            obs = self.env.get_obs_image()
+        instruction = self.env.get_language_instructions()
+
+        print(f"  [{prefix}] {object[0]} -> {receptacle[0]}")
+
+        record = self.args.record_video
+        if record:
+            video_frames = [[] for _ in range(self.args.num_envs)]
+
+        env_infos = defaultdict(list)
+        for _ in tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False):
+            if record:
+                for env_i in range(self.args.num_envs):
+                    video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+            val, action, logp = self._get_action(obs, instruction, deterministic=True)
+            obs, reward, truncated, env_info = self.env.step(action)
+            if "episode" in env_info:
+                for k, v in env_info["episode"].items():
+                    env_infos[k] += v
+
+        if record:
+            for env_i in range(self.args.num_envs):
+                video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+            render_dir = self.glob_dir / "eval_videos" / prefix
+            render_dir.mkdir(parents=True, exist_ok=True)
+            successes = env_infos.get("success", [0] * self.args.num_envs)
+            for i in range(self.args.num_envs):
+                s = int(successes[i]) if i < len(successes) else 0
+                obj_safe = str(object[i]).replace(" ", "_")
+                rec_safe = str(receptacle[i]).replace(" ", "_")
+                images_to_video(
+                    video_frames[i], str(render_dir),
+                    f"task{task_idx}-env{i}-{obj_safe}_{rec_safe}-s{s}",
+                    fps=10, verbose=False,
+                )
+
+        return {k: float(np.mean(v)) for k, v in env_infos.items() if v}
+
     def eval_all_groups(self, iteration, obj_set, prefix="eval"):
         """V0.3 M4: Evaluate all groups using per-env rotation.
 
@@ -693,7 +765,6 @@ class CronosRunner:
         else:
             obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
-        print(f"[INIT] obs_mean: {obs.float().mean().item():.6f}, instruction: {instruct[0][:40]}...", flush=True)
 
         # Record video for all envs
         self._video_envs = list(range(self.args.num_envs))
@@ -724,9 +795,6 @@ class CronosRunner:
 
             # 2. Environment Step
             next_obs, reward, truncated, info = self.env.step(action)
-
-            if self.args.debug_rollout and self.iteration == 0:
-                print(f"[ROLLOUT] step: {step_idx + 1}, reward: {reward.mean().item():.6f}, value: {value.mean().item():.6f}, logprob: {logprob.mean().item():.6f}, action_mean: {action.float().mean().item():.6f}, obs_mean: {obs.float().mean().item():.6f}", flush=True)
 
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
@@ -939,6 +1007,17 @@ class CronosRunner:
                     f"{'=' * 50}\n"
                 )
 
+                # V0.3.1: in non-episodic mode, eval's env.reset would re-randomize
+                # object poses / robot pose and break training continuity. Snapshot
+                # the live scene state and restore it after eval. Skipped for
+                # `reset_mode=per_episode` (next iteration's env.reset would clobber
+                # the live state anyway) and skipped on the very first iteration
+                # (no `_no_reset_obs` yet → no continuity to preserve).
+                saved_env_state = None
+                if (self.args.reset_mode == "none"
+                        and hasattr(self, '_no_reset_obs')):
+                    saved_env_state = self.env.get_env_state()
+
                 def _run_eval_pass(obj_set, kind_prefix, kind_label):
                     """V0.3: All groups × all tasks simultaneously, num_eval_episode episodes."""
                     print(f"Evaluating {kind_label} at {total_steps} "
@@ -974,6 +1053,16 @@ class CronosRunner:
                 wandb.log(eval_log, step=total_steps)
                 self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
                 self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
+
+                # V0.3.1: restore training scene state if we snapshotted above.
+                # set_env_state restores poses but not the env's per-env task
+                # tensors, so re-apply the current training task via set_task,
+                # then refresh the cached obs that the next rollout will read.
+                if saved_env_state is not None:
+                    self.env.set_env_state(saved_env_state)
+                    objs, receps = self.scheduler.get_next_tasks()
+                    self.env.set_task(objs, receps)
+                    self._no_reset_obs = self.env.get_obs_image()
 
             # 6. Checkpoint (includes training progress for resume)
             if (iteration + 1) % self.args.vla_checkpoint_interval == 0 or should_stop:

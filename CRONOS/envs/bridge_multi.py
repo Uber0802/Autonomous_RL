@@ -219,7 +219,6 @@ class BasePickPlace(BaseEnv):
         self.consecutive_grasp.zero_()
         self.episode_stats["is_src_obj_grasped"].zero_()
         self.episode_stats["consecutive_grasp"].zero_()
-        print("reset Grasp Stats")
 
     def evaluate(self, success_require_src_completely_on_target=True):
         xy_flag_required_offset = 0.01
@@ -453,16 +452,35 @@ class BasePickPlace(BaseEnv):
         quant_indices = indices % l2
         quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
 
+        # V0.3.1 HSR fix: respawn at the slot the env's task object actually
+        # occupies. xyz_configs is shape (Nconfigs, NUM_OBJECTS+NUM_RECEPTACLES, 3)
+        # — slots [0..N-1] are carrot positions, [N..N+M-1] are plate positions.
+        # Earlier the code hardcoded pos[0] for every carrot and pos[2] for every
+        # plate (V0.1's (N=2,M=1) shape), so larger NxM configs respawned objects
+        # at the wrong xy region (sometimes inside another slot's region or a
+        # plate-position-as-carrot mix). Compute the per-env active slot from
+        # `_all_carrot_ids` / `_all_plate_ids` and use it directly.
+        # Also fix the quaternion: initial spawn uses quat_configs[...,0] for
+        # carrot (rotated) and quat_configs[...,1] for plate (identity); HSR
+        # was using [1] (identity) for both, leaving carrots un-rotated after
+        # respawn.
+        N = self.NUM_OBJECTS
+        all_c = torch.stack(self._all_carrot_ids, dim=0)        # (N, num_envs)
+        all_p = torch.stack(self._all_plate_ids, dim=0)         # (M, num_envs)
+        active_c = (all_c == self.select_carrot_ids.unsqueeze(0)).int().argmax(dim=0)  # (num_envs,)
+        active_p = (all_p == self.select_plate_ids.unsqueeze(0)).int().argmax(dim=0)   # (num_envs,)
+
         # loop over plate
         for idx, a in enumerate(plate_actor):
             if idx in recep_low_z_list:
                 pos = xyz_sample[idx]
                 quant = quant_sample[idx]
+                s = N + int(active_p[idx].item())
                 prev_mask = a.scene._reset_mask.clone()
                 a.scene._reset_mask[:] = False
                 a.scene._reset_mask[idx] = True
                 # set the pose in batched format
-                a.set_pose(Pose.create_from_pq(p=pos[2], q=quant[1]))
+                a.set_pose(Pose.create_from_pq(p=pos[s], q=quant[1]))
                 a.scene._reset_mask = prev_mask
 
         # loop over carrot
@@ -470,11 +488,12 @@ class BasePickPlace(BaseEnv):
             if idx in obj_low_z_list:
                 pos = xyz_sample[idx]
                 quant = quant_sample[idx]
+                s = int(active_c[idx].item())
                 prev_mask = a.scene._reset_mask.clone()
                 a.scene._reset_mask[:] = False
                 a.scene._reset_mask[idx] = True
                 # set the pose in batched format
-                a.set_pose(Pose.create_from_pq(p=pos[0], q=quant[1]))
+                a.set_pose(Pose.create_from_pq(p=pos[s], q=quant[0]))
                 a.scene._reset_mask = prev_mask
 
         self._settle(0.5)
@@ -734,8 +753,6 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         params = POSE_PRESETS[self.POSE_PRESET]
         self.xyz_configs = generate_pose_configs(**params)
         self.quat_configs = QUAT_CONFIGS.copy()
-        print(f"xyz_configs: {self.xyz_configs.shape}")
-        print(f"quat_configs: {self.quat_configs.shape}")
 
     def _generate_OOD_init_pose(self):
         if not self.POSE_PRESET_OOD:
@@ -745,8 +762,6 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         params = POSE_PRESETS[self.POSE_PRESET_OOD]
         self.xyz_configs = generate_pose_configs(**params)
         self.quat_configs = QUAT_CONFIGS.copy()
-        print(f"xyz_configs: {self.xyz_configs.shape}")
-        print(f"quat_configs: {self.quat_configs.shape}")
 
     def get_carrot_actors(self):
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
@@ -1013,6 +1028,17 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
 
         self.agent.robot.set_pose(self.initial_robot_pos)
         self.agent.reset(init_qpos=self.initial_qpos)
+
+        # V0.3.1 fix: push the just-set CPU state (robot at initial pose +
+        # initial qpos) to the GPU so the camera renders the robot at its
+        # initial pose. Without this, BaseEnv.reset()'s post-init render reads
+        # the stale GPU state from the prior _settle (when the robot was at
+        # safe_robot_pos ~1m above the table) and the rollout's first frame
+        # shows the robot floating in the air. Mirrors the GPU-sync block in
+        # ResetStrategy.reset_robot which is correctly placed after qpos snap.
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
 
         # Bounding boxes
         self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])

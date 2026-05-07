@@ -1,0 +1,26 @@
+# Default eval config for the 2x2 single-group case.
+# Used by BOTH `configs/one_group_pure_random_2x2.yaml` and
+# `configs/one_group_seq_random_2x2.yaml` training configs — neither has a
+# canonical training order, so eval samples random permutations directly.
+#
+# Use with: bash scripts/eval.sh /path/to/episode_XXXX configs/eval/one_group_pure_random_2x2.yaml 0 5
+
+cronos_version: V0.3
+task_order: sequence_random              # eval default: random permutations (AutoRL parity)
+fan_out: true
+
+groups:
+  - name: "pure_random"
+    num_envs: 8                      # V24: 8 % 4 = 0
+    obj: [7, 2]
+    recep: [1, 2]
+    task_sequence:                   # canonical "as-listed" order = sequence 0
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

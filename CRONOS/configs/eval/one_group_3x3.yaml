@@ -1,0 +1,19 @@
+# Eval config for `configs/one_group_sequential_3x3.yaml`.
+# 3 objects x 3 receptacles = 9 tasks.
+#
+# Use with: bash scripts/eval.sh /path/to/episode_XXXX configs/eval/one_group_sequential_3x3.yaml 0 5
+#
+# Note: with 9 tasks, 9! = 362,880 permutations. Default sequential eval samples 4
+# of them in addition to the training order; set `--eval-sequences N` to change.
+
+cronos_version: V0.3
+task_order: sequence_random              # eval default: random permutations (AutoRL parity)
+fan_out: true
+
+groups:
+  - name: "scene_3x3"
+    num_envs: 9                      # V24: 9 % 9 = 0; one env per task per pass
+    obj: [10, 4, 11]                 # toy_bear, plastic_bottle, fast_food_cup
+    recep: [5, 6, 9]                 # sheet_metal, drawing_tablet, flat_bowl
+    # task_sequence and eval_tasks auto-generate to all 9 NxM combinations
+    # (matches the training config which also auto-generates them).

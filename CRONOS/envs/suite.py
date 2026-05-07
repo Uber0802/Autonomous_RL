@@ -198,6 +198,4 @@ class TaskSuite:
             raise ValueError(f"Unknown preset: {preset_name}. Available: {list(POSE_PRESETS.keys())}")
         params = POSE_PRESETS[preset_name]
         xyz = generate_pose_configs(**params)
-        print(f"xyz_configs: {xyz.shape}")
-        print(f"quat_configs: {QUAT_CONFIGS.shape}")
         return xyz, QUAT_CONFIGS.copy()

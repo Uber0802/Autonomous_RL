@@ -286,6 +286,30 @@ class CronosWrapper:
         self.env.unwrapped.set_current_task(objects, receptacles)
         self.reward_shaper.reward_old.zero_()
 
+    def get_env_state(self):
+        """V0.3.1: snapshot the SAPIEN scene state (object/receptacle poses,
+        robot qpos/qvel, articulation kinematics) as a per-env tensor.
+
+        Used to preserve training state across an eval boundary in non-episodic
+        mode (`reset_mode=none`). Eval would otherwise call `env.reset(...)`
+        which re-randomizes object poses and re-poses the robot, breaking the
+        non-episodic continuity that the user opted into. Pair with
+        `set_env_state(state)` after eval.
+
+        Returns: per-env state tensor (passes through ManiSkill `BaseEnv.get_state`).
+        """
+        return self.env.unwrapped.get_state()
+
+    def set_env_state(self, state):
+        """V0.3.1: restore a previously-snapshotted scene state.
+
+        Caller MUST re-apply the current training task via `set_task(...)` after
+        calling this — `set_state` restores poses but not the env's per-env
+        `select_*_ids` task tensors (those are populated by
+        `_initialize_episode_pre` on a normal reset path).
+        """
+        self.env.unwrapped.set_state(state)
+
     def get_task_pool(self):
         """Exposes the internal environment's task pool."""
         return self.env.unwrapped.task_pool()[0]

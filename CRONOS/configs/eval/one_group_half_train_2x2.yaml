@@ -1,0 +1,23 @@
+# Eval config for `configs/one_group_half_train_2x2.yaml` (generalization check).
+# Trains on 2 of the 4 NxM combinations; evaluates on all 4.
+#
+# Use with: bash scripts/eval.sh /path/to/episode_XXXX configs/eval/one_group_half_train_2x2.yaml 0 5
+# Default eval_mode: sequential (training_seq + 4 random perms). Override with --eval-mode single.
+
+cronos_version: V0.3
+task_order: sequence_random              # eval default: random permutations (AutoRL parity)
+fan_out: true
+
+groups:
+  - name: "half_train"
+    num_envs: 8                      # V24: 8 % 4 eval_tasks = 0; smaller than training (64) for fast eval
+    obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]                    # yellow_plate, cloth
+    task_sequence:                   # MUST match training task_sequence — used as sequence 0
+      - "put obj1 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:                      # all 4 NxM combinations (generalization set)
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
