@@ -403,14 +403,29 @@ class BasePickPlace(BaseEnv):
     def get_recep_pos(self):    
         return self.extra_stats["extra_pos_plate"]
 
-    def reset_unsuitable_envs(self, env_idx=[], obj_mask=None, recep_mask=None):
+    def reset_unsuitable_envs(self, env_idx=[], obj_mask=None, recep_mask=None,
+                              reasons=None, fully_reset_envs=None):
         """Respawns envs whose objects/receptacles have fallen.
 
         V0.2 M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
         (by ``ResetStrategy.reset_unsuitable_envs``), they come from the
         registered ``UnsuitableDetector`` and are the source of truth for
-        which envs/actors to respawn. When omitted, falls back to the V0.1
-        inlined ``< 0.7`` thresholds for backward compatibility.
+        which task-relevant actor (current carrot or current plate) to respawn
+        per env. When omitted, falls back to the V0.1 inlined ``< 0.7``
+        thresholds for backward compatibility.
+
+        V0.4 M3c: optional ``reasons`` is a list[dict[env_idx, str]] from the
+        detector explaining which axis violated the workspace AABB; printed
+        with the HSR log line so HSR fires are diagnostic-grade.
+
+        V0.4 M3 (full-env fix): optional ``fully_reset_envs`` is a bool tensor
+        of shape ``(num_envs,)`` from the per_env / all scopes. For each env
+        with ``fully_reset_envs[i] == True``, every actor of that env (all N
+        carrots AND all M plates, not just the task-relevant pair) is
+        respawned to a fresh ``xyz_configs`` draw. Hidden slots (cid < 0) are
+        skipped. ``obj_mask``/``recep_mask`` are only consulted for envs that
+        are NOT in ``fully_reset_envs`` (so per_actor scope still hits the
+        task-relevant single-actor path).
         """
         xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
         xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
@@ -452,67 +467,123 @@ class BasePickPlace(BaseEnv):
         quant_indices = indices % l2
         quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
 
-        # V0.3.1 HSR fix: respawn at the slot the env's task object actually
-        # occupies. xyz_configs is shape (Nconfigs, NUM_OBJECTS+NUM_RECEPTACLES, 3)
-        # — slots [0..N-1] are carrot positions, [N..N+M-1] are plate positions.
-        # Earlier the code hardcoded pos[0] for every carrot and pos[2] for every
-        # plate (V0.1's (N=2,M=1) shape), so larger NxM configs respawned objects
-        # at the wrong xy region (sometimes inside another slot's region or a
-        # plate-position-as-carrot mix). Compute the per-env active slot from
-        # `_all_carrot_ids` / `_all_plate_ids` and use it directly.
-        # Also fix the quaternion: initial spawn uses quat_configs[...,0] for
-        # carrot (rotated) and quat_configs[...,1] for plate (identity); HSR
-        # was using [1] (identity) for both, leaving carrots un-rotated after
-        # respawn.
+        # V0.3.1 HSR fix: respawn the env's task carrot/plate at the position
+        # of the active slot it actually occupies. Use the per-env `_reset_mask`
+        # trick (proven correct for physics — only respawned envs are touched).
+        # Note: this means the post-respawn frame has a 1-step camera lag (the
+        # new positions appear at frame 1 of the next segment, not frame 0),
+        # because SAPIEN 3's GPU camera buffer is updated by `scene.step` and
+        # masked set_pose calls don't trigger a re-render. A full-batch set_pose
+        # alternative was tried but causes non-target envs' actors to "fly
+        # away" on the next `_settle` due to floating-point round-trip
+        # perturbations. The 1-frame visual lag is the lesser of the two evils.
+        #
+        # `xyz_configs` is shape (Nconfigs, NUM_OBJECTS+NUM_RECEPTACLES, 3) —
+        # slots [0..N-1] are carrot positions, [N..N+M-1] are plate positions.
+        # `quat_configs[...,0]` is the rotated carrot quat, `[...,1]` is the
+        # identity plate quat (matches `_initialize_episode`).
         N = self.NUM_OBJECTS
+        M = self.NUM_RECEPTACLES
         all_c = torch.stack(self._all_carrot_ids, dim=0)        # (N, num_envs)
         all_p = torch.stack(self._all_plate_ids, dim=0)         # (M, num_envs)
         active_c = (all_c == self.select_carrot_ids.unsqueeze(0)).int().argmax(dim=0)  # (num_envs,)
         active_p = (all_p == self.select_plate_ids.unsqueeze(0)).int().argmax(dim=0)   # (num_envs,)
 
-        # loop over plate
-        for idx, a in enumerate(plate_actor):
-            if idx in recep_low_z_list:
-                pos = xyz_sample[idx]
-                quant = quant_sample[idx]
-                s = N + int(active_p[idx].item())
-                prev_mask = a.scene._reset_mask.clone()
-                a.scene._reset_mask[:] = False
-                a.scene._reset_mask[idx] = True
-                # set the pose in batched format
-                a.set_pose(Pose.create_from_pq(p=pos[s], q=quant[1]))
-                a.scene._reset_mask = prev_mask
+        # V0.4 M3 (full-env fix): build the set of envs that need every actor
+        # respawned. For those envs we iterate over ALL N carrot slots + ALL M
+        # plate slots (skipping hidden slots) instead of the single
+        # task-relevant pair. Other envs fall through to the per-actor path.
+        if fully_reset_envs is not None:
+            full_idx = torch.nonzero(fully_reset_envs, as_tuple=False).squeeze()
+            if full_idx.ndim == 0:
+                full_envs_list = [full_idx.item()] if full_idx.numel() > 0 else []
+            else:
+                full_envs_list = full_idx.tolist()
+        else:
+            full_envs_list = []
+        full_envs_set = set(full_envs_list)
 
-        # loop over carrot
-        for idx, a in enumerate(carrot_actor):
-            if idx in obj_low_z_list:
+        def _masked_set_pose(actor, env_i, p, q):
+            prev = actor.scene._reset_mask.clone()
+            actor.scene._reset_mask[:] = False
+            actor.scene._reset_mask[env_i] = True
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+            actor.scene._reset_mask = prev
+
+        # Full-env reset path: every actor of every env in full_envs_list.
+        for env_i in full_envs_list:
+            pos = xyz_sample[env_i]
+            quant = quant_sample[env_i]
+            for slot in range(N):
+                cid = int(all_c[slot, env_i].item())
+                if cid < 0:
+                    continue  # hidden slot (V0.3 M2 mixed-N/M)
+                name = self.carrot_names[cid]
+                actor = self.objs_carrot[name]
+                phys = self._slot(slot)
+                _masked_set_pose(actor, env_i, pos[phys], quant[0])
+            for slot in range(M):
+                pid = int(all_p[slot, env_i].item())
+                if pid < 0:
+                    continue
+                name = self.plate_names[pid]
+                actor = self.objs_plate[name]
+                phys = self._slot(N + slot)
+                _masked_set_pose(actor, env_i, pos[phys], quant[1])
+
+        # Per-actor path: only the task-relevant carrot/plate, ONLY for envs
+        # NOT covered by the full-env path (so per_actor scope still works).
+        for idx, a in enumerate(plate_actor):
+            if idx in recep_low_z_list and idx not in full_envs_set:
                 pos = xyz_sample[idx]
                 quant = quant_sample[idx]
-                s = int(active_c[idx].item())
-                prev_mask = a.scene._reset_mask.clone()
-                a.scene._reset_mask[:] = False
-                a.scene._reset_mask[idx] = True
-                # set the pose in batched format
-                a.set_pose(Pose.create_from_pq(p=pos[s], q=quant[0]))
-                a.scene._reset_mask = prev_mask
+                s = self._slot(N + int(active_p[idx].item()))
+                _masked_set_pose(a, idx, pos[s], quant[1])
+
+        for idx, a in enumerate(carrot_actor):
+            if idx in obj_low_z_list and idx not in full_envs_set:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                s = self._slot(int(active_c[idx].item()))
+                _masked_set_pose(a, idx, pos[s], quant[0])
+
+        # V0.4 M3a: snapshot the current robot qpos BEFORE _settle so we can
+        # restore it after. In V0.3.1 the post-_settle snap forced the arm to
+        # `self.initial_qpos`, which broke HSR-only semantics by silently
+        # resetting the robot whenever HSR fired. The drift during _settle's
+        # 0.5s of physics is still a real problem (PD control can't hold pose
+        # perfectly), but the right fix is to restore the pre-settle pose, not
+        # the home pose. The train loop calls reset_robot() separately when LSR
+        # is requested; that path snaps to initial_qpos.
+        robot_qpos_pre_settle = self.agent.robot.get_qpos().clone()
 
         self._settle(0.5)
 
-        # V0.3.1 fix: re-snap the robot's qpos to initial after the settle.
-        # The caller (`ResetStrategy.reset_unsuitable_envs`) already called
-        # `reset_robot` to set the arm to initial pose, but the `_settle(0.5)`
-        # above runs another 0.5s of physics during which the controller can't
-        # perfectly hold initial qpos and the arm drifts. Without this re-snap,
-        # the first frame of the new segment renders the drifted pose instead
-        # of the cleanly-reset pose, making seg-N → seg-N+1 look like the
-        # reset never happened.
-        self.agent.reset(init_qpos=self.initial_qpos)
+        self.agent.reset(init_qpos=robot_qpos_pre_settle)
         self.scene._gpu_apply_all()
         self.scene.px.gpu_update_articulation_kinematics()
         self.scene._gpu_fetch_all()
 
-        print(f"Reset Unsuitable. Obj: {obj_low_z_list}, Recep: {recep_low_z_list}")
-        reset_env_count = len(set(obj_low_z_list) | set(recep_low_z_list))
+        flagged = sorted(set(obj_low_z_list) | set(recep_low_z_list) | full_envs_set)
+        if reasons:
+            # V0.4 M3c: flatten per-env reasons to a compact one-line summary.
+            # `reasons[i]` is {} for healthy envs and {i: "axis violation"} otherwise.
+            reason_str = ", ".join(
+                f"env{i}: {next(iter(reasons[i].values()))}"
+                for i in flagged if i < len(reasons) and reasons[i]
+            )
+        else:
+            reason_str = ""
+        # V0.4 M3 (full-env fix): show envs that were actually respawned,
+        # broken down by which path handled them. The per-actor lists are
+        # empty under per_env / all scopes (ResetStrategy zeros them so the
+        # full-env path handles every actor of those envs — no double-set).
+        if full_envs_set:
+            full_list = sorted(full_envs_set)
+            print(f"Reset Unsuitable. envs: {flagged} (full-env: {full_list}) | reasons: [{reason_str}]")
+        else:
+            print(f"Reset Unsuitable. envs: {flagged} (obj-only: {obj_low_z_list}, recep-only: {recep_low_z_list}) | reasons: [{reason_str}]")
+        reset_env_count = len(flagged)
         return reset_env_count
 
     def get_language_instruction(self):

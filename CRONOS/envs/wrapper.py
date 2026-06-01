@@ -3,12 +3,13 @@ import numpy as np
 import torch
 from .reset import ResetStrategy
 from .reward import RewardShaper
+from .unsuitable import build_workspace_aabb
 
 class CronosWrapper:
     """Unified environment wrapper for CRONOS, integrating decoupled modules."""
 
     def __init__(self, args, unnorm_state, task_suite, device=None, task_scheduler=None,
-                 group_specs=None):
+                 group_specs=None, unsuitable_detector_cfg=None):
         self.args = args
         self.unnorm_state = unnorm_state
         self.num_envs = args.num_envs
@@ -55,11 +56,29 @@ class CronosWrapper:
         # Integrated Modules
         self.suite = task_suite
         self.scheduler = task_scheduler
+        # V0.4 M3: prefer the parametric workspace-AABB detector when the
+        # YAML config supplies one; fall back to the named registry (e.g.
+        # `low_z`) selected via the CLI flag. The YAML form wins because it
+        # carries scene-specific bounds that can't be expressed as a string.
+        if unsuitable_detector_cfg is not None:
+            name = unsuitable_detector_cfg.get("name", "workspace_aabb")
+            if name == "workspace_aabb":
+                detector = build_workspace_aabb(unsuitable_detector_cfg)
+            else:
+                detector = name
+        else:
+            detector = getattr(args, "unsuitable_detector", "low_z")
+        # V0.4 M3: HSR respawn scope (per_env|per_actor|all). YAML override
+        # wins, else fall back to the CLI default on args.
+        scope = getattr(args, "hsr_reset_scope", "per_env")
+        if unsuitable_detector_cfg is not None and "reset_scope" in unsuitable_detector_cfg:
+            scope = unsuitable_detector_cfg["reset_scope"]
         self.reset_strategy = ResetStrategy(
             self.env,
             self.num_envs,
             self.device,
-            detector=getattr(args, "unsuitable_detector", "low_z"),
+            detector=detector,
+            reset_scope=scope,
         )
         self.reward_shaper = RewardShaper(self.num_envs, self.device)
         

@@ -74,6 +74,21 @@ class Args:
     reset_robot: bool = True
     reset_unsuitable: bool = False
     unsuitable_detector: str = "low_z"
+    # V0.4 M3: HSR respawn scope.
+    #   "per_env"   (default) — for any env where the detector flagged either
+    #                obj or recep, respawn BOTH actors of that env. Other envs
+    #                untouched. Matches the "reset this env's task" semantic.
+    #   "per_actor"          — respawn only the specific actor (obj OR recep)
+    #                that tripped. Other actors of the same env stay put.
+    #                V0.3.1 behavior.
+    #   "all"                — respawn every actor of every env whenever any
+    #                env trips. Visually uniform across the batch.
+    # YAML can override via `unsuitable_detector.reset_scope`.
+    hsr_reset_scope: str = "per_env"
+    # V0.4 M3 measurement: dump (env, obj/recep, x, y, z) at the END of every
+    # segment (before any HSR/LSR reset) to glob/end_of_segment_xyz.csv. Used
+    # to anchor `workspace_aabb` bounds from observed steady-state positions.
+    record_end_of_segment_xyz: bool = False
     enable_backward: bool = False
     backward_interval: int = 1
     num_groups: int = 0             # 0 = dynamically scale with available tasks
@@ -230,7 +245,11 @@ class CronosRunner:
         # Initialize Env AFTER config + policy (env_n/env_m now correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
         self.suite = TaskSuite()
-        self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device)
+        # V0.4 M3: forward the YAML `unsuitable_detector` block (if present)
+        # so the wrapper can build a parametric workspace-AABB detector.
+        det_cfg = getattr(self.yaml_config, "unsuitable_detector", None) if self.yaml_config else None
+        self.env = CronosWrapper(args, unnorm_state, self.suite, device=self.device,
+                                 unsuitable_detector_cfg=det_cfg)
 
         # Parse task_filter from CLI string or YAML
         task_filter = None
@@ -805,24 +824,34 @@ class CronosRunner:
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
 
-            # 4. Optional Video Recording (first env per group only)
+            # 4. Video Recording — V0.4 M1: append POST-step obs only, matching
+            # AutoRL train_ms3_ppo.py:580-581. Recording pre-step `obs` at step 0
+            # of seg N+1 would capture the direct return of reset_unsuitable_envs/
+            # reset_robot, whose camera buffer is stale relative to the masked
+            # set_pose. By using next_obs (post-env.step), every recorded frame
+            # is at least one physics tick past any reset, so the camera buffer
+            # is always refreshed. T frames per training segment.
             if self.args.record_video:
                 for i in self._video_envs:
-                    self.video_frames[i].append(obs[i].cpu().numpy().copy())
+                    self.video_frames[i].append(next_obs[i].cpu().numpy().copy())
 
             # 5. Segment & Task Switching Logic
             if (step_idx + 1) % self.args.task_len == 0:
-                # V0.3.1: append the post-step `next_obs` as the final frame of
-                # this segment BEFORE the reset overwrites it. Matches AutoRL
-                # `render`'s "data dump: last image" pattern (T+1 frames per
-                # segment: T pre-step + 1 final post-step). Without this, the
-                # segment video ends at the input to the last action — its
-                # natural result is missing — and the seg N → seg N+1 boundary
-                # looks visually disjoint.
+                # V0.4 M1: save the just-completed segment (T post-step frames)
+                # BEFORE any reset runs. The reset+_settle then executes in
+                # physics but contributes no recorded frame — the next segment's
+                # first frame will be one env.step past the reset, with a
+                # refreshed camera buffer.
                 if self.args.record_video:
-                    for i in self._video_envs:
-                        self.video_frames[i].append(next_obs[i].cpu().numpy().copy())
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
+
+                # V0.4 M3 measurement: dump end-of-segment xyz for every env's
+                # task-relevant obj + recep BEFORE the HSR/LSR reset overwrites
+                # them. Used to derive `workspace_aabb` bounds from observed
+                # steady-state positions.
+                if self.args.record_end_of_segment_xyz:
+                    self._record_segment_xyz(episode, segment_id)
+
                 segment_id += 1
 
                 # End current buffer segment
@@ -849,12 +878,15 @@ class CronosRunner:
                     self.env.set_task(objs, receps)
                     forward_count += 1
 
-                # Resets for non-episodic continuity
+                # Resets for non-episodic continuity. V0.4 M3 (HSR Bug 1):
+                # two independent ifs, matching AutoRL train_ms3_ppo.py:637-643.
+                # HSR (object respawn) and LSR (robot reset) are now truly
+                # orthogonal; HSR-only no longer silently also resets the robot.
                 if self.args.reset_unsuitable:
                     next_obs = self.env.reset_unsuitable_envs()
                     self.soft_reset_count = self.env.reset_strategy.reset_unsuitable_count
                     print(f"Total unsuitable resets: {self.soft_reset_count}")
-                elif self.args.reset_robot:
+                if self.args.reset_robot:
                     next_obs = self.env.reset_robot()
 
                 # Prepare for NEW segment instructions
@@ -1113,6 +1145,37 @@ class CronosRunner:
         final_steps = prior_steps + episodes_done * self.args.episode_len * self.args.num_envs
         final_resets = self.hard_reset_count + self.soft_reset_count
         print(f"Training complete: episode={final_episode}, total_steps={final_steps}, total_resets={final_resets}")
+
+    def _record_segment_xyz(self, episode, segment_id):
+        """Append one row per (env, actor) to glob/end_of_segment_xyz.csv.
+
+        V0.4 M3 measurement helper. `segment_id` is 0-indexed (matches the
+        save_video_segment call); we write it 1-indexed for the CSV so the
+        episode/segment columns line up with the train_videos/`rollout_epX_segY`
+        directory names. Same for `episode`.
+        """
+        unwrapped = self.env.env.unwrapped
+        obj = unwrapped.get_obj_pos().cpu().numpy()
+        recep = unwrapped.get_recep_pos().cpu().numpy()
+        try:
+            instr = self.env.get_language_instructions()
+        except Exception:
+            instr = [""] * self.args.num_envs
+        csv = self.glob_dir / "end_of_segment_xyz.csv"
+        write_hdr = not csv.exists()
+        with open(csv, "a") as f:
+            if write_hdr:
+                f.write("episode,segment,env,actor,task,x,y,z\n")
+            ep_1 = episode + 1
+            seg_1 = segment_id + 1
+            for i in range(self.args.num_envs):
+                # Quote the task in case it contains commas (it doesn't today
+                # but defensive — CSV-safe).
+                task_str = str(instr[i]).replace('"', '""') if i < len(instr) else ""
+                f.write(f"{ep_1},{seg_1},{i},obj,\"{task_str}\","
+                        f"{obj[i,0]:.6f},{obj[i,1]:.6f},{obj[i,2]:.6f}\n")
+                f.write(f"{ep_1},{seg_1},{i},recep,\"{task_str}\","
+                        f"{recep[i,0]:.6f},{recep[i,1]:.6f},{recep[i,2]:.6f}\n")
 
     def save_video_segment(self, iteration, segment_id):
         """Saves current video buffer to glob/train_videos/ (first env per group)."""

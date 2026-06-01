@@ -56,6 +56,7 @@ _KNOWN_TOP_KEYS = {
     "scene",
     "groups",
     "fan_out",  # V0.3 M3: sub-group fan-out (default True)
+    "unsuitable_detector",  # V0.4 M3: HSR detector config (name + workspace AABB)
     # Legacy V0.2 flat keys (still accepted for backward compat / CLI-only mode)
     "env_n", "env_m",
     "obj1_index", "obj2_index", "obj3_index",
@@ -98,6 +99,7 @@ class CronosConfig:
     scene: Optional[str] = None
     fan_out: bool = True              # V0.3 M3: sub-group fan-out (default True)
     groups: List[GroupSpec] = field(default_factory=list)
+    unsuitable_detector: Optional[dict] = None   # V0.4 M3: raw YAML block, parsed in wrapper
 
     # Legacy fields (populated when using old flat format or CLI-only)
     env_n: Optional[int] = None
@@ -445,6 +447,7 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
         scene=raw.get("scene"),
         fan_out=raw.get("fan_out", True),
         groups=groups,
+        unsuitable_detector=raw.get("unsuitable_detector"),
         # Legacy
         env_n=raw.get("env_n"),
         env_m=raw.get("env_m"),

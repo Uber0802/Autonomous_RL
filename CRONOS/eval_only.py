@@ -154,7 +154,10 @@ class EvalRunner:
         # Environment (created after config so env_n/env_m are correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
         self.suite = TaskSuite()
-        self.env = CronosWrapper(self._wrapper_args(), unnorm_state, self.suite, device=self.device)
+        # V0.4 M3: forward YAML `unsuitable_detector` block for parametric AABB detector.
+        det_cfg = getattr(yaml_config, "unsuitable_detector", None) if yaml_config else None
+        self.env = CronosWrapper(self._wrapper_args(), unnorm_state, self.suite,
+                                 device=self.device, unsuitable_detector_cfg=det_cfg)
 
         task_pool = self.env.get_task_pool()
         from envs.config import resolve_symbolic_task, has_symbolic_refs, build_obj_recep_name_maps

@@ -1,0 +1,64 @@
+# Four-group config: distinct (obj, recep, background) per group.
+# Total: 4 groups × 16 envs = 64 envs, 4 unique tasks per group (2x2 fan_out → 4 envs per task).
+# Object pool: 8 distinct carrots across all groups.
+# Receptacle pool: 8 distinct plates across all groups.
+# Background pool: 4 distinct overlay+table-texture pairs (per-group `background: k`).
+#
+# Stage mesh is shared (`flat_table` default) — per-group stage geometry (sink vs flat_table)
+# requires multiple gym.make calls and is deferred to V0.5 per task_list.md.
+#
+# Groups A and B are bit-identical to two_group_sequential_2x2.yaml so any baseline trained
+# on that config remains comparable on its first 32 envs of this one.
+
+cronos_version: V0.3
+task_order: sequential
+fan_out: true
+
+groups:
+  # Group A — bit-identical to two_group_sequential_2x2.yaml group A
+  - name: "group_A"
+    num_envs: 16
+    obj: [7, 2]              # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]            # yellow_plate, cloth
+    background: 0
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group B — bit-identical to two_group_sequential_2x2.yaml group B
+  - name: "group_B"
+    num_envs: 16
+    obj: [3, 5]              # bread, 7up_can
+    recep: [4, 3]            # newspaper, carpet
+    background: 1
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group C — produce + utensils on metallic / bowl surfaces
+  - name: "group_C"
+    num_envs: 16
+    obj: [1, 13]             # carrot, banana
+    recep: [5, 9]            # sheet_metal, flat_bowl
+    background: 2
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group D — packaged food + container on cooking-surface receptacles
+  - name: "group_D"
+    num_envs: 16
+    obj: [14, 4]             # hamburger, plastic_bottle
+    recep: [11, 13]          # frying_pan, cutting_board
+    background: 3
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
