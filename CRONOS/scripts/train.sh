@@ -83,11 +83,16 @@ case $RESET in
     ;;
   LSR+HSR)
     RESET_TAG="LSR+HSR"
-    RESET_ARGS="--reset-robot --reset-unsuitable"
+    # V0.4: enable AutoRL-style backward continual learning so the policy
+    # alternates forward (put X on Y) with backward (lift X off Y) every
+    # task switch. backward_interval=1 ≈ AutoRL paper default.
+    RESET_ARGS="--reset-robot --reset-unsuitable --enable-backward --backward-interval 1"
     ;;
   noep)
     RESET_TAG="noep"
-    RESET_ARGS="--reset-robot --reset-unsuitable --reset-mode none"
+    # V0.4: noep is built on top of LSR+HSR (just drops the episodic env.reset),
+    # so it inherits the same backward continual-learning policy.
+    RESET_ARGS="--reset-robot --reset-unsuitable --reset-mode none --enable-backward --backward-interval 1"
     ;;
   *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
 esac
