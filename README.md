@@ -164,7 +164,7 @@ Common eval flags:
 | `--action-chunk` | 1 | SpatialVLA chunk(K) open-loop deployment (`K=1` = single-step; SpatialVLA-only) |
 | `--segment-len` | 80 | Steps per task rollout |
 | `--record-video` | true | Write mp4s under `glob/eval_videos/{prefix}/` |
-| `--vla-temperature-eval` | 0.6 | Action-decoding temperature for eval. Non-zero (the default) samples; pass `0.0` for greedy/deterministic decoding (`do_sample=False`). |
+| `--vla-temperature-eval` | 0.6 | Eval action-decoding temperature. **Pass `0.0` for deterministic (greedy) eval** (`do_sample=False`); the `0.6` default samples. |
 
 ### Training config → eval config mapping
 
