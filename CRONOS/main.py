@@ -134,7 +134,7 @@ class Args:
     # eval episode contributes 16 trials/task; 2 episodes = 32 trials/task per
     # mid-training eval round, above the McNemar gate's 24-trial floor. The
     # `eval_interval` cadence is unchanged (every 4 training episodes).
-    num_eval_episode: int = 2
+    num_eval_episode: int = 4
     eval_at_start: bool = False     # V0.3: run eval before first training episode
     eval_single: bool = False
     eval_sequential: bool = False

@@ -72,7 +72,7 @@ class EvalArgs:
     vla_load_path: str = ""
     vla_unnorm_key: str = "bridge_orig"
     vla_lora_rank: int = 32
-    vla_temperature_eval: float = 0.0       # greedy by default (eval plan §Approach)
+    vla_temperature_eval: float = 0.6
     action_chunk: int = 1                   # SpatialVLA chunk(K) open-loop deployment; K=1 = single-step
     eval_ood: bool = True                   # if False, skip the out_of_domain (rand_ood) loop
 

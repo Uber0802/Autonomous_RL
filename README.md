@@ -164,7 +164,7 @@ Common eval flags:
 | `--action-chunk` | 1 | SpatialVLA chunk(K) open-loop deployment (`K=1` = single-step; SpatialVLA-only) |
 | `--segment-len` | 80 | Steps per task rollout |
 | `--record-video` | true | Write mp4s under `glob/eval_videos/{prefix}/` |
-| `--vla-temperature-eval` | 0.6 | Sampling temperature for the policy |
+| `--vla-temperature-eval` | 0.6 | Action-decoding temperature for eval. Non-zero (the default) samples; pass `0.0` for greedy/deterministic decoding (`do_sample=False`). |
 
 ### Training config → eval config mapping
 
@@ -194,7 +194,7 @@ The policy adapter lives at `SimplerEnv/simpler_env/policies/spatialvla/spatialv
 
 ### Evaluation
 
-Standalone eval runs through the same `eval_only.py` as OpenVLA, with the policy chosen by `--policy spatialvla`. The canonical zero-shot eval on the 2×2 Minimal scene — also the paired baseline for the PPO McNemar gate — uses `configs/eval/one_group_2x2_eval24.yaml` (24 envs = 24 trials/task):
+Standalone eval runs through the same `eval_only.py` as OpenVLA, with the policy chosen by `--policy spatialvla`. The canonical zero-shot eval on the 2×2 Minimal scene — also the paired baseline for the PPO McNemar gate — uses `configs/eval/one_group_2x2_eval24.yaml` (24 envs = 24 trials/task). Eval is run **deterministically** with `--vla-temperature-eval 0.0` (greedy decoding, `do_sample=False`) — the `vla_temperature_eval` default is `0.6`, which samples, so this flag must be set explicitly for reproducible, deterministic eval:
 
 ```bash
 safejob python eval_only.py \
@@ -204,18 +204,20 @@ safejob python eval_only.py \
     --policy spatialvla \
     --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge \
     --vla-unnorm-key bridge_orig/1.0.0 \
+    --vla-temperature-eval 0.0 \
     --record-video
 ```
 
-To evaluate a **trained checkpoint** instead of the zero-shot base, add `--vla-load-path /path/to/glob/episode_XXXX`. All other eval semantics (modes, outputs, flags) are identical to the [Evaluation](#evaluation-standalone) section above. SpatialVLA-specific flag:
+To evaluate a **trained checkpoint** instead of the zero-shot base, add `--vla-load-path /path/to/glob/episode_XXXX`. All other eval semantics (modes, outputs, flags) are identical to the [Evaluation](#evaluation-standalone) section above. SpatialVLA-specific flags:
 
 | Flag | Default | Description |
 |---|---|---|
 | `--action-chunk` | 1 | SpatialVLA chunk(K) open-loop deployment. `K=1` = single-step (matches OpenVLA); `K>1` steps the env K times per model call. SpatialVLA-only. |
+| `--vla-temperature-eval` | 0.6 | Eval action-decoding temperature. **Pass `0.0` for deterministic (greedy) eval** (`do_sample=False`); the `0.6` default samples. |
 
 ### Training (PPO)
 
-PPO training also runs through `main.py`, with the policy pinned in the config — `configs/spatialvla_2x2_train.yaml` sets `policy: spatialvla`, the `vla_path`, the `bridge_orig/1.0.0` unnorm key, and the LoRA / value-head learning-rate split. The three regime flags (`--reset-mode`, `--episode-len`, `--ppo-update-len`) are supplied on the command line.
+PPO training also runs through `main.py`, with the policy pinned in the config — `configs/spatialvla_2x2_train.yaml` sets `policy: spatialvla`, the `vla_path`, the `bridge_orig/1.0.0` unnorm key, and the LoRA / value-head learning-rate split. The three regime flags (`--reset-mode`, `--episode-len`, `--ppo-update-len`) are supplied on the command line. The invocations below pass `--vla-temperature-eval 0.0` so **mid-training eval is deterministic (greedy)**; without it, eval falls back to the `0.6` default and samples. (The recorded `scripts/p5_fresh_128ep.sh` / `scripts/p6_perep_320_evi1.sh` launchers used the `0.6` default, so their mid-training eval curves are stochastic; the final McNemar-gate numbers come from the standalone eval command above.)
 
 **Smoke test first** (verifies the full pipeline on `num_envs=8`, one episode, no wandb/video):
 
@@ -239,6 +241,7 @@ safejob python main.py \
     --reset-mode per_episode \
     --episode-len 80 --ppo-update-len 80 --task-len 80 --segment-len 80 \
     --max-episodes 128 \
+    --vla-temperature-eval 0.0 \
     --name spatialvla_episodic
 ```
 
@@ -251,6 +254,7 @@ safejob python main.py \
     --reset-mode none --episode-len 320 --ppo-update-len 160 \
     --task-len 80 --segment-len 80 --reset-unsuitable \
     --max-episodes 8 \
+    --vla-temperature-eval 0.0 \
     --name spatialvla_nonepisodic
 ```
 
