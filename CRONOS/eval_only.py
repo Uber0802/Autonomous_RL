@@ -67,11 +67,14 @@ class EvalArgs:
     num_groups: int = 0
 
     # --- VLA model ---
+    policy: str = "openvla"                 # {"openvla", "spatialvla"} — picks the policy class
     vla_path: str = "openvla/openvla-7b"
     vla_load_path: str = ""
     vla_unnorm_key: str = "bridge_orig"
     vla_lora_rank: int = 32
-    vla_temperature_eval: float = 0.6
+    vla_temperature_eval: float = 0.0       # greedy by default (eval plan §Approach)
+    action_chunk: int = 1                   # SpatialVLA chunk(K) open-loop deployment; K=1 = single-step
+    eval_ood: bool = True                   # if False, skip the out_of_domain (rand_ood) loop
 
     # --- Logging ---
     wandb: bool = False
@@ -81,7 +84,7 @@ class EvalArgs:
     eval_report: str = "eval_report.txt"
 
     # --- Inference ---
-    buffer_inferbatch: int = 32
+    buffer_inferbatch: int = 32  # phaseO-1 attempted 32→64; reverted (parity FAIL + no speedup at fixture)
 
 
 class EvalRunner:
@@ -128,10 +131,16 @@ class EvalRunner:
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
         self.device = torch.device(f"cuda:{device_id}")
 
-        # Policy (no PPO needed)
-        from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy
-        # Build a minimal args object that OpenVLAPolicy expects
-        self.policy = OpenVLAPolicy(self._policy_args(), device_id=device_id_other)
+        # Policy (no PPO needed). `--policy` picks the class; `_policy_args`
+        # passes through the same minimal namespace to either constructor —
+        # both policies expose the same rollout surface (get_action, get_action_stats).
+        if args.policy == "openvla":
+            from simpler_env.policies.openvla.openvla_train import OpenVLAPolicy as _PolicyCls
+        elif args.policy == "spatialvla":
+            from simpler_env.policies.spatialvla.spatialvla_train import SpatialVLAPolicy as _PolicyCls
+        else:
+            raise ValueError(f"Unknown --policy {args.policy!r}; expected one of 'openvla', 'spatialvla'.")
+        self.policy = _PolicyCls(self._policy_args(), device_id=device_id_other)
 
         # Config (load BEFORE env creation so env_n/env_m/num_envs are correct).
         # V0.3: num_envs is authoritative from the YAML (sum of per-group num_envs);
@@ -156,8 +165,15 @@ class EvalRunner:
         self.suite = TaskSuite()
         # V0.4 M3: forward YAML `unsuitable_detector` block for parametric AABB detector.
         det_cfg = getattr(yaml_config, "unsuitable_detector", None) if yaml_config else None
+        # SpatialVLA path: pass `processor.action_tokenizer` so the wrapper's
+        # `_process_action` decodes the 3-id [B, 3] output into a 7-DoF action
+        # before the shared q01/q99 unnorm. OpenVLA leaves it `None` and the
+        # wrapper uses the legacy `bin_centers` path.
+        action_tokenizer = (self.policy.processor.action_tokenizer
+                            if args.policy == "spatialvla" else None)
         self.env = CronosWrapper(self._wrapper_args(), unnorm_state, self.suite,
-                                 device=self.device, unsuitable_detector_cfg=det_cfg)
+                                 device=self.device, unsuitable_detector_cfg=det_cfg,
+                                 action_tokenizer=action_tokenizer)
 
         task_pool = self.env.get_task_pool()
         from envs.config import resolve_symbolic_task, has_symbolic_refs, build_obj_recep_name_maps
@@ -259,6 +275,29 @@ class EvalRunner:
             logprobs.append(logp)
         return torch.cat(values, 0), torch.cat(actions, 0), torch.cat(logprobs, 0)
 
+    @torch.no_grad()
+    def _get_action_chunk(self, obs, instruct, chunk):
+        """SpatialVLA chunk(K) open-loop inference (E-4 co-gate, K>1 path only).
+
+        Returns `action_ids[num_envs, K, ACTION_LEN]` where `ACTION_LEN=3` for
+        SpatialVLA — the caller then steps the env K times, one [num_envs, 3]
+        slice per step, before re-inferring. OpenVLA does not implement
+        `get_action_chunk`; `--action-chunk K>1` is SpatialVLA-only.
+        """
+        total_batch = obs.shape[0]
+        outs = []
+        for i in range(0, total_batch, self.args.buffer_inferbatch):
+            obs_batch = obs[i:i + self.args.buffer_inferbatch]
+            instruct_batch = instruct[i:i + self.args.buffer_inferbatch]
+            ids = self.policy.get_action_chunk(
+                {"image": obs_batch, "task_description": instruct_batch},
+                chunk=chunk,
+            )  # [B_i, 3*K]
+            outs.append(ids)
+        flat = torch.cat(outs, 0)  # [num_envs, 3*K]
+        action_len = flat.shape[1] // chunk
+        return flat.view(flat.shape[0], chunk, action_len)
+
     def _write_eval_report(self, header, results):
         report_path = str(self.glob_dir / self.args.eval_report)
         with open(report_path, "a") as f:
@@ -300,15 +339,60 @@ class EvalRunner:
             video_frames = [[] for _ in range(self.args.num_envs)]
 
         env_infos = defaultdict(list)
-        for _ in tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False):
-            if record:
-                for env_i in range(self.args.num_envs):
-                    video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-            val, action, logp = self._get_action(obs, instruction)
-            obs, reward, truncated, env_info = self.env.step(action)
-            if "episode" in env_info:
-                for k, v in env_info["episode"].items():
-                    env_infos[k] += v
+        K = max(1, int(self.args.action_chunk))
+        # K==1 is the existing single-step path used by both OpenVLA and the
+        # SpatialVLA single-step gate. K>1 is the SpatialVLA chunk(K) open-loop
+        # path: one inference produces K actions, then we step the env K times
+        # before re-inferring. `segment_len` remains the env-step horizon, so
+        # for K=4 / segment_len=80 we do 20 inferences * 4 = 80 env steps.
+        pbar = tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False)
+        step_i = 0
+        while step_i < self.args.segment_len:
+            if K == 1:
+                val, action, logp = self._get_action(obs, instruction)
+                chunk_actions = action.unsqueeze(1)  # [num_envs, 1, action_len]
+            else:
+                # SpatialVLA-only: open-loop chunk(K). No value/logprob — eval discards them anyway.
+                chunk_actions = self._get_action_chunk(obs, instruction, K)  # [num_envs, K, 3]
+            for k in range(K):
+                if step_i >= self.args.segment_len:
+                    break
+                if record:
+                    for env_i in range(self.args.num_envs):
+                        video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
+                obs, reward, truncated, env_info = self.env.step(chunk_actions[:, k])
+                if "episode" in env_info:
+                    for k_info, v in env_info["episode"].items():
+                        env_infos[k_info] += v
+                step_i += 1
+                pbar.update(1)
+        pbar.close()
+
+        # NF-15 / NF-16 follow-up: dump per-trial outcomes to a CSV so the
+        # paired-McNemar gate (P-5/P-6 done-criterion) has the per-(task,
+        # env) pairing key it needs. The episodic `eval_only.py` reset is
+        # seed-determined (wrapper.py:42-44), so two runs at the same
+        # `--seed` produce byte-identical (task_idx, env_i) inits — no
+        # `episode_id` is needed in the key under the same-seed contract.
+        # File: `<glob_dir>/eval_per_trial.csv`. Columns:
+        #   seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix
+        per_trial_csv = self.glob_dir / "eval_per_trial.csv"
+        wrote_header = per_trial_csv.exists()
+        successes = env_infos.get("success", [0.0] * self.args.num_envs)
+        grasps = env_infos.get("consecutive_grasp", [0.0] * self.args.num_envs)
+        obj_grasps = env_infos.get("is_src_obj_grasped", [0.0] * self.args.num_envs)
+        with open(per_trial_csv, "a") as f:
+            if not wrote_header:
+                f.write("seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix\n")
+            for env_i in range(self.args.num_envs):
+                obj_i = object[env_i] if env_i < len(object) else object[-1]
+                rec_i = receptacle[env_i] if env_i < len(receptacle) else receptacle[-1]
+                task_str = f"put {obj_i} on {rec_i}"
+                s = float(successes[env_i]) if env_i < len(successes) else 0.0
+                g = float(grasps[env_i]) if env_i < len(grasps) else 0.0
+                og = float(obj_grasps[env_i]) if env_i < len(obj_grasps) else 0.0
+                f.write(f"{iteration},{task_idx},{obj_set},{task_str},"
+                        f"{env_i},{s:.4f},{g:.4f},{og:.4f},{prefix}\n")
 
         if record:
             for env_i in range(self.args.num_envs):
@@ -361,8 +445,14 @@ class EvalRunner:
 
         eval_log = {"episode": 0, "total_steps": 0, "total_resets": 0}
 
-        for kind_label, obj_set in [("in_domain", self.args.obj_set),
-                                     ("out_of_domain", "rand_ood")]:
+        # By default eval reports both `in_domain` and the rand_ood sweep
+        # (matching the pre-SpatialVLA behavior). `--eval-ood false` skips the
+        # OOD pass, which is used by single-object 1x1 configs (E-4) where
+        # rand_ood has no meaningful OOD pool to draw from.
+        sweeps = [("in_domain", self.args.obj_set)]
+        if self.args.eval_ood:
+            sweeps.append(("out_of_domain", "rand_ood"))
+        for kind_label, obj_set in sweeps:
             print(f"\nEvaluating {kind_label}")
             report_results = []
             for seq_idx, sequence in enumerate(sequences):

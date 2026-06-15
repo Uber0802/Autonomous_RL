@@ -1,0 +1,44 @@
+# SpatialVLA 2x2 SMOKE-RUN config — verifies the end-to-end PPO pipeline
+# wiring (main.py + ppo.py + wrapper + adapter) on a small batch before
+# committing to the multi-hour P-5/P-6 runs.
+#
+# Same scene as the real training (`configs/spatialvla_2x2_train.yaml`),
+# just num_envs=8 instead of 64. ONE episode is enough to verify the loop
+# doesn't crash, the rollout per-task plumbing fires, the PPO update
+# completes, and wandb logging doesn't error.
+#
+# Canonical smoke command:
+#   safejob python main.py --config-path configs/spatialvla_2x2_smoke.yaml \
+#     --seed 0 \
+#     --reset-mode per_episode --episode-len 80 --ppo-update-len 80 \
+#     --task-len 80 --segment-len 80 \
+#     --max-episodes 1 \
+#     --buffer-minibatch 4 --alg-gradient-accum 1 \
+#     --no-record-video --no-wandb \
+#     --name p5_smoke
+
+cronos_version: V0.3
+policy: spatialvla
+vla_path: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge
+vla_unnorm_key: bridge_orig/1.0.0
+vla_lr: 1.0e-4
+vla_vhlr: 3.0e-3
+
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "default"
+    num_envs: 8                      # 8 % 4 == 0 (one env per task), keeps scheduler happy
+    obj: [7, 2]
+    recep: [1, 2]
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

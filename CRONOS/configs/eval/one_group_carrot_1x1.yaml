@@ -1,0 +1,44 @@
+# E-4 eval config: minimum-shape single-carrot-on-plate scene.
+#
+# The plan calls for "1x1 carrot" (one object, one receptacle), but the
+# PickPlaceNxM-v1 env rejects (N=1, M=1) (raise in bridge_multi.py:1255 — the
+# smallest supported shape is (1, 2)). We approximate the plan's intent with
+# (N=1, M=2): one object slot (carrot, obj_index=1) and two receptacle slots
+# (yellow_plate at recep_index=1, plus one more). The eval task uses only
+# obj1 and recep1 — the second receptacle is present in the scene but ignored
+# by the task string, so the metric is still "did the policy put the carrot
+# on the yellow plate".
+#
+# `num_envs: 24` is YAML-authoritative (eval_only.py:146 ff. — the YAML's
+# num_envs overrides the CLI default; CLI --num-envs is inert once
+# --config-path is given). 24 satisfies the scheduler's `% 4 == 0` constraint
+# and is the floor called out in the E-4 plan; the 95% CI on a true-25% rate
+# is +/-17pp at this count.
+#
+# Use with:
+#   safejob python eval_only.py \
+#     --config-path configs/eval/one_group_carrot_1x1.yaml \
+#     --eval-mode single --action-chunk 1 --no-eval-ood \
+#     --policy spatialvla \
+#     --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge \
+#     --vla-unnorm-key bridge_orig/1.0.0 \
+#     --record-video
+#
+# `--no-eval-ood` (tyro's bool-flag form for `eval_ood=False`) is required:
+# with one object slot, the rand_ood sweep has no meaningful OOD pool. Pass
+# --action-chunk 4 for the paper-parity chunk(4) baseline; --action-chunk 1
+# for the PPO single-step unit.
+
+cronos_version: V0.3
+task_order: sequence_random
+fan_out: true
+
+groups:
+  - name: "carrot_1x1"
+    num_envs: 24
+    obj: [1]                          # carrot
+    recep: [1, 2]                     # yellow_plate + 1 unused recep slot (env minimum shape)
+    task_sequence:
+      - "put obj1 on recep1"
+    eval_tasks:
+      - "put obj1 on recep1"
