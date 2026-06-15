@@ -75,19 +75,32 @@ case $RESET in
     ;;
   LSR)
     RESET_TAG="LSR"
-    RESET_ARGS="--reset-robot"
+    # V0.4 concept fix: LSR = "learn the backward policy", NOT "reset the
+    # robot". Backward training has the policy alternate put-X-on-Y with
+    # lift-X-off-Y at each task switch (backward_interval=1 ≈ AutoRL paper
+    # default). Gripper reset per segment is a separate knob (--reset-robot)
+    # that's on by default in main.py Args and stays on across all modes.
+    RESET_ARGS="--enable-backward --backward-interval 1"
     ;;
   HSR)
     RESET_TAG="HSR"
-    RESET_ARGS="--reset-unsuitable --no-reset-robot"
+    # HSR = High-level State Reset = respawn fallen objects at every task
+    # boundary. Orthogonal to LSR (backward learning) and to --reset-robot
+    # (gripper reset, default on).
+    RESET_ARGS="--reset-unsuitable"
     ;;
   LSR+HSR)
     RESET_TAG="LSR+HSR"
-    RESET_ARGS="--reset-robot --reset-unsuitable"
+    # LSR (backward learning) + HSR (respawn fallen objects). --reset-robot
+    # stays at its Args default (True) so the gripper still resets per segment.
+    RESET_ARGS="--enable-backward --backward-interval 1 --reset-unsuitable"
     ;;
   noep)
     RESET_TAG="noep"
-    RESET_ARGS="--reset-robot --reset-unsuitable --reset-mode none"
+    # noep = LSR + HSR + non-episodic continuity (no env.reset between
+    # episodes). Same backward + unsuitable-respawn knobs as LSR+HSR, plus
+    # --reset-mode none to skip the inter-episode hard reset.
+    RESET_ARGS="--enable-backward --backward-interval 1 --reset-unsuitable --reset-mode none"
     ;;
   *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
 esac
@@ -99,7 +112,12 @@ WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
 CKPT="${CKPT:-}"
 
 # --- Per-segment max_reset (relative, = max_episodes x num_envs) ---
-# HSR/LSR+HSR/noep modes add soft resets → use ×5 headroom.
+# Normal/LSR (no HSR): only hard resets at episode boundaries → ep × num_envs.
+# HSR/LSR+HSR/noep: HSR can fire at EVERY segment boundary on EVERY env, so the
+# worst-case upper bound is max_episodes × (episode_len / segment_len) × num_envs
+# — i.e. all segment boundaries × all envs flagged. Earlier code used a flat ×5
+# multiplier that was correct for T80 (1 segment / ep) but ~3× too small for
+# T1280 (16 segments / ep), causing premature "max_reset exceeded" stops.
 # Extract total num_envs from config (sum of per-group num_envs).
 _num_envs=$(python3 -c "
 import yaml, sys
@@ -109,7 +127,6 @@ total = sum(g.get('num_envs', 0) for g in groups)
 if total == 0: total = cfg.get('num_envs', 64)
 print(total)
 ")
-_hsr_multiplier=5
 
 case $MODE in
   t80a|t80b) _max_ep=128 ;;
@@ -122,10 +139,20 @@ case $MODE in
   t2560c)    _max_ep=10 ;;
 esac
 
+# Segments per episode = episode_len / segment_len (segment_len = 80 throughout).
+case $HORIZON_TAG in
+  T80)   _segs_per_ep=1   ;;
+  T320)  _segs_per_ep=4   ;;
+  T1280) _segs_per_ep=16  ;;
+  T2560) _segs_per_ep=32  ;;
+esac
+
 _exact_resets=$(( _max_ep * _num_envs ))
+# Worst-case HSR budget: every env flagged at every segment boundary.
+_worst_hsr_resets=$(( _max_ep * _segs_per_ep * _num_envs ))
 
 case $RESET in
-  HSR|LSR+HSR|noep) MAX_RESET=$(( _exact_resets * _hsr_multiplier )) ;;
+  HSR|LSR+HSR|noep) MAX_RESET=$_worst_hsr_resets ;;
   *)                MAX_RESET=$_exact_resets ;;
 esac
 
