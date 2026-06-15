@@ -498,7 +498,7 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
     current_ep = max((e for e, s in ep_to_steps.items() if s <= current_steps), default=0)
     fig.suptitle(
         f"Run {run_name} — per-task task-performance breakdown — "
-        f"live @ ep{current_ep}/{max_episodes}  ({current_steps:,} rollout steps)",
+        f"live @ ep{current_ep}/{max_episodes}  ({current_steps:,} total_steps)",
         fontsize=13, fontweight="bold",
     )
 
@@ -529,7 +529,7 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
                         linewidth=1.5, label=marker_label)
 
         ax.set_title(label, fontsize=11)
-        ax.set_xlabel("rollout steps  (num_envs × episode_len, cumulative)")
+        ax.set_xlabel("total_steps  (num_envs × episode_len, cumulative)")
         ax.set_ylim(0, 1)
         # Thousand-separator x ticks so the cumulative step counts stay
         # readable as they grow into the 100K+ range during P-5/P-6.
