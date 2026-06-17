@@ -1,0 +1,57 @@
+# SpatialVLA 2x2 PPO training config — used by P-5 (episodic) and P-6 (non-episodic).
+#
+# Pins everything that is constant across P-5 and P-6 (the "Minimal single-group"
+# 2x2 scene + policy + unnorm key + lr split); the three diff-flags
+# (`reset_mode`, `episode_len`, `ppo_update_len`) are supplied on the
+# command line per the plan's P-5 vs P-6 table.
+#
+# Canonical commands (per plan §"P-5 & P-6 — the two PPO training runs"):
+#   P-5 (episodic):
+#     safejob python main.py \
+#       --config-path configs/spatialvla_2x2_train.yaml \
+#       --seed 0 \
+#       --reset-mode per_episode --episode-len 80 --ppo-update-len 80 \
+#       --task-len 80 --segment-len 80 \
+#       --max-episodes 32
+#   P-6 (non-episodic):
+#     safejob python main.py \
+#       --config-path configs/spatialvla_2x2_train.yaml \
+#       --seed 0 \
+#       --reset-mode none --episode-len 320 --ppo-update-len 160 \
+#       --task-len 80 --segment-len 80 --reset-unsuitable \
+#       --max-episodes 8
+#
+# Both runs start fresh from the sft-bridge base (no --vla-load-path / no
+# --resume-from). P-6 is NOT warm-started from P-5; each is its own paired
+# McNemar gate.
+
+cronos_version: V0.3
+
+# --- policy / VLA wiring (P-3) ---
+policy: spatialvla
+vla_path: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge
+# Plan §P-3 caveat: the main.py default is `bridge_orig` (wrong for SpatialVLA);
+# this YAML pins `bridge_orig/1.0.0` so `get_action_stats` finds the right q01/q99.
+vla_unnorm_key: bridge_orig/1.0.0
+vla_lr: 1.0e-4                       # LoRA AdamW lr (params_vla)
+vla_vhlr: 3.0e-3                     # value-head AdamW lr (params_vh)
+
+# --- scene (Minimal single-group, identical to E-5's eval config) ---
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "default"
+    num_envs: 64                     # PPO training num_envs (E-5 eval uses 24)
+    obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]                    # yellow_plate, cloth
+    task_sequence:                   # explicit form of Minimal's auto-generated 4 N×M combos
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:                      # same set drives mid-training rotation eval
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

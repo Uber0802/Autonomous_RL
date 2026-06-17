@@ -62,6 +62,8 @@ _KNOWN_TOP_KEYS = {
     "obj1_index", "obj2_index", "obj3_index",
     "plate1_index", "plate2_index", "plate3_index",
     "task_filter",
+    # P-3: policy / VLA overrides (mirrored into Args by main.py's YAML→Args loop).
+    "policy", "vla_path", "vla_unnorm_key", "vla_lr", "vla_vhlr",
 }
 
 _KNOWN_GROUP_KEYS = {
@@ -111,6 +113,17 @@ class CronosConfig:
     plate2_index: Optional[int] = None
     plate3_index: Optional[int] = None
     task_filter: Optional[List[Union[int, str]]] = None
+
+    # P-3: policy / VLA overrides — optional in YAML, propagated to `Args` by
+    # main.py's YAML→Args loop (CLI still wins). Lets a training config like
+    # `configs/spatialvla_2x2_train.yaml` pin the SpatialVLA policy / model
+    # path / `bridge_orig/1.0.0` unnorm key without forcing every command line
+    # to re-state them.
+    policy: Optional[str] = None              # "openvla" | "spatialvla"
+    vla_path: Optional[str] = None
+    vla_unnorm_key: Optional[str] = None
+    vla_lr: Optional[float] = None            # LoRA AdamW lr (per-policy split)
+    vla_vhlr: Optional[float] = None          # value-head AdamW lr
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +471,14 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
         plate2_index=raw.get("plate2_index"),
         plate3_index=raw.get("plate3_index"),
         task_filter=task_filter,
+        # P-3: policy / VLA overrides — populated only if the YAML provides
+        # them. main.py's YAML→Args loop reads them with `not _cli_provided`
+        # so a CLI flag still wins.
+        policy=raw.get("policy"),
+        vla_path=raw.get("vla_path"),
+        vla_unnorm_key=raw.get("vla_unnorm_key"),
+        vla_lr=raw.get("vla_lr"),
+        vla_vhlr=raw.get("vla_vhlr"),
     )
 
     # Run validation (total_segments not known at load time; caller validates V14 later)

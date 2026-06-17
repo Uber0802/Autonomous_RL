@@ -9,7 +9,7 @@ class CronosWrapper:
     """Unified environment wrapper for CRONOS, integrating decoupled modules."""
 
     def __init__(self, args, unnorm_state, task_suite, device=None, task_scheduler=None,
-                 group_specs=None, unsuitable_detector_cfg=None):
+                 group_specs=None, unsuitable_detector_cfg=None, action_tokenizer=None):
         self.args = args
         self.unnorm_state = unnorm_state
         self.num_envs = args.num_envs
@@ -85,6 +85,13 @@ class CronosWrapper:
         # Binning for action processing
         bins = np.linspace(-1, 1, 256)
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
+
+        # Optional per-policy action tokenizer. OpenVLA leaves this `None` and
+        # decodes via the 256-bin `self.bin_centers` table (see `_process_action`
+        # below). SpatialVLA passes its `processor.action_tokenizer`, which the
+        # SpatialVLA branch in `_process_action` uses to decode 3 token ids
+        # (translation, rotation, gripper) into a [B, 7] normalized action.
+        self.action_tokenizer = action_tokenizer
 
     def _build_per_env_indices(self):
         """V0.3 M1: Build per-env object/plate index tensors from group_specs.
@@ -180,16 +187,39 @@ class CronosWrapper:
         return options
 
     def _process_action(self, raw_actions: torch.Tensor) -> torch.Tensor:
-        """Processes raw action tokens into executable continuous actions."""
+        """Processes raw action tokens into executable continuous actions.
+
+        Two token layouts are supported, picked by the constructor's
+        `action_tokenizer` argument:
+
+          - OpenVLA  (`action_tokenizer is None`): `raw_actions` is `[B, 7]`
+            action token ids in [31744, 32000); decoded via the 256-bin
+            `self.bin_centers` lookup.
+          - SpatialVLA (`action_tokenizer is not None`): `raw_actions` is
+            `[B, 3]` ids — translation, rotation, gripper — decoded by the
+            policy's `SpatialActionTokenizer` into a `[B, 7]` normalized action.
+
+        Both branches feed into the SAME q01/q99 unnorm + gripper-thresholding
+        block (byte-identical to `processing_spatialvla.py:247-250` so the
+        SpatialVLA action seen by the env matches what
+        `processor.decode_actions` would produce).
+        """
         pact_token = raw_actions.cpu().numpy()
-        dact = np.clip(32000 - pact_token - 1, a_min=0, a_max=254)
-        normalized_actions = np.asarray([self.bin_centers[da] for da in dact])
+        if self.action_tokenizer is None:
+            # OpenVLA path: 7 ids -> 7 bin-center values in [-1, 1].
+            dact = np.clip(32000 - pact_token - 1, a_min=0, a_max=254)
+            normalized_actions = np.asarray([self.bin_centers[da] for da in dact])
+        else:
+            # SpatialVLA path: 3 ids -> [B, 7] via translation/rotation/gripper
+            # sub-tokenizers. action_tokenizer.decode_token_ids_to_actions
+            # accepts `[B, 3]` and returns `[B, 7]`.
+            normalized_actions = self.action_tokenizer.decode_token_ids_to_actions(pact_token)
 
         action_norm_stats = self.unnorm_state
         mask = np.asarray(action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))).reshape(1, -1)
         action_high = np.array(action_norm_stats["q99"]).reshape(1, -1)
         action_low = np.array(action_norm_stats["q01"]).reshape(1, -1)
-        
+
         raw_action_np = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,

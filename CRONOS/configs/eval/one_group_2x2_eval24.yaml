@@ -1,0 +1,58 @@
+# E-5 eval config: paired-baseline-eligible eval of the **2×2 Minimal
+# single-group scene** that the PPO plan's P-5 and P-6 train on.
+#
+# Why this YAML matches the PPO plan's "Minimal single-group config"
+# (Autonomous_RL/README.md §"Minimal single-group config") *except* num_envs:
+#   - same `obj: [7, 2]` (ketchup_bottle, kitchen_shovel)
+#   - same `recep: [1, 2]` (yellow_plate, cloth)
+#   - same `name: "default"` and `task_order: "sequential"` so the scheduler
+#     is constructed byte-identically to the training scene's scheduler
+#   - num_envs intentionally overridden to **24** (eval), not training's 64
+#     — eval_only.py runs each task with full num_envs (the broadcast at
+#     eval_only.py:440-441 sends one (obj, recep) pair to all num_envs envs),
+#     so 24 gives 24 trials/task = 96 trials across the 4 tasks (matches
+#     PPO plan §"Done-criterion gate" / NF-4's "≥96 trials/scene" floor)
+#     and keeps the scheduler's `% 4 == 0` constraint. 24 is also the
+#     E-5 plan floor (95% CI ≈ ±17pp on a 25% rate).
+#
+# **PPO McNemar baseline reference (NF-15 / NF-16).** A zero-shot eval run
+# under this YAML at `--seed 0` is the per-trial-paired baseline for the
+# P-5 and P-6 post-RL McNemar tests, provided P-5/P-6 use the SAME seed.
+# CronosWrapper's `rand_episode_id` depends only on `args.seed` (`wrapper.py:42-44`),
+# and `eval_mode=single` bypasses the scheduler (`skip_scheduler=True` at
+# `eval_only.py:327`), so trial inits across paired runs are byte-identical
+# at the same seed regardless of what the *training* scheduler did.
+#
+# Canonical baseline command:
+#   safejob python eval_only.py \
+#     --config-path configs/eval/one_group_2x2_eval24.yaml \
+#     --eval-mode single --action-chunk 1 \
+#     --seed 0 \
+#     --policy spatialvla \
+#     --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge \
+#     --vla-unnorm-key bridge_orig/1.0.0 \
+#     --record-video
+#
+# `--eval-ood` is left at its default (True) — the 2x2 config has a
+# meaningful rand_ood pool. The McNemar gate (and the E-5 gate) reads
+# the `in_domain` numbers; OOD is reported for context only.
+
+cronos_version: V0.3
+task_order: sequential               # matches Minimal single-group; inert in eval_mode=single
+fan_out: true
+
+groups:
+  - name: "default"                  # matches Minimal single-group
+    num_envs: 24                     # 24 % 4 == 0; eval floor (PPO McNemar baseline pairing)
+    obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]                    # yellow_plate, cloth
+    task_sequence:                   # explicit form of Minimal's "auto-generated all 4 N×M combinations"
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
