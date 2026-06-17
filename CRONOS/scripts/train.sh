@@ -1,19 +1,25 @@
 #!/bin/bash
-# train.sh - CRONOS V0.3 training: 3 horizons × 3 segments × 5 reset modes.
+# train.sh - CRONOS training: 3 horizons × 3 segments × 5 reset modes × 2 VLA policies.
 #
-# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config]
+# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla]
 #
 #   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c | t2560a|t2560b|t2560c
 #   seed:   random seed (default: 0)
 #   cuda:   GPU device (default: 3)
 #   reset:  normal|LSR|HSR|LSR+HSR|noep (default: normal)
+#   config: YAML experiment config (default: configs/one_group_seq_random_2x2.yaml)
+#   vla:    openvla|spatialvla (default: openvla)
 #
 # Reset modes:
 #   normal   — standard episodic training (hard reset every episode)
-#   LSR      — Low-level State Reset: reset_robot between segments
-#   HSR      — High-level State Reset: reset_unsuitable between segments
-#   LSR+HSR  — both reset_robot + reset_unsuitable
+#   LSR      — Low-level State Reset: learn the backward policy
+#   HSR      — High-level State Reset: respawn fallen objects every task boundary
+#   LSR+HSR  — both backward + reset_unsuitable
 #   noep     — LSR+HSR without episodic reset (reset_mode=none)
+#
+# VLA policies (both run in the same conda env after `bash setup.sh all`):
+#   openvla    — OpenVLA-7B + bridge_orig unnorm key
+#   spatialvla — SpatialVLA-4B-224-SFT-Bridge + bridge_orig/1.0.0
 #
 # Resume: set CKPT to the previous segment's checkpoint dir:
 #   CKPT=.../glob/episode_0128 bash scripts/train.sh t80b 0 3
@@ -44,19 +50,35 @@
 
 set -e
 
-ENV_ARGS="--env-id PickPlaceNxM-v1 --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
-
 MODE=${1:-t80a}
 SEED=${2:-0}
 CUDA=${3:-3}
 RESET=${4:-normal}
 CONFIG=${5:-configs/one_group_seq_random_2x2.yaml}
+VLA=${6:-openvla}
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA}
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$PYTHONPATH:$(pwd)"
+
+# --- VLA → policy + checkpoint + unnorm key ---
+case $VLA in
+  openvla)
+    VLA_TAG="openvla"
+    VLA_ARGS="--policy openvla --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig"
+    ;;
+  spatialvla)
+    # SpatialVLA pinned to the SFT-bridge SFT checkpoint; unnorm key MUST be
+    # `bridge_orig/1.0.0` so `get_action_stats` finds the right q01/q99.
+    VLA_TAG="spatialvla"
+    VLA_ARGS="--policy spatialvla --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge --vla-unnorm-key bridge_orig/1.0.0"
+    ;;
+  *) echo "Unknown vla: $VLA"; echo "Valid: openvla|spatialvla"; exit 1 ;;
+esac
+
+ENV_ARGS="--env-id PickPlaceNxM-v1 $VLA_ARGS"
 
 # --- Horizon tag ---
 case $MODE in
@@ -107,7 +129,7 @@ esac
 
 # Derive config name from filename (e.g. configs/one_group_sequential_3x3.yaml → one_group_sequential_3x3)
 CONFIG_NAME=$(basename "$CONFIG" .yaml)
-RUN_TAG="CRONOS-V0.3-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
+RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
 WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
 CKPT="${CKPT:-}"
 

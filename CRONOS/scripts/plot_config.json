@@ -5,7 +5,7 @@
     "eval_success.csv files from the seeds/replicates of that condition.",
     "",
     "Adding a new run = append its eval_success.csv path to the right group's",
-    "csv_paths list and re-run: python scripts/plot_v04.py --config scripts/plot_v04_config.json",
+    "csv_paths list and re-run: python scripts/plot.py --config scripts/plot_config.json",
     "",
     "Each entry in `csv_paths` is one seed. The entry can be either:",
     "  - a string: a single eval_success.csv",

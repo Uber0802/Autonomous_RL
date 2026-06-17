@@ -11,8 +11,8 @@ log written by main.py's SuccessRecorder. Schema:
 
 Workflow
 --------
-1. Edit `plot_v04_config.json` to list run groups (label -> [csv_paths]).
-2. Run: `python scripts/plot_v04.py --config plot_v04_config.json`.
+1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
+2. Run: `python scripts/plot.py --config plot_config.json`.
 3. Outputs land under `<out_dir>/`:
    - `aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
    - `summary.csv` (final-value mean ± std per group × eval_kind)
@@ -423,15 +423,15 @@ def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--config", required=True, help="Path to plot_v04 config JSON")
+    ap.add_argument("--config", required=True, help="Path to plot config JSON")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     out_dir = Path(cfg.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[plot_v04] config={args.config}")
-    print(f"[plot_v04] out_dir={out_dir}")
+    print(f"[plot] config={args.config}")
+    print(f"[plot] out_dir={out_dir}")
     for spec in cfg.groups:
         # Each entry in csv_paths may be a string (1 CSV) or list (chain).
         seed_status = []
@@ -444,12 +444,12 @@ def main() -> int:
         chain_note = "(chain)" if any(isinstance(e, list) for e in spec.csv_paths) else ""
         print(f"  - {spec.label:50s}  seeds={len(spec.csv_paths)}  segs/seed=[{','.join(seed_status)}]  {chain_note}")
 
-    print("[plot_v04] aggregating...")
+    print("[plot] aggregating...")
     long_df, summary_df = aggregate_all(cfg)
     long_df.to_csv(out_dir / "aggregated.csv", index=False)
     summary_df.to_csv(out_dir / "summary.csv", index=False)
-    print(f"[plot_v04] wrote aggregated.csv ({len(long_df)} rows)")
-    print(f"[plot_v04] wrote summary.csv ({len(summary_df)} rows)")
+    print(f"[plot] wrote aggregated.csv ({len(long_df)} rows)")
+    print(f"[plot] wrote summary.csv ({len(summary_df)} rows)")
 
     # Pretty-print final values per group / eval_kind.
     if not summary_df.empty:
@@ -461,7 +461,7 @@ def main() -> int:
         with pd.option_context("display.width", 200, "display.precision", 3):
             print(view)
 
-    print("\n[plot_v04] plotting...")
+    print("\n[plot] plotting...")
     for eval_kind in cfg.eval_kinds:
         for x_axis in cfg.x_axes:
             png = out_dir / f"{cfg.name}_{eval_kind}_{x_axis}.png"
@@ -471,7 +471,7 @@ def main() -> int:
         plot_gap_panel(long_df, eval_kind, cfg, gap_png)
         print(f"  wrote {gap_png.name}")
 
-    print("[plot_v04] done")
+    print("[plot] done")
     return 0
 
 
