@@ -73,7 +73,7 @@ case $VLA in
     # SpatialVLA pinned to the SFT-bridge SFT checkpoint; unnorm key MUST be
     # `bridge_orig/1.0.0` so `get_action_stats` finds the right q01/q99.
     VLA_TAG="spatialvla"
-    VLA_ARGS="--policy spatialvla --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge --vla-unnorm-key bridge_orig/1.0.0"
+    VLA_ARGS="--policy spatialvla --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge --vla-unnorm-key bridge_orig/1.0.0 --vla-temperature-eval 0.0"
     ;;
   *) echo "Unknown vla: $VLA"; echo "Valid: openvla|spatialvla"; exit 1 ;;
 esac
