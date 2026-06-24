@@ -97,6 +97,19 @@ def _read_eval_csv(eval_csv: Path):
     return by_kind
 
 
+def _read_eval_csv_avg(eval_csv: Path, x_key: str = "episode"):
+    """Like _read_eval_csv but keyed on the chosen x-axis (episode or
+    total_steps) instead of always episode, averaging success across tasks
+    at each x. Built on top of _read_eval_csv_per_task for the column choice."""
+    per_task = _read_eval_csv_per_task(eval_csv, x_key=x_key)
+    by_kind = {"in_domain": {}, "out_of_domain": {}}
+    for kind, tasks in per_task.items():
+        for task, x_to_metrics in tasks.items():
+            for x, metrics in x_to_metrics.items():
+                by_kind[kind].setdefault(x, []).append(metrics["success"])
+    return by_kind
+
+
 def _read_eval_csv_per_task(eval_csv: Path, x_key: str = "episode"):
     """Same as _read_eval_csv but keyed by (kind, task) → {x: {success, grasp, obj_grasped}}.
 
@@ -177,27 +190,28 @@ def _wandb_history_chain(entity: str, project: str, run_ids):
     return (primary_name, combined)
 
 
-def _per_episode_rollout_avgs(history, metric_suffix: str):
-    """For each episode, average `rollout/<task>/{metric_suffix}` over the
-    tasks that reported a value at that episode.
+def _per_episode_rollout_avgs(history, metric_suffix: str, x_key: str = "episode"):
+    """For each x (episode or total_steps), average `rollout/<task>/{metric_suffix}`
+    over the tasks that reported a value at that x.
 
     `metric_suffix`: 'success' | 'consecutive_grasp' | 'is_src_obj_grasped'.
-    Returns (episodes_sorted, avg_values).
+    `x_key`: 'episode' | 'total_steps' — which wandb history field drives the x-axis.
+    Returns (xs_sorted, avg_values).
     """
     out = {}
     for h in history:
-        ep = h.get("episode")
-        if ep is None:
+        x = h.get(x_key)
+        if x is None:
             continue
         vals = []
         for k, v in h.items():
             if k.startswith("rollout/") and k.endswith(f"/{metric_suffix}") and v is not None:
                 vals.append(float(v))
         if vals:
-            out.setdefault(int(ep), []).extend(vals)
-    eps = sorted(out.keys())
-    avgs = [float(np.mean(out[e])) for e in eps]
-    return eps, avgs
+            out.setdefault(int(x), []).extend(vals)
+    xs = sorted(out.keys())
+    avgs = [float(np.mean(out[x])) for x in xs]
+    return xs, avgs
 
 
 def _per_task_rollout_series(history, metric_suffix: str, x_key: str = "episode"):
@@ -237,28 +251,31 @@ def _ep_to_step_map(history):
     return out
 
 
-def _per_episode_scalar(history, key: str):
-    """Time series for a single non-rollout key like `approx_kl`."""
+def _per_episode_scalar(history, key: str, x_key: str = "episode"):
+    """Time series for a single non-rollout key like `approx_kl`, against
+    either `episode` or `total_steps`."""
     out = {}
     for h in history:
-        ep = h.get("episode")
-        if ep is None:
+        x = h.get(x_key)
+        if x is None:
             continue
         v = h.get(key)
         if v is None:
             continue
-        out[int(ep)] = float(v)
-    eps = sorted(out.keys())
-    vals = [out[e] for e in eps]
-    return eps, vals
+        out[int(x)] = float(v)
+    xs = sorted(out.keys())
+    vals = [out[x] for x in xs]
+    return xs, vals
 
 
 def render(run_dir: Path, max_episodes: int, out_path: Path,
            entity: str, project: str, run_id: str | None,
            extra_run_ids: list | None = None,
-           extra_eval_csvs: list | None = None):
+           extra_eval_csvs: list | None = None,
+           x_key: str = "episode"):
+    
     eval_csv = run_dir / "eval_success.csv"
-    by_kind = _read_eval_csv(eval_csv)
+    by_kind = _read_eval_csv_avg(eval_csv, x_key=x_key)   # was: _read_eval_csv(eval_csv)
 
     # Resume support: each `--resume-from` spawns a fresh wandb run + glob
     # dir. Pass the prior run's id(s) via `extra_run_ids` and prior glob
@@ -268,7 +285,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
         extra_path = Path(extra)
         if not extra_path.exists():
             continue
-        extra_by_kind = _read_eval_csv(extra_path)
+        extra_by_kind = _read_eval_csv_avg(extra_path, x_key=x_key)
         for kind, eps in extra_by_kind.items():
             for ep, vals in eps.items():
                 by_kind.setdefault(kind, {}).setdefault(ep, []).extend(vals)
@@ -289,13 +306,13 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
         run_name, history = _wandb_history(entity, project, run_id)
 
     # Per-episode rollout averages.
-    roll_succ_eps, roll_succ = _per_episode_rollout_avgs(history, "success")
-    roll_grasp_eps, roll_grasp = _per_episode_rollout_avgs(history, "consecutive_grasp")
+    roll_succ_eps, roll_succ = _per_episode_rollout_avgs(history, "success", x_key=x_key)
+    roll_grasp_eps, roll_grasp = _per_episode_rollout_avgs(history, "consecutive_grasp", x_key=x_key)
 
     # Per-episode aggregated train scalars.
-    kl_eps, kl_vals = _per_episode_scalar(history, "approx_kl")
-    cf_eps, cf_vals = _per_episode_scalar(history, "clip_fraction")
-    ev_eps, ev_vals = _per_episode_scalar(history, "value_explained_variance")
+    kl_eps, kl_vals = _per_episode_scalar(history, "approx_kl", x_key=x_key)
+    cf_eps, cf_vals = _per_episode_scalar(history, "clip_fraction", x_key=x_key)
+    ev_eps, ev_vals = _per_episode_scalar(history, "value_explained_variance", x_key=x_key)
 
     # Eval per-point averages (across the 4 tasks).
     def _ep_avg(by_ep):
@@ -315,6 +332,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     )
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    xlabel = "episode" if x_key == "episode" else "total_steps"
     title = f"Run {run_name} — live @ ep{current_ep}/{max_episodes}"
     fig.suptitle(title, fontsize=13, fontweight="bold")
 
@@ -338,7 +356,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     if ood_eps:
         ax.plot(ood_eps, ood_succ, color="crimson", marker="o", markersize=5,
                 linewidth=1.5, label="eval OOD succ")
-    ax.set_xlabel("episode")
+    ax.set_xlabel(xlabel)
     ax.set_title("Task performance: success & grasp")
     ax.set_ylim(0, 1)
     if any([roll_succ_eps, id_eps, ood_eps]):
@@ -349,7 +367,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     ax = axes[0, 1]
     if kl_eps:
         ax.plot(kl_eps, kl_vals, color="purple", marker="o", markersize=3, linewidth=1.2)
-    ax.set_xlabel("episode")
+    ax.set_xlabel(xlabel)
     ax.set_title("Policy drift  mean(approx_kl) per update")
     ax.grid(True, alpha=0.3)
 
@@ -357,7 +375,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     ax = axes[1, 0]
     if cf_eps:
         ax.plot(cf_eps, cf_vals, color="red", marker="o", markersize=3, linewidth=1.2)
-    ax.set_xlabel("episode")
+    ax.set_xlabel(xlabel)
     ax.set_title("LoRA trust region  clip_fraction / update")
     ax.grid(True, alpha=0.3)
 
@@ -366,7 +384,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     if ev_eps:
         ax.plot(ev_eps, ev_vals, color="teal", marker="o", markersize=3, linewidth=1.2)
     ax.axhline(0.0, color="gray", linestyle=":", alpha=0.5)
-    ax.set_xlabel("episode")
+    ax.set_xlabel(xlabel)
     ax.set_title("Value head  explained_var (per-ep mean)")
     ax.grid(True, alpha=0.3)
 
@@ -576,12 +594,17 @@ def main():
     p.add_argument("--prior-eval-csv", action="append", default=[],
                    help="Prior glob `eval_success.csv` path (repeatable). Same use as "
                         "--prior-run-id but for the local eval-point series.")
+    p.add_argument("--x-axis", choices=["episode", "total_steps"], default="episode",
+                   help="x-axis unit for the MAIN 4-panel dashboard (trends.png). "
+                        "The per-task breakdown always uses total_steps regardless "
+                        "of this flag.")
     args = p.parse_args()
 
     out = Path(args.out)
     render(Path(args.run_dir), args.max_episodes, out,
            args.entity, args.project, args.run_id,
-           extra_run_ids=args.prior_run_id, extra_eval_csvs=args.prior_eval_csv)
+           extra_run_ids=args.prior_run_id, extra_eval_csvs=args.prior_eval_csv,
+           x_key=args.x_axis)
     # Auto-derive the per-task path next to --out: `<stem>-per_task.png`.
     out_pt = Path(args.out_per_task) if args.out_per_task else (
         out.with_name(out.stem + "-per_task" + out.suffix)
