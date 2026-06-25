@@ -37,20 +37,48 @@ unzip XXX.zip
 
 ### 2. Create the conda environment
 
+Pick one of three envs depending on which policies you need and which GPU class you have:
+
+| Env | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
+|---|---|---|---|---|---|
+| **`cronos_envV0.4`** (V0.4 default) | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` | OpenVLA **+** SpatialVLA | Blackwell only (sm_120, e.g. RTX PRO 6000) | **~55 GB** | Dual-VLA train/eval on Blackwell |
+| `cronos_envV0.1` (legacy, lightweight) | `torch==2.2.0+cu121` + `transformers==4.40.1` | OpenVLA only | Ampere / Ada / Hopper (sm_80…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; bit-exact comp. to V0.1 baselines |
+| `cronos_envV0.1_blackwell` | `torch==2.2.0+cu128` + `transformers==4.40.1` | OpenVLA only | Blackwell-compatible (sm_75…sm_120) | ~40 GB | OpenVLA-only on Blackwell when running V0.1 baseline replicas |
+
 ```bash
-conda create -n cronos_env -y python=3.10
-conda activate cronos_env
+# V0.4 default (both policies, Blackwell)
+conda create -n cronos_envV0.4 -y python=3.10
+conda activate cronos_envV0.4
 ```
+
+Or for the lightweight V0.1-equivalent:
+```bash
+conda create -n cronos_envV0.1 -y python=3.10
+conda activate cronos_envV0.1
+```
+
+> **Bit-exact note:** `cronos_envV0.1` and `cronos_envV0.4` produce numerically different PPO logs (~10⁻² drift in the first 1000 minibatches; converges to <0.2% by PPO step 100). Source is cuBLAS GEMM tile order + attention kernel differences across torch/transformers versions, **not** an algorithmic divergence. For bit-exact ablations, re-run the baseline in the same env as the new arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
 
 ### 3. Run the setup script
 
 ```bash
 cd CRONOS
 chmod +x *.sh
-./setup.sh
+./setup.sh                # install both OpenVLA + SpatialVLA stacks (default; cronos_envV0.4)
+# or:
+./setup.sh openvla        # OpenVLA-only on the V0.4 stack (cu128 + transformers 4.47)
+./setup.sh spatialvla     # SpatialVLA-only on the V0.4 stack
 ```
 
-`setup.sh` installs CRONOS plus its sibling dependencies (`SimplerEnv`, `ManiSkill`, `openvla`), which must already be present in the same parent directory as `CRONOS/`.
+> **Memory budget — pick the right env for your GPU.** The V0.4 stack lifts OpenVLA-7B PPO peak memory from ~40 GB → ~55 GB (`transformers==4.47` HybridCache + `peft==0.14` fast path + cu128 caching), which **does not fit on Ada-class GPUs (48 GB)**. If you only need OpenVLA, the lightweight V0.1 stack (`torch==2.2.0+cu121` + `transformers==4.40.1`, ~40 GB peak) still fits 1 OpenVLA-7B PPO on a 48 GB Ada. See [Lightweight env](#6-optional-lightweight-openvla-only-env-for-ada-class-gpus).
+
+`setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
+
+**Hotfix** for the `runtime_version` ImportError you hit on a pre-V0.4 install:
+```bash
+pip install "tensorflow-metadata<1.21" "protobuf>=3.20,<5"
+```
+(setup.sh now pins these permanently so this won't recur on fresh envs.)
 
 ### 4. (Optional) Ubuntu 22.04 prerequisite
 
@@ -63,19 +91,21 @@ sudo apt-get install -y libglvnd-dev
 
 ### 5. (Optional) Blackwell GPU support
 
-CRONOS has been verified on Ampere (A100), Ada (L40S), and Hopper (H100). **Blackwell cards (RTX PRO 6000, RTX 5090, B200) require a different torch build** — the stock `cronos_env` ships wheels whose SASS kernels top out at `sm_90`, so the first CUDA op on a Blackwell device crashes with:
+The V0.4 default `cronos_envV0.4` (`torch==2.7.0+cu128`) already ships Blackwell-compatible kernels (`sm_75 … sm_120 + PTX`) — nothing extra is required to train OpenVLA or SpatialVLA on RTX PRO 6000 / RTX 5090 / B200. This section only applies if you also want to run the **lightweight V0.1 stack on Blackwell** (e.g. to replicate V0.1 OpenVLA baselines on Blackwell hardware).
+
+The `cronos_envV0.1` recipe pins `torch==2.2.0+cu121`, and `+cu121` wheels' SASS tops out at `sm_90`, so the first CUDA op on Blackwell crashes with:
 
 ```
 RuntimeError: CUDA error: no kernel image is available for execution on the device
 ```
 
-Clone the working env and upgrade torch to the `cu128` channel, which ships kernels for `sm_75 ... sm_120 + PTX` and therefore runs on **every** GPU from Turing through Blackwell in a single env:
+Clone `cronos_envV0.1` and retarget torch to the cu128 channel — `+cu128` wheels include kernels for `sm_75 … sm_120` and run on every GPU from Turing through Blackwell:
 
 ```bash
-conda create -n cronos_env_blackwell --clone cronos_env
-conda activate cronos_env_blackwell
+conda create -n cronos_envV0.1_blackwell --clone cronos_envV0.1
+conda activate cronos_envV0.1_blackwell
 pip uninstall -y torch torchvision torchaudio
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.2.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 If `flash-attn` or `xformers` break afterwards (they link against the torch C++ ABI):
@@ -85,28 +115,82 @@ pip install flash-attn --no-build-isolation
 pip install xformers --index-url https://download.pytorch.org/whl/cu128
 ```
 
-**Why a clone and not an in-place upgrade of `cronos_env`:** openvla pins transformers/flash-attn versions compiled against the original torch ABI. Cloning isolates the blast radius — if something breaks, `cronos_env` remains intact on the non-Blackwell machines. The Blackwell-specific env is named with the `_blackwell` suffix so each machine uses the matching one.
+**Why a clone and not an in-place upgrade:** openvla pins transformers/flash-attn versions compiled against the original torch ABI. Cloning isolates the blast radius — if the upgrade breaks the env, `cronos_envV0.1` remains intact on the Ada / Hopper machines.
 
 *Reproducibility note:* PTX is JIT-compiled on first CUDA op on a new arch, so SASS may differ slightly from a native build. Training curves on Blackwell are *statistically* equivalent to Hopper, not bit-exact.
+
+### 6. (Optional) Lightweight OpenVLA-only env for Ada-class GPUs
+
+For Ada-class GPUs (L40S, RTX 6000 Ada, A6000 — 48 GB), the V0.4 stack's ~55 GB OpenVLA-7B PPO peak does **not** fit. The lightweight `openvla_v01` mode pins the V0.1 stack (`torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1`), which keeps OpenVLA-7B PPO peak at ~40 GB — fits one PPO on a 48 GB Ada with headroom.
+
+```bash
+conda create -n cronos_envV0.1 -y python=3.10
+conda activate cronos_envV0.1
+cd Benchmark/CRONOS
+./setup.sh openvla_v01
+```
+
+Tradeoffs:
+- ✅ Fits on Ada (48 GB) — restores parity with V0.1's running memory profile.
+- ✅ Numerically bit-exact against V0.1 baseline runs (same cuBLAS GEMM tile order + attention kernels).
+- ❌ Cannot run `--policy spatialvla` — transformers ≥ 4.43 needed for the `HybridCache` import in SpatialVLA's `model/modeling_gemma2.py`. `setup.sh openvla_v01` skips the `../SpatialVLA` editable install entirely; the policy's lazy import in [main.py:270-271](CRONOS/main.py#L270-L271) and [eval_only.py:140](CRONOS/eval_only.py#L140) is gated by `--policy spatialvla` so it never fires under OpenVLA-only runs.
+- ❌ Will not run on Blackwell (cu121 wheels lack `sm_120` kernels) — see §5 above for the clone + retarget-to-cu128 workflow to produce `cronos_envV0.1_blackwell`.
+
+How `setup.sh` picks the stack: the first positional arg selects both the torch/transformers pin set **and** which sibling pillars get installed. `openvla_v01` swaps to torch 2.2 + cu121 wheels and skips SpatialVLA; `openvla` / `spatialvla` / `all` use the V0.4 cu128 stack. See the header comment in `setup.sh` for the full pin rationale.
 
 ## Quick Start
 
 ### Training
 ```bash
-# V0.3 training with YAML config, fan-out, and eval-at-start
-bash scripts/train.sh
+# V0.4 training: 6 positional args
+bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla]
+#                      │      │      │      │       │        └─ openvla (default) | spatialvla
+#                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
+#                      │      │      │      └─ normal | LSR | HSR | LSR+HSR | noep (default: normal)
+#                      │      │      └─ GPU id (default: 3)
+#                      │      └─ seed (default: 0)
+#                      └─ horizon tag: t80a..t2560c (12 horizons × 3 segment-len variants)
 ```
+
+Examples:
+```bash
+# OpenVLA, T320 segment 'a', seed 0, GPU 3, normal reset
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2
+
+# SpatialVLA, T1280 segment 'b', seed 1, GPU 2, non-episodic (LSR+HSR + reset_mode=none)
+bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
+```
+
+`RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
+
+**Reset-mode legend:**
+
+| mode | CLI flags added | Meaning |
+|---|---|---|
+| `normal` | (nothing) | hard `env.reset()` every episode |
+| `LSR` | `--enable-backward --backward-interval 1` | learn the backward policy (put X back) alternating with forward task switches |
+| `HSR` | `--reset-unsuitable` | respawn fallen / out-of-workspace actors at every task boundary |
+| `LSR+HSR` | LSR + HSR | backward learning + soft respawn |
+| `noep` | LSR+HSR + `--reset-mode none` | non-episodic continuity (no inter-episode hard reset) |
+
+`--reset-robot` is on by default and orthogonal (gripper resets every segment in every mode).
 
 Key training flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--config-path` | required | YAML experiment config |
+| `--policy` | `openvla` | `openvla` or `spatialvla` (V0.4) |
 | `--num-envs` | 64 | Total parallel environments |
 | `--segment-len` | 80 | Steps per segment (AutoRL: 80) |
 | `--ppo-update-len` | 80 | Steps between PPO updates |
 | `--eval-interval` | 4 | Eval every N episodes |
 | `--num-eval-episode` | 4 | Episodes per eval round |
 | `--eval-at-start` | false | Run eval before first training episode |
+| `--enable-backward` / `--backward-interval N` | off | LSR — backward policy alternating with forward at step interval N |
+| `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
+| `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (V0.3.1 parity) \| `all` |
+| `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
+| `--reset-mode` | `episode` | `episode` \| `none` (non-episodic) |
 
 ### Evaluation (standalone)
 
@@ -159,6 +243,94 @@ Common eval flags:
 | `--segment-len` | 80 | Steps per task rollout |
 | `--record-video` | true | Write mp4s under `glob/eval_videos/{prefix}/` |
 | `--vla-temperature-eval` | 0.6 | Sampling temperature for the policy |
+
+### Visualization (V0.4)
+
+CRONOS V0.4 ships two complementary plotting tools — one per-run live dashboard, one cross-run aggregator.
+
+#### Per-run live dashboard — `tools/plot_run_trends.py`
+
+Refreshes a 4-panel `trends.png` directly inside a running training run's `glob/` dir. Pulls per-episode aggregates (`approx_kl`, `clip_fraction`, `explained_var`) from wandb cloud history and per-eval-point success/grasp from the local `eval_success.csv`. Read-only on the training process; safe to call mid-run between eval points.
+
+```bash
+# Render trends.png for one in-progress run; also drops a copy at <run-dir>/trends.png
+python tools/plot_run_trends.py \
+  --run-dir wandb/run-20260618_103000-abcd1234/files/glob \
+  --max-episodes 32 \
+  --out reports/figures/2026-06-18_t320a-trends.png
+```
+
+Layout (each panel is one PPO health signal):
+
+| Panel | Metric | What to watch |
+|---|---|---|
+| (0,0) Task performance | rollout success/grasp (5-ep MA) + eval ID/OOD per eval point | task-side learning curve |
+| (0,1) Policy drift | per-ep mean(`approx_kl`) | should stay ≈ const; spikes ⇒ unstable ratio |
+| (1,0) LoRA trust region | per-ep mean(`clip_fraction`) | "trust region pulse" — fraction of minibatches outside the PPO clip band |
+| (1,1) Value head | per-ep mean(`explained_var`) | critic quality; flat 0 ⇒ value head not learning |
+
+For **resumed** runs (`--resume-from`), pass each prior wandb run id and prior `eval_success.csv` path so the dashboard covers ep 1…ep<max> in one image:
+
+```bash
+python tools/plot_run_trends.py \
+  --run-dir wandb/run-<current>/files/glob \
+  --max-episodes 32 --out reports/figures/<date>_trends.png \
+  --prior-run-id <parent_run_id> --prior-eval-csv /path/to/parent/glob/eval_success.csv \
+  --prior-run-id <grandparent_run_id> --prior-eval-csv /path/to/grandparent/glob/eval_success.csv
+```
+
+(Auto-renders a sibling `<stem>-per_task.png` per-task breakdown next to `--out`.)
+
+#### Cross-run aggregator — `scripts/plot.py`
+
+Reads multiple `eval_success.csv` files (one per seed × config × condition), aggregates mean ± std, and writes 4 main PNGs (ID/OOD × Steps/Resets) plus 2 gap PNGs (success vs grasp).
+
+```bash
+# 1. Edit scripts/plot_config.json — list run groups (label → list of CSV paths)
+# 2. Run the aggregator
+python scripts/plot.py --config scripts/plot_config.json
+```
+
+`plot_config.json` schema (one entry per logical comparison curve):
+
+```json
+{
+  "out_dir": "reports/aggregated/2026-06-18",
+  "name": "four_group_T320_vs_T1280",
+  "groups": [
+    {
+      "label": "T320 normal (3 seeds)",
+      "csv_paths": [
+        "/path/to/CRONOS-openvla-…-T320-normal-seed0/glob/eval_success.csv",
+        "/path/to/CRONOS-openvla-…-T320-normal-seed1/glob/eval_success.csv",
+        "/path/to/CRONOS-openvla-…-T320-normal-seed2/glob/eval_success.csv"
+      ]
+    },
+    {
+      "label": "T1280 noep (resumed from T320 seed1)",
+      "csv_paths": [
+        [
+          "/path/to/CRONOS-openvla-…-T320-normal-seed1/glob/eval_success.csv",
+          "/path/to/CRONOS-openvla-…-T1280-noep-seed1/glob/eval_success.csv"
+        ]
+      ]
+    }
+  ]
+}
+```
+
+A `csv_paths` entry that is a **list** (chain) is the **resume chain**: parent CSV + child CSV; the aggregator dedupes overlapping `(total_steps, eval_kind, group, task)` rows and keeps the child at the seam. Adding a new run = append a path; no code changes.
+
+Outputs:
+
+| File | Contents |
+|---|---|
+| `aggregated.csv` | long-form per-group/eval_kind/x_axis mean ± std |
+| `summary.csv` | final-value mean ± std at the rightmost eval per group × eval_kind |
+| `<name>_<eval_kind>_<x_axis>.png` | 4 main curves (ID/OOD × total_steps/total_resets) |
+| `<name>_gap_<eval_kind>.png` | success-vs-grasp overlay (placement-collapse diagnostic) |
+
+`plot.py` requires `pandas`, `numpy`, `matplotlib`; pinned versions are in `scripts/requirements_plot.txt` and pulled in by `setup.sh` automatically.
 
 ### Training config → eval config mapping
 
@@ -343,4 +515,5 @@ This is the eval mode used by `scripts/eval.sh` and the per-training eval config
 | V0.2 | YAML configs, task scheduler, eval CSV, checkpoint/resume, config validation |
 | V0.3 | Per-group objects/overlay, mixed N/M, sub-group fan-out, per-env rotation eval, config_history, eval_only.py |
 | V0.3.1 | Standalone-eval refactor (`runner.eval` restored, AutoRL `render` port) — `eval_only.py` and `--eval-single` / `--eval-sequential` now use broadcast eval; `eval_mode=sequential` default; per-training eval configs in `configs/eval/`; non-episodic state preserved across mid-training eval via `get_env_state` / `set_env_state`; HSR respawn now uses per-env active-slot indexing (was hardcoded to V0.1's (N=2,M=1) layout); first-frame GPU-sync fix at episode init; `T2560` horizon added to `scripts/train.sh` |
+| V0.4 | Dual-VLA release: `--policy openvla\|spatialvla` switch + `train.sh ... [vla]` 6th-positional arg + `${VLA_TAG}` in `RUN_TAG`. HSR detector overhaul: `WorkspaceAABBDetector` (xyz AABB via YAML), `--hsr-reset-scope` (`per_env` default), full-env reset path in `bridge_multi.reset_unsuitable_envs`. Reset-mode reconceptualization: `LSR` = backward-policy training (not gripper reset); `train.sh` recipes baked in `--enable-backward --backward-interval 1` for LSR/LSR+HSR/noep. `train.sh` max_reset formula corrected (`max_ep × segs_per_ep × num_envs`). Video pipeline: T frames per training segment (AutoRL parity, no pre-step append). Plot tooling: `scripts/plot.py` + `plot_config.json` (resume-chain support) + per-eval `<glob_dir>/trends.png` 4-panel dashboard via `tools/plot_run_trends.py`. Installer hardening: `setup.sh [policy]` arg, script-dir anchor, `tensorflow-metadata<1.21` + `protobuf<5` pins, post-install sanity check |
 
