@@ -2,65 +2,87 @@
 # setup.sh - install Python dependencies for CRONOS + one or both VLA policies.
 #
 # Usage:
-#   bash setup.sh                # default: install BOTH OpenVLA + SpatialVLA stacks
-#                                  (V0.4 stack; needs cronos_envV0.4 + Blackwell GPU)
-#   bash setup.sh all            # same as above (explicit)
-#   bash setup.sh openvla        # OpenVLA-only on V0.4 stack (cu128 + transformers 4.47)
-#   bash setup.sh spatialvla     # SpatialVLA-only on V0.4 stack (cu128 + transformers 4.47)
-#   bash setup.sh openvla_v01    # OpenVLA-only on V0.1 stack — torch 2.2.0+cu121 +
-#                                  transformers 4.40.1. Lightweight (~40 GB OpenVLA
-#                                  peak, fits Ada 48 GB GPUs; bit-exact V0.1 numerics).
-#                                  Cannot run --policy spatialvla.
+#   bash setup.sh [policy] [gpu]
 #
-# Recommended workflows:
+#   [policy]: openvla | spatialvla | all | openvla_v01    (default: all)
+#   [gpu]:    default | blackwell                          (default: default)
 #
-#   Dual-VLA on Blackwell (one env serves both policies):
+# Policy axis — picks which VLA(s) to install and which LM stack to pin:
+#   * all          — V0.4 LM stack + both OpenVLA & SpatialVLA pillars
+#   * openvla      — V0.4 LM stack + OpenVLA pillar only
+#   * spatialvla   — V0.4 LM stack + SpatialVLA pillar only
+#   * openvla_v01  — V0.1 LM stack + OpenVLA pillar only (cannot run --policy spatialvla)
+#
+# GPU axis — picks the torch wheel channel + version:
+#   * default      — cu121 wheels (Ampere / Ada / Hopper, sm_80…sm_90)
+#                    V0.4 LM stack → torch 2.5.1+cu121 (SpatialVLA pyproject pin)
+#                    V0.1 LM stack → torch 2.2.0+cu121 (OpenVLA pyproject pin)
+#   * blackwell    — cu128 wheels with torch 2.7.0+cu128 (sm_75…sm_120)
+#                    The cu128 channel does NOT ship torch 2.2.0, so the V0.1
+#                    Blackwell variant runs the V0.1 LM pins on top of torch 2.7+cu128
+#                    (functionally V0.1-compat but NOT bit-equivalent to V0.1 cu121
+#                    numerics — different cuBLAS GEMM tile order + attention kernel).
+#
+# Recommended workflows (4-env 2×2 matrix):
+#
+#   cronos_envV0.4 — V0.4 LM, default GPU (Ampere/Ada/Hopper):
 #       conda create -n cronos_envV0.4 python=3.10 -y
 #       conda activate cronos_envV0.4
-#       cd Benchmark/CRONOS
-#       bash setup.sh all
+#       cd Benchmark/CRONOS && bash setup.sh all
 #
-#   Lightweight OpenVLA-only on Ada (or for bit-exact V0.1 baselines):
+#   cronos_envV0.4_blackwell — V0.4 LM, Blackwell:
+#       conda create -n cronos_envV0.4_blackwell python=3.10 -y
+#       conda activate cronos_envV0.4_blackwell
+#       cd Benchmark/CRONOS && bash setup.sh all blackwell
+#
+#   cronos_envV0.1 — V0.1 LM, default GPU (Ampere/Ada/Hopper; bit-exact to V0.1 baselines):
 #       conda create -n cronos_envV0.1 python=3.10 -y
 #       conda activate cronos_envV0.1
-#       cd Benchmark/CRONOS
-#       bash setup.sh openvla_v01
+#       cd Benchmark/CRONOS && bash setup.sh openvla_v01
+#
+#   cronos_envV0.1_blackwell — V0.1 LM, Blackwell:
+#       conda create -n cronos_envV0.1_blackwell python=3.10 -y
+#       conda activate cronos_envV0.1_blackwell
+#       cd Benchmark/CRONOS && bash setup.sh openvla_v01 blackwell
 #
 # The script `cd`s to its own directory so the editable installs of the sibling
 # pillars (`../ManiSkill`, `../SimplerEnv`, `../openvla`, `../SpatialVLA`)
 # always resolve to the tree that contains THIS setup.sh — not whatever cwd the
 # caller happened to be in. Don't symlink setup.sh from elsewhere.
 #
-# Two dependency stacks — picked by POLICY:
+# Pin rationale:
 #
-#   V0.4 stack (openvla | spatialvla | all): SpatialVLA hard-pins transformers≥4.43
-#   (its model code imports HybridCache), so the V0.4 stack is needed any time
-#   SpatialVLA is in the picture. Side effect: OpenVLA-7B PPO peak rises from
-#   ~40 GB → ~55 GB, which exceeds Ada-class GPU memory.
+#   V0.4 LM stack — SpatialVLA hard-pins transformers≥4.43 (its model code
+#   imports HybridCache), so the V0.4 LM stack is needed any time SpatialVLA
+#   is in the picture. Side effect: OpenVLA-7B PPO peak rises from ~40 GB →
+#   ~55 GB, which exceeds Ada-class GPU memory (so OpenVLA on Ada needs the
+#   V0.1 LM stack).
 #     * transformers==4.47.0      — SpatialVLA's model files use APIs from 4.47
 #                                    (GenerationMixin layout, Gemma2 logits format).
 #                                    Hard ceiling: <4.50 (GenerationMixin removed).
-#     * torch==2.7.0+cu128        — sm_120 support for Blackwell (RTX PRO 6000).
-#                                    SpatialVLA's own pyproject pins torch==2.5.1+cu121,
-#                                    but +cu121 wheels are sm_50..sm_90 only.
 #     * peft==0.14.0              — required by SpatialVLA's adapter layer types.
 #     * tokenizers==0.21.0        — matches transformers 4.47 wheel ABI.
+#     * torch (cu121 path)        — 2.5.1, matches SpatialVLA's pyproject pin.
+#     * torch (cu128 path)        — 2.7.0, lowest stable cu128 build with sm_120.
 #
-#   V0.1 stack (openvla_v01): OpenVLA-only, mirrors the original cronos_env pins.
-#   Fits Ada 48 GB at ~40 GB OpenVLA peak and is numerically bit-equivalent to
-#   the V0.1 baseline runs (same cuBLAS GEMM tile order + attention kernels).
-#   The SpatialVLA install is skipped entirely; its lazy import in
+#   V0.1 LM stack (openvla_v01) — OpenVLA-only, mirrors the original cronos_env
+#   pins. The SpatialVLA install is skipped entirely; its lazy import in
 #   `main.py:270-271` / `eval_only.py:140` is never fired under --policy openvla.
-#     * torch==2.2.0+cu121        — matches V0.1 baseline; sm_50..sm_90 only
-#                                    (no Blackwell — clone + retarget to cu128 if you
-#                                    need V0.1 on Blackwell; see README §5).
-#     * transformers==4.40.1      — V0.1 pin; below 4.43, so the HybridCache import
-#                                    in SpatialVLA's modeling_gemma2.py would fail
-#                                    — intentional, since we don't install SpatialVLA.
-#     * peft==0.11.1              — V0.1 pin; compatible with transformers 4.40.
-#     * tokenizers==0.19.1        — matches OpenVLA's pyproject pin exactly.
+#     * transformers==4.40.1      — OpenVLA pyproject pin; below 4.43, so the
+#                                    HybridCache import in SpatialVLA's
+#                                    modeling_gemma2.py would fail — intentional,
+#                                    since we don't install SpatialVLA.
+#     * peft==0.11.1              — OpenVLA pyproject pin.
+#     * tokenizers==0.19.1        — OpenVLA pyproject pin.
+#     * torch (cu121 path)        — 2.2.0, matches V0.1 baseline; sm_50..sm_90 only.
+#                                    Keeps OpenVLA-7B PPO bit-identical to V0.1.
+#     * torch (cu128 path)        — 2.7.0; cu128 doesn't ship torch 2.2.0 (cu128
+#                                    wheels start at torch 2.7). Newer torch
+#                                    changes cuBLAS/attention kernels → NOT
+#                                    bit-equivalent to V0.1 cu121 baseline runs,
+#                                    but transformers/peft ABI still V0.1-stable.
 #
-# Shared across both stacks:
+# Shared across both LM stacks:
 #     * tensorflow==2.15.0 + tensorflow-datasets==4.9.3 (OpenVLA pulls TFDS in for
 #       get_action_stats; both stacks need this).
 #     * tensorflow-metadata<1.21  — versions ≥1.21 require `protobuf>=5.26`
@@ -71,10 +93,10 @@
 #                                    keeps the wheels in sync.
 #
 # OpenVLA's setup.py declares the V0.1-style pins (torch 2.2.0, transformers 4.40.1,
-# tokenizers 0.19.1); on the V0.4 stack pip prints a dep-conflict warning but the
-# runtime API is compatible (verified end-to-end on cronos_envV0.4 and by the
-# post-install sanity check at the bottom of this script). On the V0.1 stack the
-# pins match exactly and there is no warning.
+# tokenizers 0.19.1); on the V0.4 LM stack pip prints a dep-conflict warning but
+# the runtime API is compatible (verified end-to-end on cronos_envV0.4 and by the
+# post-install sanity check at the bottom of this script). On the V0.1 LM stack
+# with cu121 the pins match exactly and there is no warning.
 
 set -e
 
@@ -86,6 +108,8 @@ cd "$(dirname "$(readlink -f "$0")")"
 echo "[setup.sh] Working from: $(pwd)"
 
 POLICY=${1:-all}
+GPU=${2:-default}
+
 case $POLICY in
   openvla|spatialvla|all|openvla_v01) ;;
   *) echo "Unknown policy: $POLICY"
@@ -93,67 +117,93 @@ case $POLICY in
      exit 1
      ;;
 esac
+case $GPU in
+  default|blackwell) ;;
+  *) echo "Unknown gpu: $GPU"
+     echo "Valid: default | blackwell"
+     exit 1
+     ;;
+esac
 
-# Pick the dependency stack and which sibling pillars to install based on POLICY.
+# Pick LM pins by POLICY (V0.1 vs V0.4 stack) and torch pin by GPU class
+# (default = cu121, blackwell = cu128). Pillar selection (OpenVLA, SpatialVLA)
+# is by POLICY as well.
+
+# ----- LM stack (transformers / peft / tokenizers / accelerate) ----------
 case $POLICY in
   openvla_v01)
-    STACK_LABEL="V0.1 (lightweight; OpenVLA-only, fits Ada 48 GB)"
-    # Pins below match OpenVLA's own pyproject.toml exactly, which is what
-    # the original V0.1 cronos_env install resolved to. Keeps OpenVLA-7B PPO
-    # forward bit-identical to V0.1 baseline runs.
-    TORCH_PKGS="torch==2.2.0 torchvision==0.17.0"
-    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    LM_STACK="V0.1"
     LM_PINS=("transformers==4.40.1" "accelerate==0.32.1" "peft==0.11.1" "tokenizers==0.19.1")
     INSTALL_OPENVLA=1
     INSTALL_SPATIALVLA=0
     ;;
   openvla)
-    STACK_LABEL="V0.4 (Blackwell; OpenVLA-only on the dual-VLA stack)"
-    TORCH_PKGS="torch==2.7.0 torchvision"
-    TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    LM_STACK="V0.4"
     LM_PINS=("transformers==4.47.0" "accelerate==1.0.1" "peft==0.14.0" "tokenizers==0.21.0")
     INSTALL_OPENVLA=1
     INSTALL_SPATIALVLA=0
     ;;
   spatialvla)
-    STACK_LABEL="V0.4 (Blackwell; SpatialVLA-only)"
-    TORCH_PKGS="torch==2.7.0 torchvision"
-    TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    LM_STACK="V0.4"
     LM_PINS=("transformers==4.47.0" "accelerate==1.0.1" "peft==0.14.0" "tokenizers==0.21.0")
     INSTALL_OPENVLA=0
     INSTALL_SPATIALVLA=1
     ;;
   all)
-    STACK_LABEL="V0.4 (Blackwell; OpenVLA + SpatialVLA)"
-    TORCH_PKGS="torch==2.7.0 torchvision"
-    TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    LM_STACK="V0.4"
     LM_PINS=("transformers==4.47.0" "accelerate==1.0.1" "peft==0.14.0" "tokenizers==0.21.0")
     INSTALL_OPENVLA=1
     INSTALL_SPATIALVLA=1
     ;;
 esac
+
+# ----- torch wheel (depends on both POLICY and GPU) ----------------------
+# cu121 channel: torch 2.2.0 (V0.1 LM) / 2.5.1 (V0.4 LM).
+# cu128 channel: torch 2.7.0 for both LM stacks — cu128 wheels do not exist
+# for torch 2.2 or 2.5; the V0.1 LM blackwell variant therefore runs the
+# V0.1 transformers/peft pins on top of torch 2.7 (NOT bit-equivalent to V0.1
+# cu121 numerics, but transformers/peft ABI still V0.1).
+if [ "$GPU" = "blackwell" ]; then
+    TORCH_PKGS="torch==2.7.0 torchvision"
+    TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    GPU_NOTE="Blackwell (sm_120, cu128)"
+elif [ "$LM_STACK" = "V0.1" ]; then
+    TORCH_PKGS="torch==2.2.0 torchvision==0.17.0"
+    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    GPU_NOTE="Ampere/Ada/Hopper (sm_80..sm_90, cu121)"
+else  # V0.4 + default
+    TORCH_PKGS="torch==2.5.1 torchvision==0.20.1"
+    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    GPU_NOTE="Ampere/Ada/Hopper (sm_80..sm_90, cu121)"
+fi
+
+STACK_LABEL="LM=$LM_STACK / GPU=$GPU_NOTE / policy=$POLICY"
 echo "[setup.sh] Stack: $STACK_LABEL"
 
 # Fail fast if no conda env is active (otherwise pip silently installs into the
 # system / base interpreter — easy to lose 10 minutes on a wrong target env).
 if [ -z "$CONDA_DEFAULT_ENV" ] || [ "$CONDA_DEFAULT_ENV" = "base" ]; then
-    echo "[setup.sh] WARNING: no non-base conda env is active."
-    if [ "$POLICY" = "openvla_v01" ]; then
-        echo "                  Activate the target env first, e.g."
-        echo "                    conda create -n cronos_envV0.1 python=3.10 -y"
-        echo "                    conda activate cronos_envV0.1"
+    # Suggested env name by the 2x2 matrix (LM stack × GPU class).
+    if [ "$LM_STACK" = "V0.1" ]; then
+        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_envV0.1_blackwell"
+        else                              SUGGESTED_ENV="cronos_envV0.1"
+        fi
     else
-        echo "                  Activate the target env first, e.g."
-        echo "                    conda create -n cronos_envV0.4 python=3.10 -y"
-        echo "                    conda activate cronos_envV0.4"
+        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_envV0.4_blackwell"
+        else                              SUGGESTED_ENV="cronos_envV0.4"
+        fi
     fi
+    echo "[setup.sh] WARNING: no non-base conda env is active."
+    echo "                  Activate the target env first, e.g."
+    echo "                    conda create -n $SUGGESTED_ENV python=3.10 -y"
+    echo "                    conda activate $SUGGESTED_ENV"
     echo "                  Continuing in 5 s — Ctrl-C to abort."
     sleep 5
 fi
 
-echo "[setup.sh] Installing CRONOS core dependencies (policy=$POLICY) …"
+echo "[setup.sh] Installing CRONOS core dependencies (policy=$POLICY, gpu=$GPU) …"
 
-# 1. Core dependencies. Torch + LM pins picked above per POLICY.
+# 1. Core dependencies. Torch + LM pins picked above per POLICY × GPU.
 pip install "setuptools<70.0.0"
 pip install $TORCH_PKGS --index-url $TORCH_INDEX
 pip install "numpy<2.0.0" \
@@ -227,4 +277,4 @@ if importlib.util.find_spec("spatialvla") is not None:
 print("[setup.sh] All core imports OK.")
 PY
 
-echo "[setup.sh] Done (policy=$POLICY)."
+echo "[setup.sh] Done (policy=$POLICY, gpu=$GPU)."

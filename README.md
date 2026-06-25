@@ -39,38 +39,50 @@ unzip XXX.zip
 
 Pick one of three envs depending on which policies you need and which GPU class you have:
 
-| Env | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
-|---|---|---|---|---|---|
-| **`cronos_envV0.4`** (V0.4 default) | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` | OpenVLA **+** SpatialVLA | Blackwell only (sm_120, e.g. RTX PRO 6000) | **~55 GB** | Dual-VLA train/eval on Blackwell |
-| `cronos_envV0.1` (legacy, lightweight) | `torch==2.2.0+cu121` + `transformers==4.40.1` | OpenVLA only | Ampere / Ada / Hopper (sm_80…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; bit-exact comp. to V0.1 baselines |
-| `cronos_envV0.1_blackwell` | `torch==2.2.0+cu128` + `transformers==4.40.1` | OpenVLA only | Blackwell-compatible (sm_75…sm_120) | ~40 GB | OpenVLA-only on Blackwell when running V0.1 baseline replicas |
+2×2 matrix (LM stack × GPU class):
+
+| Env | `setup.sh` args | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
+|---|---|---|---|---|---|---|
+| `cronos_envV0.4` | `setup.sh all` | `torch==2.5.1+cu121` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Ampere / Ada / Hopper (sm_80…sm_90) | ~55 GB | Hopper / A100 (both VLAs); Ada (SpatialVLA only — OpenVLA OOMs 48 GB) |
+| **`cronos_envV0.4_blackwell`** | `setup.sh all blackwell` | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Blackwell (sm_75…sm_120) | ~55 GB | Blackwell (both VLAs; 96 GB has plenty of room) |
+| `cronos_envV0.1` | `setup.sh openvla_v01` | `torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Ampere / Ada / Hopper (sm_50…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; **bit-exact** to V0.1 baseline runs |
+| `cronos_envV0.1_blackwell` | `setup.sh openvla_v01 blackwell` | `torch==2.7.0+cu128` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Blackwell (sm_75…sm_120) | ~45 GB | OpenVLA-only on Blackwell with V0.1 transformers ABI (not bit-exact to V0.1 cu121 — cu128 changes cuBLAS/attention kernels — but transformers/peft surface identical) |
 
 ```bash
-# V0.4 default (both policies, Blackwell)
-conda create -n cronos_envV0.4 -y python=3.10
-conda activate cronos_envV0.4
+# Pick the env that matches your GPU + policy needs, e.g.:
+conda create -n cronos_envV0.4_blackwell -y python=3.10        # Blackwell + both VLAs
+conda activate cronos_envV0.4_blackwell
+
+# or one of:
+#   cronos_envV0.4              — both VLAs on Hopper/A100 (SpatialVLA-only on Ada)
+#   cronos_envV0.1              — OpenVLA-only, Ada-friendly, V0.1-bit-exact
+#   cronos_envV0.1_blackwell    — OpenVLA-only on Blackwell, V0.1 transformers ABI
 ```
 
-Or for the lightweight V0.1-equivalent:
-```bash
-conda create -n cronos_envV0.1 -y python=3.10
-conda activate cronos_envV0.1
-```
-
-> **Bit-exact note:** `cronos_envV0.1` and `cronos_envV0.4` produce numerically different PPO logs (~10⁻² drift in the first 1000 minibatches; converges to <0.2% by PPO step 100). Source is cuBLAS GEMM tile order + attention kernel differences across torch/transformers versions, **not** an algorithmic divergence. For bit-exact ablations, re-run the baseline in the same env as the new arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
+> **Bit-exact note:** Only `cronos_envV0.1` reproduces V0.1 baseline PPO logs bit-for-bit. `cronos_envV0.1_blackwell` upgrades torch (no V0.1-era cu128 wheels exist), so it shares V0.1's transformers/peft *ABI* but not its exact cuBLAS/attention kernels. `cronos_envV0.4*` envs upgrade both torch and transformers, so their PPO logs drift ~10⁻² from V0.1 in the first 1000 minibatches and converge to <0.2% by PPO step 100 — algorithmically correct, numerically different. For bit-exact ablations, run the baseline arm in the **same env** as the test arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
 
 ### 3. Run the setup script
 
 ```bash
 cd CRONOS
 chmod +x *.sh
-./setup.sh                # install both OpenVLA + SpatialVLA stacks (default; cronos_envV0.4)
-# or:
-./setup.sh openvla        # OpenVLA-only on the V0.4 stack (cu128 + transformers 4.47)
-./setup.sh spatialvla     # SpatialVLA-only on the V0.4 stack
+
+# setup.sh [policy] [gpu]
+#   [policy]: openvla | spatialvla | all | openvla_v01    (default: all)
+#   [gpu]:    default | blackwell                          (default: default)
+
+# Four canonical invocations (one per 2x2 env above):
+./setup.sh all                       # → cronos_envV0.4              (cu121, Ada/Hopper, both VLAs)
+./setup.sh all blackwell             # → cronos_envV0.4_blackwell    (cu128, Blackwell, both VLAs)
+./setup.sh openvla_v01               # → cronos_envV0.1              (cu121, Ada/Hopper, OpenVLA, V0.1-bit-exact)
+./setup.sh openvla_v01 blackwell     # → cronos_envV0.1_blackwell    (cu128, Blackwell, OpenVLA)
+
+# Subset modes (V0.4 LM stack with only one VLA pillar installed):
+./setup.sh openvla                   # V0.4 LM, OpenVLA pillar only (skips SpatialVLA)
+./setup.sh spatialvla blackwell      # V0.4 LM, SpatialVLA pillar only, Blackwell
 ```
 
-> **Memory budget — pick the right env for your GPU.** The V0.4 stack lifts OpenVLA-7B PPO peak memory from ~40 GB → ~55 GB (`transformers==4.47` HybridCache + `peft==0.14` fast path + cu128 caching), which **does not fit on Ada-class GPUs (48 GB)**. If you only need OpenVLA, the lightweight V0.1 stack (`torch==2.2.0+cu121` + `transformers==4.40.1`, ~40 GB peak) still fits 1 OpenVLA-7B PPO on a 48 GB Ada. See [Lightweight env](#6-optional-lightweight-openvla-only-env-for-ada-class-gpus).
+> **Memory budget — pick the right env for your GPU.** The V0.4 LM stack lifts OpenVLA-7B PPO peak memory from ~40 GB → ~55 GB (`transformers==4.47` HybridCache + `peft==0.14` fast path + newer torch caching), which **does not fit on Ada-class GPUs (48 GB)**. If you only need OpenVLA on Ada, the lightweight V0.1 LM stack (`torch==2.2.0+cu121` + `transformers==4.40.1`, ~40 GB peak) still fits 1 OpenVLA-7B PPO on a 48 GB Ada. See [Lightweight env](#6-optional-lightweight-openvla-only-env-for-ada-class-gpus).
 
 `setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
 
@@ -91,37 +103,27 @@ sudo apt-get install -y libglvnd-dev
 
 ### 5. (Optional) Blackwell GPU support
 
-The V0.4 default `cronos_envV0.4` (`torch==2.7.0+cu128`) already ships Blackwell-compatible kernels (`sm_75 … sm_120 + PTX`) — nothing extra is required to train OpenVLA or SpatialVLA on RTX PRO 6000 / RTX 5090 / B200. This section only applies if you also want to run the **lightweight V0.1 stack on Blackwell** (e.g. to replicate V0.1 OpenVLA baselines on Blackwell hardware).
-
-The `cronos_envV0.1` recipe pins `torch==2.2.0+cu121`, and `+cu121` wheels' SASS tops out at `sm_90`, so the first CUDA op on Blackwell crashes with:
-
-```
-RuntimeError: CUDA error: no kernel image is available for execution on the device
-```
-
-Clone `cronos_envV0.1` and retarget torch to the cu128 channel — `+cu128` wheels include kernels for `sm_75 … sm_120` and run on every GPU from Turing through Blackwell:
+Blackwell cards (RTX PRO 6000, RTX 5090, B200) ship `sm_120` SASS, which only `+cu128` torch wheels include. Pass `blackwell` as `setup.sh`'s 2nd arg to install the Blackwell-compatible variant of either LM stack:
 
 ```bash
-conda create -n cronos_envV0.1_blackwell --clone cronos_envV0.1
-conda activate cronos_envV0.1_blackwell
-pip uninstall -y torch torchvision torchaudio
-pip install torch==2.2.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+./setup.sh all blackwell             # cronos_envV0.4_blackwell — both VLAs
+./setup.sh openvla_v01 blackwell     # cronos_envV0.1_blackwell — OpenVLA-only, V0.1 transformers ABI
 ```
 
-If `flash-attn` or `xformers` break afterwards (they link against the torch C++ ABI):
+Both variants pin `torch==2.7.0+cu128` (the lowest stable cu128 build with sm_120). What differs is the LM stack:
 
-```bash
-pip install flash-attn --no-build-isolation
-pip install xformers --index-url https://download.pytorch.org/whl/cu128
-```
+| Env | Transformers/peft/tokenizers | OpenVLA peak | Bit-exact to V0.1 cu121? |
+|---|---|---|---|
+| `cronos_envV0.4_blackwell` | V0.4 (4.47 / 0.14 / 0.21) | ~55 GB | No — also drifts from V0.1 |
+| `cronos_envV0.1_blackwell` | V0.1 (4.40.1 / 0.11.1 / 0.19.1) | ~45 GB | No — cu128 changes cuBLAS/attention kernels, but transformers ABI matches V0.1 |
 
-**Why a clone and not an in-place upgrade:** openvla pins transformers/flash-attn versions compiled against the original torch ABI. Cloning isolates the blast radius — if the upgrade breaks the env, `cronos_envV0.1` remains intact on the Ada / Hopper machines.
+**No torch build is simultaneously V0.1-era *and* Blackwell-compatible.** The cu128 channel does not ship `torch==2.2.0` (cu128 wheels start at torch 2.7), and torch 2.2.0+cu121 has no `sm_120` SASS or PTX. Bit-exact V0.1 baseline replication is therefore Ada/Hopper-only by physics of GPU release dates.
 
-*Reproducibility note:* PTX is JIT-compiled on first CUDA op on a new arch, so SASS may differ slightly from a native build. Training curves on Blackwell are *statistically* equivalent to Hopper, not bit-exact.
+*Reproducibility note:* PTX is JIT-compiled on first CUDA op on a new arch, so SASS may differ slightly between a Blackwell run and a Hopper run even within the same env. Training curves on Blackwell are *statistically* equivalent to Hopper, not bit-exact.
 
 ### 6. (Optional) Lightweight OpenVLA-only env for Ada-class GPUs
 
-For Ada-class GPUs (L40S, RTX 6000 Ada, A6000 — 48 GB), the V0.4 stack's ~55 GB OpenVLA-7B PPO peak does **not** fit. The lightweight `openvla_v01` mode pins the V0.1 stack (`torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1`), which keeps OpenVLA-7B PPO peak at ~40 GB — fits one PPO on a 48 GB Ada with headroom.
+For Ada-class GPUs (L40S, RTX 6000 Ada, A6000 — 48 GB), the V0.4 LM stack's ~55 GB OpenVLA-7B PPO peak does **not** fit. The lightweight `openvla_v01` mode pins the V0.1 LM stack (`transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1`) and — on `cu121` — pins `torch==2.2.0` to match V0.1 exactly. OpenVLA-7B PPO peak stays at ~40 GB, fitting one PPO on a 48 GB Ada with headroom.
 
 ```bash
 conda create -n cronos_envV0.1 -y python=3.10
@@ -134,9 +136,9 @@ Tradeoffs:
 - ✅ Fits on Ada (48 GB) — restores parity with V0.1's running memory profile.
 - ✅ Numerically bit-exact against V0.1 baseline runs (same cuBLAS GEMM tile order + attention kernels).
 - ❌ Cannot run `--policy spatialvla` — transformers ≥ 4.43 needed for the `HybridCache` import in SpatialVLA's `model/modeling_gemma2.py`. `setup.sh openvla_v01` skips the `../SpatialVLA` editable install entirely; the policy's lazy import in [main.py:270-271](CRONOS/main.py#L270-L271) and [eval_only.py:140](CRONOS/eval_only.py#L140) is gated by `--policy spatialvla` so it never fires under OpenVLA-only runs.
-- ❌ Will not run on Blackwell (cu121 wheels lack `sm_120` kernels) — see §5 above for the clone + retarget-to-cu128 workflow to produce `cronos_envV0.1_blackwell`.
+- ❌ Will not run on Blackwell as-is — pass `blackwell` as the 2nd arg to install the Blackwell variant: `./setup.sh openvla_v01 blackwell` produces `cronos_envV0.1_blackwell` (V0.1 LM stack on `torch==2.7.0+cu128`; loses cu121 bit-exactness but keeps V0.1 transformers ABI).
 
-How `setup.sh` picks the stack: the first positional arg selects both the torch/transformers pin set **and** which sibling pillars get installed. `openvla_v01` swaps to torch 2.2 + cu121 wheels and skips SpatialVLA; `openvla` / `spatialvla` / `all` use the V0.4 cu128 stack. See the header comment in `setup.sh` for the full pin rationale.
+How `setup.sh` picks the install: the 1st positional arg picks the LM stack + which sibling pillars get installed, the 2nd picks the torch wheel channel. See the header comment in `setup.sh` for the full pin rationale and the 4-env recommended workflows.
 
 ## Quick Start
 
