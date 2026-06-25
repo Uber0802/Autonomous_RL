@@ -98,7 +98,10 @@ esac
 case $POLICY in
   openvla_v01)
     STACK_LABEL="V0.1 (lightweight; OpenVLA-only, fits Ada 48 GB)"
-    TORCH_PKGS="torch==2.2.0 torchvision"
+    # Pins below match OpenVLA's own pyproject.toml exactly, which is what
+    # the original V0.1 cronos_env install resolved to. Keeps OpenVLA-7B PPO
+    # forward bit-identical to V0.1 baseline runs.
+    TORCH_PKGS="torch==2.2.0 torchvision==0.17.0"
     TORCH_INDEX="https://download.pytorch.org/whl/cu121"
     LM_PINS=("transformers==4.40.1" "accelerate==0.32.1" "peft==0.11.1" "tokenizers==0.19.1")
     INSTALL_OPENVLA=1
