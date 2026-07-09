@@ -1,4 +1,4 @@
-"""CRONOS V0.3 — Task scheduler with per-group state and sub-group fan-out.
+"""CRONOS — Task scheduler with per-group state and sub-group fan-out.
 
 Supports three ordering modes:
 - ``sequential``:       cycle through task_sequence in order
@@ -6,7 +6,7 @@ Supports three ordering modes:
                         weighted by frequency in task_sequence
 - ``sequence_random``:  random permutation of unique tasks, reshuffle when exhausted
 
-V0.3 M3: With ``fan_out=True`` (default, AutoRL behavior), each group's envs
+M3: With ``fan_out=True`` (default, AutoRL behavior), each group's envs
 are further split into sub-groups, one per unique task in the pool. All tasks
 run simultaneously within each group. The assignment rotates each segment.
 
@@ -99,7 +99,7 @@ class TaskScheduler:
                     seen.add(t)
                     self.task_pool.append(t)
 
-        # V0.3 M3: per-group fan-out cursor (rotates sub-group assignment)
+        # per-group fan-out cursor (rotates sub-group assignment)
         self._fan_out_offsets: List[int] = [0] * len(group_states)
 
         # Legacy compat
@@ -215,7 +215,7 @@ class TaskScheduler:
 
         Each group's envs are contiguous: envs[0:group_size] = group 0, etc.
 
-        With fan_out=True (V0.3 M3, AutoRL default), each group's envs are
+        With fan_out=True (M3, AutoRL default), each group's envs are
         further split into sub-groups, one per unique task in the pool.
         This matches AutoRL's behavior where all tasks run simultaneously.
         """
@@ -231,7 +231,7 @@ class TaskScheduler:
             g_size = gs.num_envs
 
             if self.fan_out and len(gs.task_pool) > 1:
-                # V0.3 M3: fan out all unique tasks across sub-groups
+                # fan out all unique tasks across sub-groups
                 n_tasks = len(gs.task_pool)
                 sub_size = g_size // n_tasks
                 offset = self._fan_out_offsets[g_idx % len(self._fan_out_offsets)]
@@ -246,7 +246,7 @@ class TaskScheduler:
                     objects.extend([objects[-1]] * remainder_in_group)
                     receptacles.extend([receptacles[-1]] * remainder_in_group)
             else:
-                # fan_out=False or single task: all envs get same task (V0.2 behavior)
+                # fan_out=False or single task: all envs get same task 
                 task = self._pick_task_for_group(gs)
                 obj, recep = self._extract_obj_recep(task)
                 objects.extend([obj] * g_size)
@@ -264,15 +264,15 @@ class TaskScheduler:
         """Advance all groups' cursors by one step.
 
         With fan_out=True: rotates the sub-group assignment offset.
-        With fan_out=False: advances per-group task cursor (V0.2 behavior).
+        With fan_out=False: advances per-group task cursor .
         """
         for g_idx, gs in enumerate(self.group_states):
             if self.fan_out and len(gs.task_pool) > 1:
-                # V0.3 M3: rotate sub-group assignment
+                # rotate sub-group assignment
                 self._fan_out_offsets[g_idx] = (
                     self._fan_out_offsets[g_idx] + 1) % len(gs.task_pool)
             else:
-                # V0.2: advance single-task cursor
+                # advance single-task cursor
                 if self.mode == "sequential":
                     gs.cursor = (gs.cursor + 1) % len(gs.task_sequence)
                 elif self.mode == "sequence_random":

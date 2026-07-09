@@ -1,9 +1,9 @@
-"""CRONOS V0.2 M2 Phase A — pluggable unsuitable-env detector.
+"""CRONOS — pluggable unsuitable-env detector.
 
 A "detector" decides which envs in a vectorized run are in an unsuitable
 state (object fallen, stuck out of reach, etc.) and should be respawned via
-``reset_unsuitable_envs``. V0.1 hard-coded a single rule (``obj_z < 0.7 |
-recep_z < 0.7``); V0.2 makes that rule pluggable so:
+``reset_unsuitable_envs``. hard-coded a single rule (``obj_z < 0.7 |
+recep_z < 0.7``); makes that rule pluggable so:
 
 - The grid-size dependence introduced by ``PickPlaceNxM-v1`` (Phase B) can
   swap to a more appropriate detector without touching ``reset.py``.
@@ -17,7 +17,7 @@ own threshold inside ``bridge_multi.py::BasePickPlace.reset_unsuitable_envs``).
 Phase B refactors that env-side method to consult ``ResetStrategy``, at which
 point the registered detector becomes the single source of truth. Until
 Phase B lands, the registry exists for configuration and unit-testability;
-behavior is unchanged from V0.1.
+behavior is unchanged legacy.
 """
 
 from __future__ import annotations
@@ -85,18 +85,17 @@ def list_detectors() -> List[str]:
 
 @register("low_z")
 class LowZDetector:
-    """V0.1 default: an env is unsuitable iff any object or receptacle has
+    """default: an env is unsuitable iff any object or receptacle has
     fallen below ``z_threshold``. Reads ``env.get_obj_pos()`` and
     ``env.get_recep_pos()``, both of which are torch tensors of shape
     ``(num_envs, 3)`` exposed by ``BasePickPlace``.
 
-    Threshold defaults to ``0.7`` to preserve V0.1 behavior bit-for-bit.
+    Threshold defaults to ``0.7`` to preserve  bit-for-bit.
 
     Exposes ``per_actor_class(env) -> {"obj": mask, "recep": mask, "any": mask,
     "reasons": list[dict[env_idx, str]]}``
     so the runtime respawn path in ``BasePickPlace.reset_unsuitable_envs``
-    can respawn carrot-only or plate-only when only one of them fell, matching
-    V0.1's asymmetric behavior.
+    can respawn carrot-only or plate-only when only one of them fell.
     """
 
     name: str = "low_z"
@@ -108,7 +107,7 @@ class LowZDetector:
         obj_low = obj_z < self.z_threshold
         recep_low = recep_z < self.z_threshold
 
-        # V0.4 M3c: per-env reason strings naming the violated axis + value.
+        # per-env reason strings naming the violated axis + value.
         reasons: List[Dict[int, str]] = []
         for i in range(obj_z.shape[0]):
             entry: Dict[int, str] = {}
@@ -126,7 +125,7 @@ class LowZDetector:
 
 
 class WorkspaceAABBDetector:
-    """V0.4 M3: workspace-AABB detector. An env is unsuitable iff any of its
+    """workspace-AABB detector. An env is unsuitable iff any of its
     actors (carrot, plate) lies outside the axis-aligned bounding box that
     describes the robot's reachable workspace.
 

@@ -1,4 +1,4 @@
-"""CRONOS V0.2 M4 — Scene registry.
+"""CRONOS — Scene registry.
 
 A *scene* is a named visual variation applied to the Bridge table stage.
 Within a single ManiSkill vectorized env, all envs share the same stage
@@ -8,7 +8,7 @@ geometry (flat_table or sink), so scene variation is limited to:
 - Lighting parameters (ambient + directional colours/intensities)
 
 Different stage geometries (flat_table vs sink) require separate env instances
-and are NOT mixed within a single run.  Cross-stage mixing is deferred to V0.3.
+and are NOT mixed within a single run.
 
 Usage::
 
@@ -61,7 +61,7 @@ def register_scene(spec: SceneSpec) -> SceneSpec:
     return spec
 
 
-# 1. Default flat table — matches V0.1 / AutoRL exactly
+# 1. Default flat table — matches / AutoRL exactly
 register_scene(SceneSpec(
     name="flat_table_default",
     scene_setting="flat_table",

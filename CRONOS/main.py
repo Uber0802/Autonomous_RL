@@ -38,9 +38,7 @@ class Args:
     resume_episode: int = 0
 
     # --- Environment ---
-    # V0.2 M2 Phase B: PickPlaceNxM-v1 replaces the 8 legacy registered IDs.
-    # Pick the (N, M) shape via --env_n / --env_m (defaults to (2, 1), the
-    # V0.1 baseline shape from train.sh).
+    # PickPlaceNxM-v1 — pick the (N, M) shape via --env_n / --env_m.
     env_id: str = "PickPlaceNxM-v1"
     env_n: int = 2  # number of objects (carrots)
     env_m: int = 2  # number of receptacles (plates)
@@ -52,7 +50,7 @@ class Args:
     plate1_index: int = 1           # 1-based plate indices
     plate2_index: int = 2
     plate3_index: int = 3
-    scene: str = ""                 # V0.2 M4: named scene (empty = default lighting/overlay)
+    scene: str = ""                 # named scene (empty = default lighting/overlay)
 
     # --- Training lengths ---
     segment_len: int = 80           # ManiSkill horizon — one robot execution segment
@@ -65,28 +63,27 @@ class Args:
     max_steps: int = 0              # env-step budget for THIS run; 0 = derive from max_episodes
     max_reset: int = 8192           # reset budget for THIS run; added to prior resets from checkpoint
 
-    # --- Task control (V0.2 M3) ---
+    # --- Task control ---
     config_path: str = ""           # YAML experiment config (overrides below when set)
     task_order: str = "sequential"  # sequential | pure_random | sequence_random
     task_filter: str = ""           # comma-separated indices or task strings; empty = all
 
     # --- Non-episodic reset ---
-    reset_mode: str = "per_episode"  # per_episode | none (V0.2 M5)
+    reset_mode: str = "per_episode"  # per_episode | none
     reset_robot: bool = True
     reset_unsuitable: bool = False
     unsuitable_detector: str = "low_z"
-    # V0.4 M3: HSR respawn scope.
+    # HSR respawn scope.
     #   "per_env"   (default) — for any env where the detector flagged either
     #                obj or recep, respawn BOTH actors of that env. Other envs
     #                untouched. Matches the "reset this env's task" semantic.
     #   "per_actor"          — respawn only the specific actor (obj OR recep)
     #                that tripped. Other actors of the same env stay put.
-    #                V0.3.1 behavior.
     #   "all"                — respawn every actor of every env whenever any
     #                env trips. Visually uniform across the batch.
     # YAML can override via `unsuitable_detector.reset_scope`.
     hsr_reset_scope: str = "per_env"
-    # V0.4 M3 measurement: dump (env, obj/recep, x, y, z) at the END of every
+    # dump (env, obj/recep, x, y, z) at the END of every
     # segment (before any HSR/LSR reset) to glob/end_of_segment_xyz.csv. Used
     # to anchor `workspace_aabb` bounds from observed steady-state positions.
     record_end_of_segment_xyz: bool = False
@@ -106,13 +103,12 @@ class Args:
     buffer_inferbatch: int = 32     # phaseO-1 attempted 32→64; reverted (parity FAIL + no speedup at fixture)
 
     # --- VLA model ---
-    # P-3: `policy` selects which adapter to instantiate. The default
-    # (`openvla`) preserves OpenVLA-as-baseline behavior; `spatialvla` swaps in
-    # the SpatialVLA adapter from `simpler_env.policies.spatialvla.spatialvla_train`
-    # (P-2). The default `vla_path` / `vla_unnorm_key` follow the OpenVLA path;
-    # YAML training configs (e.g. `configs/spatialvla_2x2_train.yaml`) override
-    # them to SpatialVLA's `IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge` + the
-    # `bridge_orig/1.0.0` key.
+    # `policy` selects which adapter to instantiate. The default (`openvla`)
+    # uses OpenVLA; `spatialvla` swaps in the SpatialVLA adapter from
+    # `simpler_env.policies.spatialvla.spatialvla_train`. The default `vla_path`
+    # / `vla_unnorm_key` follow the OpenVLA path; YAML training configs
+    # (e.g. `configs/spatialvla_2x2_train.yaml`) override them to SpatialVLA's
+    # `IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge` + the `bridge_orig/1.0.0` key.
     policy: str = "openvla"          # "openvla" | "spatialvla"
     vla_path: str = "openvla/openvla-7b"
     vla_load_path: str = ""
@@ -128,19 +124,16 @@ class Args:
 
     # --- Evaluation ---
     eval_interval: int = 4
-    # phaseO-6 / A2.5 (non-parity, user-approved): 4 → 2 halves mid-training
-    # eval wall-clock (the eval was 48 % of P-5's 13.3 h budget). With the
-    # training config's num_envs=64 split across 4 tasks via fan_out, each
-    # eval episode contributes 16 trials/task; 2 episodes = 32 trials/task per
-    # mid-training eval round, above the McNemar gate's 24-trial floor. The
-    # `eval_interval` cadence is unchanged (every 4 training episodes).
+    # 2 eval episodes per round: with num_envs=64 fan-out across 4 tasks, each
+    # episode contributes 16 trials/task → 2 episodes = 32 trials/task per mid-
+    # training eval, above the McNemar gate's 24-trial floor.
     num_eval_episode: int = 4
-    eval_at_start: bool = False     # V0.3: run eval before first training episode
+    eval_at_start: bool = False     # run eval before first training episode
     eval_single: bool = False
     eval_sequential: bool = False
     eval_sequences: int = 5         # permutation sequences (1 training + N-1 random)
     vla_checkpoint_interval: int = 8
-    resume_from: str = ""           # V0.2 M5: path to checkpoint dir (auto-loads config + weights)
+    resume_from: str = ""           # path to checkpoint dir (auto-loads config + weights)
 
     # --- Logging ---
     wandb: bool = True
@@ -155,7 +148,7 @@ class CronosRunner:
     
     def __init__(self, args):
         self.args = args
-        # V0.2 M5: --resume_from auto-sets vla_load_path from checkpoint dir
+        # --resume_from auto-sets vla_load_path from checkpoint dir
         if args.resume_from:
             ckpt = Path(args.resume_from)
             if not ckpt.exists():
@@ -205,15 +198,15 @@ class CronosRunner:
                     for st in self.streams: st.flush()
             sys.stdout = _Tee(sys.__stdout__, log_fp)
 
-        # V0.2 M0: SuccessRecorder — dual-axis CSVs + wandb 5-chart panel + counters.json
+        # SuccessRecorder — dual-axis CSVs + wandb 5-chart panel + counters.json
         self.recorder = SuccessRecorder(self.glob_dir)
 
-        # V0.2 M1: pre-init config dump — written BEFORE any SAPIEN scene is
+        # pre-init config dump — written BEFORE any SAPIEN scene is
         # constructed, so a crash during env init still leaves an on-disk
         # snapshot of exactly what was attempted.
         self._dump_run_config()
 
-        # V0.3 M5: config_history.jsonl — append initial or resume entry.
+        # config_history.jsonl — append initial or resume entry.
         # Load previous config from checkpoint's run_config.json for diff.
         prev_config = None
         if args.resume_from:
@@ -235,8 +228,8 @@ class CronosRunner:
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
         self.device = torch.device(f"cuda:{device_id}")
         
-        # V0.2 M3: load YAML config BEFORE env creation (env_n/env_m must be
-        # set first). P-3 hoists this BEFORE policy creation so a YAML-pinned
+        # load YAML config BEFORE env creation (env_n/env_m must be
+        # set first). The following this BEFORE policy creation so a YAML-pinned
         # `policy` / `vla_path` / `vla_unnorm_key` takes effect on the
         # adapter constructor (rather than after the wrong policy is already
         # loaded).
@@ -244,7 +237,7 @@ class CronosRunner:
         if args.config_path:
             from envs.config import load_cronos_config
             self.yaml_config = load_cronos_config(args.config_path)
-            # YAML env params → Args (CLI overrides YAML). P-3 adds the
+            # YAML env params → Args (CLI overrides YAML). The following the
             # `policy` switch and per-policy VLA fields so a training config can
             # pin them without re-stating them on every command line.
             for field_name in ("env_n", "env_m", "num_envs",
@@ -256,17 +249,17 @@ class CronosRunner:
                 yaml_val = getattr(self.yaml_config, field_name, None)
                 if yaml_val is not None and not self._cli_provided(field_name):
                     setattr(args, field_name, yaml_val)
-            # V0.3 M2: env_n/env_m = max across groups (mixed N/M support)
+            # env_n/env_m = max across groups (mixed N/M support)
             if self.yaml_config.groups and not self._cli_provided("env_n"):
                 args.env_n = max(len(g.obj) for g in self.yaml_config.groups)
             if self.yaml_config.groups and not self._cli_provided("env_m"):
                 args.env_m = max(len(g.recep) for g in self.yaml_config.groups)
 
         # Initialize Policy (matching AutoRL order: policy before env).
-        # P-3 `--policy` switch: pick the adapter at construction time. Each
+        # `--policy` switch: pick the adapter at construction time. Each
         # adapter exposes the same surface (`get_action`, `evaluate_actions`,
         # `get_value`, `prep_rollout/training`, `save/load`) and an
-        # `act_token_len` attribute used to size the replay buffer (NF-2 / H2).
+        # `act_token_len` attribute used to size the replay buffer.
         if args.policy == "spatialvla":
             from simpler_env.policies.spatialvla.spatialvla_train import SpatialVLAPolicy as _Policy
         elif args.policy == "openvla":
@@ -282,7 +275,7 @@ class CronosRunner:
         # Initialize Env AFTER config + policy (env_n/env_m now correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
         self.suite = TaskSuite()
-        # V0.4 M3: forward the YAML `unsuitable_detector` block (if present)
+        # forward the YAML `unsuitable_detector` block (if present)
         # so the wrapper can build a parametric workspace-AABB detector.
         det_cfg = getattr(self.yaml_config, "unsuitable_detector", None) if self.yaml_config else None
         # action_tokenizer routing (mirrors eval_only.py:174 / wrapper.py:188-216):
@@ -290,7 +283,7 @@ class CronosRunner:
         # (`action_tokenizer=None`); SpatialVLA passes its live
         # `SpatialActionTokenizer` so the wrapper's `_process_action`
         # SpatialVLA branch decodes the 3-token sequence per
-        # `processing_spatialvla.py:247-250`. P-3 adds the runtime switch.
+        # `processing_spatialvla.py:247-250`. The following the runtime switch.
         wrapper_action_tokenizer = None
         if args.policy == "spatialvla":
             wrapper_action_tokenizer = self.policy.vla.action_tokenizer
@@ -314,7 +307,7 @@ class CronosRunner:
         # Get task pool from env (CronosWrapper.__init__ already performs a seeded reset)
         task_pool = self.env.get_task_pool()
 
-        # V0.2/V0.3: resolve symbolic refs (obj1, recep2, ...) in YAML groups + task_filter
+        # resolve symbolic refs (obj1, recep2, ...) in YAML groups + task_filter
         from envs.config import resolve_symbolic_task, has_symbolic_refs, build_obj_recep_name_maps
         from envs.scheduler import GroupState
         obj_names, recep_names = self._build_symbolic_map(task_pool)
@@ -322,14 +315,14 @@ class CronosRunner:
         # Build per-group GroupState from YAML or auto-generate from flat task_pool
         group_states = []
         if self.yaml_config and self.yaml_config.groups:
-            # V0.3 M1: access model_db for per-group symbolic resolution
+            # access model_db for per-group symbolic resolution
             env_unwrapped = self.env.env.unwrapped
             model_db_carrot = env_unwrapped.model_db_carrot
             model_db_plate = env_unwrapped.model_db_plate
 
             # New per-group format
             for g in self.yaml_config.groups:
-                # V0.3 M1: per-group symbolic maps from this group's own obj/recep indices
+                # per-group symbolic maps from this group's own obj/recep indices
                 g_obj_names, g_recep_names = build_obj_recep_name_maps(
                     g.obj, g.recep, model_db_carrot, model_db_plate)
                 # Resolve symbolic refs in task_sequence and eval_tasks
@@ -353,7 +346,7 @@ class CronosRunner:
                 num_envs=args.num_envs,
                 fan_out=self.yaml_config.fan_out,
             )
-            # V0.3 M1: pass group specs to wrapper for per-env object indices
+            # pass group specs to wrapper for per-env object indices
             self.env.set_group_specs(self.yaml_config.groups)
         else:
             # Legacy flat path: use env-provided task pool with optional filter
@@ -371,22 +364,22 @@ class CronosRunner:
             )
         self.env.set_scheduler(self.scheduler)
 
-        # V0.2 M5: restore scheduler cursor from checkpoint if available
+        # restore scheduler cursor from checkpoint if available
         if hasattr(self, '_resume_scheduler_state'):
             self.scheduler.load_state(self._resume_scheduler_state)
             print(f"[SCHEDULER] restored cursor from checkpoint")
         print(f"[SCHEDULER] mode={args.task_order}, pool={self.scheduler.task_pool}")
 
-        # NF-2 / H2: buffer width comes from the policy, NOT from
+        # buffer width comes from the policy, NOT from
         # `get_action_dim` (= continuous DoF = 7 for both backends, drives the
         # wrapper decoder). For OpenVLA tokens==DoF==7; for SpatialVLA
         # tokens=3 / DoF=7. Reading `act_token_len` off the live policy keeps
         # them aligned without re-deriving from `vla_path`.
         self.buffer = CronosReplayBuffer(args, act_dim=self.policy.act_token_len)
 
-        # V0.2 M1: deterministic mmap cleanup on SIGINT. atexit alone races
+        # deterministic mmap cleanup on SIGINT. atexit alone races
         # against still-open mmap fds at interpreter shutdown, producing the
-        # ENOTEMPTY silly-rename error seen in V0.1.
+        # ENOTEMPTY silly-rename error
         atexit.register(self.buffer.cleanup)
         self._install_sigint_handler()
 
@@ -402,7 +395,7 @@ class CronosRunner:
             self.video_frames = [[] for _ in range(args.num_envs)]
 
     def _dump_run_config(self):
-        """V0.2 M1: write glob_dir/run_config.{json,yaml} before any SAPIEN
+        """M1: write glob_dir/run_config.{json,yaml} before any SAPIEN
         init. Contents: resolved Args + seed + start_time + git_rev (best-
         effort) + cronos_version. The snapshot lands *before* the policy/env
         are constructed, so even a crash during env init leaves a diff-able
@@ -435,7 +428,7 @@ class CronosRunner:
 
     def _append_config_history(self, event: str, episode: int = 0,
                                 prev_config: dict = None, reason: str = ""):
-        """V0.3 M5: Append an entry to config_history.jsonl.
+        """M5: Append an entry to config_history.jsonl.
 
         Args:
             event: "initial" or "resume"
@@ -572,12 +565,12 @@ class CronosRunner:
         assert args.reset_mode in ("per_episode", "none"), \
             f"reset_mode must be 'per_episode' or 'none', got '{args.reset_mode}'"
         if args.reset_mode == "none" and not args.reset_unsuitable:
-            # P-6 (2026-06-11): user opts in to non-episodic without HSR
+            # user opts in to non-episodic without HSR
             # (object respawn). The original constraint was that under
             # `reset_mode=none` there's no env.reset() to recover envs
             # whose objects fell off the table or wedged into impossible
             # poses — `reset_unsuitable=True` was the only safety valve.
-            # Relaxed to a warning so the experimental P-6 spec is allowed;
+            # Relaxed to a warning so the experimental non-episodic spec is allowed;
             # stuck envs will accumulate over training and may degrade the
             # rollout's effective sample diversity. Caller has been told.
             print("[WARN] reset_mode=none + reset_unsuitable=False — stuck "
@@ -618,7 +611,7 @@ class CronosRunner:
 
     @torch.no_grad()
     def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
-        """V0.3.1 — Standalone evaluation (port of AutoRL `render`).
+        """— Standalone evaluation (port of AutoRL `render`).
 
         All envs run the SAME (object[i], receptacle[i]) — typically the caller broadcasts
         a single task as `[object_str]*num_envs / [receptacle_str]*num_envs`. Runs one
@@ -639,7 +632,7 @@ class CronosRunner:
             reset: True → env.reset (start of a sequence); False → continue from
                    current state (chained sequence steps, AutoRL-aligned)
             group_idx: which YAML group's physical objects to broadcast to all envs
-                       (default 0; multi-group sequential eval is V0.4 work)
+                       (default 0; multi-group sequential eval is work)
         """
         if reset:
             self.policy.prep_rollout()
@@ -690,7 +683,7 @@ class CronosRunner:
         return {k: float(np.mean(v)) for k, v in env_infos.items() if v}
 
     def eval_all_groups(self, iteration, obj_set, prefix="eval"):
-        """V0.3 M4: Evaluate all groups using per-env rotation.
+        """M4: Evaluate all groups using per-env rotation.
 
         Assignment formula:
             task_for_env_i_at_episode_e = eval_tasks[(i % n_eval_tasks + e) % n_eval_tasks]
@@ -784,7 +777,7 @@ class CronosRunner:
 
             # Save eval videos: eval_videos/ep{outer_ep}/{prefix}/eval_ep{ep+1}/env{i}.mp4
             if record_this_ep:
-                # V0.3.1: append the final post-step obs so each eval video has
+                # append the final post-step obs so each eval video has
                 # T+1 frames (matches AutoRL `render` and the standalone-eval
                 # `runner.eval`). Otherwise the recorded video ends at the input
                 # to the last action and the natural end-state is missing.
@@ -842,7 +835,7 @@ class CronosRunner:
         and mid-rollout PPO training every ppo_update_len steps (matching AutoRL)."""
         self.policy.prep_rollout()
 
-        # V0.2 M5: reset_mode=none skips env.reset() after the first episode.
+        # reset_mode=none skips env.reset() after the first episode.
         # The sim continues from the live state; only reset_unsuitable + task
         # switching drive state changes.
         if self.args.reset_mode == "none" and hasattr(self, '_no_reset_obs'):
@@ -856,7 +849,7 @@ class CronosRunner:
         self._video_envs = list(range(self.args.num_envs))
         self.video_frames = {i: [] for i in self._video_envs}
 
-        # V0.3 M3: with fan_out, each YAML group is internally split by the scheduler.
+        # with fan_out, each YAML group is internally split by the scheduler.
         # num_groups here = total sub-groups across all YAML groups (for logging only).
         if self.scheduler.fan_out:
             self.num_groups = sum(
@@ -874,7 +867,7 @@ class CronosRunner:
         self.last_info = {}
         info = {}
 
-        # P-4 (m2): per-task rollout metrics accumulator. Keyed by
+        # per-task rollout metrics accumulator. Keyed by
         # `(obj, recep)` — the task PAIR that was active DURING the
         # just-completed segment (read BEFORE the scheduler advances, see the
         # capture point below). The wrapper writes `info["episode"]` only at
@@ -896,7 +889,7 @@ class CronosRunner:
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
 
-            # 4. Video Recording — V0.4 M1: append POST-step obs only, matching
+            # 4. Video Recording — M1: append POST-step obs only, matching
             # AutoRL train_ms3_ppo.py:580-581. Recording pre-step `obs` at step 0
             # of seg N+1 would capture the direct return of reset_unsuitable_envs/
             # reset_robot, whose camera buffer is stale relative to the masked
@@ -909,7 +902,7 @@ class CronosRunner:
 
             # 5. Segment & Task Switching Logic
             if (step_idx + 1) % self.args.task_len == 0:
-                # P-4 (m2): capture per-task rollout outcomes BEFORE the
+                # capture per-task rollout outcomes BEFORE the
                 # scheduler advances. `info["episode"]` is populated by the
                 # wrapper at truncation (`wrapper.py:249-253`), which fires at
                 # this exact `task_len` boundary. Attributing to `(objs[i],
@@ -931,7 +924,7 @@ class CronosRunner:
                             if vals is not None and env_i < len(vals):
                                 slot[metric].append(float(vals[env_i]))
 
-                # V0.4 M1: save the just-completed segment (T post-step frames)
+                # save the just-completed segment (T post-step frames)
                 # BEFORE any reset runs. The reset+_settle then executes in
                 # physics but contributes no recorded frame — the next segment's
                 # first frame will be one env.step past the reset, with a
@@ -939,7 +932,7 @@ class CronosRunner:
                 if self.args.record_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
 
-                # V0.4 M3 measurement: dump end-of-segment xyz for every env's
+                # dump end-of-segment xyz for every env's
                 # task-relevant obj + recep BEFORE the HSR/LSR reset overwrites
                 # them. Used to derive `workspace_aabb` bounds from observed
                 # steady-state positions.
@@ -972,7 +965,7 @@ class CronosRunner:
                     self.env.set_task(objs, receps)
                     forward_count += 1
 
-                # Resets for non-episodic continuity. V0.4 M3 (HSR Bug 1):
+                # Resets for non-episodic continuity. M3 (HSR Bug 1):
                 # two independent ifs, matching AutoRL train_ms3_ppo.py:637-643.
                 # HSR (object respawn) and LSR (robot reset) are now truly
                 # orthogonal; HSR-only no longer silently also resets the robot.
@@ -1009,7 +1002,7 @@ class CronosRunner:
             results = self._run_ppo_update(ppo_log_path)
             all_train_results.extend(results)
 
-        # V0.2 M5: stash live obs for reset_mode=none so next episode skips env.reset
+        # stash live obs for reset_mode=none so next episode skips env.reset
         self._no_reset_obs = obs
 
         return all_train_results
@@ -1040,7 +1033,7 @@ class CronosRunner:
               f"max_steps={abs_max_steps} (prior={prior_steps} + budget={self.args.max_steps}), "
               f"max_reset={abs_max_reset} (prior={prior_resets} + budget={self.args.max_reset})")
 
-        # V0.3: eval before first training episode (e.g. to measure pretrained checkpoint)
+        # eval before first training episode (e.g. to measure pretrained checkpoint)
         if self.args.eval_at_start:
             total_steps_0 = prior_steps
             total_resets_0 = prior_resets
@@ -1110,7 +1103,7 @@ class CronosRunner:
             total_resets = self.hard_reset_count + self.soft_reset_count
             print(f"Episode {episode}: total_steps={total_steps}, total_resets={total_resets}")
 
-            # V0.2 M0: durable counters sidecar for resume continuity
+            # durable counters sidecar for resume continuity
             self.recorder.write_counters(
                 episode=episode,
                 total_steps=total_steps,
@@ -1118,13 +1111,13 @@ class CronosRunner:
             )
 
             # 3. Logging (dual-axis: both episode and total_steps).
-            # P-4 NF-10: aggregate the update's minibatch list instead of
+            # aggregate the update's minibatch list instead of
             # logging `train_results[-1]` (the last minibatch only, dominated
             # by post-step drift). `_run_ppo_update` rebuilds `train_results`
             # per update, so the list is exactly this episode's minibatches.
             # `g2_logp_gap` is read from `train_results[0]` (the first
             # minibatch — rollout θ unchanged, gap ≈ 0; persistent non-zero
-            # is a NF-3 wiring bug — see `training/ppo.aggregate_train_results`).
+            # is a wiring bug — see `training/ppo.aggregate_train_results`).
             if train_results:
                 agg = aggregate_train_results(train_results)
                 log_payload = {
@@ -1133,7 +1126,7 @@ class CronosRunner:
                     "total_steps": total_steps,
                     "total_resets": total_resets,
                 }
-                # P-4 (m2): per-task rollout metrics, attributed at segment
+                # per-task rollout metrics, attributed at segment
                 # boundary BEFORE the scheduler advanced (`run_rollout`
                 # capture). Each (obj, recep) pair gets one wandb scalar per
                 # metric per episode, averaged across all envs that ran that
@@ -1161,7 +1154,7 @@ class CronosRunner:
                            or should_stop)
 
             if should_eval:
-                # V0.3 M4: per-env rotation eval — each env rotates through
+                # per-env rotation eval — each env rotates through
                 # eval tasks across num_eval_episode episodes.
                 # Formula: eval_tasks[(i % n_eval_tasks + ep) % n_eval_tasks]
                 eval_log = {"episode": episode, "total_steps": total_steps, "total_resets": total_resets}
@@ -1171,7 +1164,7 @@ class CronosRunner:
                     f"{'=' * 50}\n"
                 )
 
-                # V0.3.1: in non-episodic mode, eval's env.reset would re-randomize
+                # in non-episodic mode, eval's env.reset would re-randomize
                 # object poses / robot pose and break training continuity. Snapshot
                 # the live scene state and restore it after eval. Skipped for
                 # `reset_mode=per_episode` (next iteration's env.reset would clobber
@@ -1183,7 +1176,7 @@ class CronosRunner:
                     saved_env_state = self.env.get_env_state()
 
                 def _run_eval_pass(obj_set, kind_prefix, kind_label):
-                    """V0.3: All groups × all tasks simultaneously, num_eval_episode episodes."""
+                    """All groups × all tasks simultaneously, num_eval_episode episodes."""
                     print(f"Evaluating {kind_label} at {total_steps} "
                           f"({self.args.num_eval_episode} episodes)")
                     results_raw = self.eval_all_groups(iteration, obj_set, prefix=kind_prefix)
@@ -1218,7 +1211,7 @@ class CronosRunner:
                 self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
                 self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
 
-                # P-5/P-6 trends dashboard refresh (per-eval): regenerate the
+                # Trends dashboard refresh (per-eval): regenerate the
                 # 4-panel `trends.png` in the run's glob dir after each eval
                 # point so a browser hitting the wandb run dir sees the live
                 # success/grasp curves + PPO health (approx_kl, clip_fraction,
@@ -1230,7 +1223,7 @@ class CronosRunner:
                 except Exception as e:
                     print(f"[trends] refresh failed (non-fatal): {type(e).__name__}: {e}")
 
-                # V0.3.1: restore training scene state if we snapshotted above.
+                # restore training scene state if we snapshotted above.
                 # set_env_state restores poses but not the env's per-env task
                 # tensors, so re-apply the current training task via set_task,
                 # then refresh the cached obs that the next rollout will read.
@@ -1249,7 +1242,7 @@ class CronosRunner:
                     "hard_reset_count": self.hard_reset_count,
                     "soft_reset_count": self.soft_reset_count,
                 })
-                # V0.2 M5: per-checkpoint config + scheduler state
+                # per-checkpoint config + scheduler state
                 import shutil, json as _json
                 src_cfg = self.glob_dir / "run_config.yaml"
                 if src_cfg.exists():
@@ -1279,7 +1272,7 @@ class CronosRunner:
     def _record_segment_xyz(self, episode, segment_id):
         """Append one row per (env, actor) to glob/end_of_segment_xyz.csv.
 
-        V0.4 M3 measurement helper. `segment_id` is 0-indexed (matches the
+        M3 measurement helper. `segment_id` is 0-indexed (matches the
         save_video_segment call); we write it 1-indexed for the CSV so the
         episode/segment columns line up with the train_videos/`rollout_epX_segY`
         directory names. Same for `episode`.
@@ -1308,7 +1301,7 @@ class CronosRunner:
                         f"{recep[i,0]:.6f},{recep[i,1]:.6f},{recep[i,2]:.6f}\n")
 
     def _refresh_trends_image(self):
-        """P-5/P-6 (m2 follow-up): re-render the trends dashboards after each
+        """re-render the trends dashboards after each
         eval point.
 
         Writes TWO images:

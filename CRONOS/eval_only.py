@@ -1,4 +1,4 @@
-"""CRONOS V0.3 — Standalone evaluation script.
+"""CRONOS — Standalone evaluation script.
 
 Loads a checkpoint and runs eval_all_groups() with per-env rotation.
 No training rollout, no PPO, no replay buffer allocation.
@@ -143,7 +143,7 @@ class EvalRunner:
         self.policy = _PolicyCls(self._policy_args(), device_id=device_id_other)
 
         # Config (load BEFORE env creation so env_n/env_m/num_envs are correct).
-        # V0.3: num_envs is authoritative from the YAML (sum of per-group num_envs);
+        # num_envs is authoritative from the YAML (sum of per-group num_envs);
         # the CLI default is only a fallback when no config is provided.
         yaml_config = None
         if args.config_path:
@@ -163,7 +163,7 @@ class EvalRunner:
         # Environment (created after config so env_n/env_m are correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
         self.suite = TaskSuite()
-        # V0.4 M3: forward YAML `unsuitable_detector` block for parametric AABB detector.
+        # forward YAML `unsuitable_detector` block for parametric AABB detector.
         det_cfg = getattr(yaml_config, "unsuitable_detector", None) if yaml_config else None
         # SpatialVLA path: pass `processor.action_tokenizer` so the wrapper's
         # `_process_action` decodes the 3-id [B, 3] output into a 7-DoF action
@@ -311,7 +311,7 @@ class EvalRunner:
 
     @torch.no_grad()
     def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
-        """V0.3.1 — Standalone evaluation (port of AutoRL `render`).
+        """Standalone evaluation (port of AutoRL `render`).
 
         Mirrors `CronosRunner.eval` in main.py. All envs run the SAME (object[i],
         receptacle[i]) — the caller broadcasts a single task. No fan-out. This is
@@ -368,9 +368,9 @@ class EvalRunner:
                 pbar.update(1)
         pbar.close()
 
-        # NF-15 / NF-16 follow-up: dump per-trial outcomes to a CSV so the
-        # paired-McNemar gate (P-5/P-6 done-criterion) has the per-(task,
-        # env) pairing key it needs. The episodic `eval_only.py` reset is
+        # Dump per-trial outcomes to a CSV so the paired-McNemar gate has
+        # the per-(task, env) pairing key it needs. The episodic
+        # `eval_only.py` reset is
         # seed-determined (wrapper.py:42-44), so two runs at the same
         # `--seed` produce byte-identical (task_idx, env_i) inits — no
         # `episode_id` is needed in the key under the same-seed contract.

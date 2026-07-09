@@ -177,7 +177,7 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         self.xyz_configs = xyz_configs
         self.quat_configs = quat_configs
 
-        # V0.2 M4: scene_spec is popped from kwargs by PickPlaceNxM and stored
+        # scene_spec is popped from kwargs by PickPlaceNxM and stored
         # on self._scene_spec_arg before ManiSkill's parent chain runs.
         self._scene_spec = getattr(self, '_scene_spec_arg', None)
         if scene_spec is not None:
@@ -272,7 +272,7 @@ class BaseBridgeEnv(BaseDigitalTwinEnv):
         return actor
 
     def _load_lighting(self, options: dict):
-        # V0.2 M4: apply SceneSpec lighting if provided, else default
+        # apply SceneSpec lighting if provided, else default
         spec = self._scene_spec
         if spec is not None:
             self.scene.set_ambient_light(list(spec.ambient))

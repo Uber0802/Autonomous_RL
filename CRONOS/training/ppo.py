@@ -21,10 +21,10 @@ def _grad_norm(params, norm_type=2.0):
 class CronosPPO:
     """Manages PPO training for the OpenVLA / SpatialVLA agents.
 
-    P-4 adds **additive, non-breaking** richer per-minibatch keys (ratio
+    This adds **additive, non-breaking** richer per-minibatch keys (ratio
     mean/median/max, `approx_kl`, `clip_fraction`, value-head
     explained-variance, per-group grad-norm logging, and the `g2_logp_gap`
-    sanity scalar). Per NF-10, the return type stays a `list` of per-minibatch
+    sanity scalar). Note: the return type stays a `list` of per-minibatch
     dicts — `train_results.extend(...)` at `main.py:774` is untouched. The
     aggregator at the wandb.log site (`main.py:1028`) summarizes across
     minibatches.
@@ -97,13 +97,13 @@ class CronosPPO:
 
             loss.backward()
 
-            # P-4 additive logging — compute BEFORE the clip+step+zero_grad block
+            # Additive logging — compute BEFORE the clip+step+zero_grad block
             # below so per-group grad-norms read the gradients actually about
             # to be (jointly) clipped + applied. `approx_kl` follows the
             # Schulman convention (mean(old - new)); `clip_fraction` is the
             # fraction of minibatch ratios outside the clip band; value
             # `explained_variance` is the standard 1 - Var(ret - val) / Var(ret)
-            # — sampling-noise-robust on small minibatches.
+            #  — sampling-noise-robust on small minibatches.
             logp_diff = (logprobs - logprobs_old).detach()
             ratio_det = ratio.detach()
             approx_kl_val = float((-logp_diff).mean().item())
@@ -120,7 +120,7 @@ class CronosPPO:
             # G2 / m1: on the FIRST minibatch of an update, θ still equals the
             # rollout θ, so `(new - old) logprob` should be ≈ 0 (bf16 noise
             # only). Persistent non-zero g2_logp_gap[0] of either training run
-            # is a real wiring bug (NF-3 backfill, position-slice, geometry).
+            # is a real wiring bug.
             g2_logp_gap = float(logp_diff.abs().max().item())
 
             # 6. Optimization Step (Gradient Accumulation). Per-group
@@ -158,7 +158,7 @@ class CronosPPO:
                 "value_loss": value_loss.item(),
                 "entropy": entropy_loss.item(),
                 "total_loss": loss.item() * self.gradient_accum,
-                # Additive P-4 keys.
+                # Additive keys.
                 "ratio_mean": float(ratio_det.mean().item()),
                 "ratio_median": float(ratio_det.median().item()),
                 "ratio_max": float(ratio_det.max().item()),
@@ -181,7 +181,7 @@ def aggregate_train_results(train_results):
 
     Used at `main.py:1028` (the `wandb.log` site) which previously logged
     `train_results[-1]` (the LAST minibatch only — dominated by post-step
-    drift). NF-10 fix: aggregate over the minibatch list rebuilt per update
+    drift). Aggregate over the minibatch list rebuilt per update
     in `_run_ppo_update`.
 
     Aggregation choice (one per key — kept Python-side, no numpy required):
@@ -229,7 +229,7 @@ def aggregate_train_results(train_results):
         agg["ratio_max"] = _max("ratio_max")
     if "grad_norm" in keys:
         agg["grad_norm"] = _max("grad_norm")
-    # First-minibatch only: g2_logp_gap is the m1 / NF-3 sanity scalar — must
+    # First-minibatch only: g2_logp_gap is the sanity scalar — must
     # come from `train_results[0]` (rollout θ unchanged on the very first
     # minibatch); reading the mean would smear it across post-step drift.
     if "g2_logp_gap" in train_results[0]:

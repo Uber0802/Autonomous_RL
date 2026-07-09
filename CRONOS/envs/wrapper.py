@@ -26,13 +26,13 @@ class CronosWrapper:
             max_episode_steps=args.segment_len,
             sensor_configs={"shader_pack": "default"},
         )
-        # V0.2 M2 Phase B: PickPlaceNxM-v1 takes (N, M) construction kwargs.
+        # PickPlaceNxM-v1 takes (N, M) construction kwargs.
         # gym.make forwards extra kwargs to the env constructor, so any future
         # parametric env can opt in by adding the same Args fields.
         if args.env_id == "PickPlaceNxM-v1":
             env_config["N"] = getattr(args, "env_n", 2)
             env_config["M"] = getattr(args, "env_m", 1)
-        # V0.2 M4: pass named scene spec to env constructor
+        # pass named scene spec to env constructor
         scene_name = getattr(args, "scene", "")
         if scene_name:
             from .scenes import get_scene
@@ -43,7 +43,7 @@ class CronosWrapper:
         random.seed(self.args.seed)
         self.rand_episode_id = random.randint(0, 1000)
 
-        # V0.3 M1: per-group object/receptacle indices → per-env tensors
+        # per-group object/receptacle indices → per-env tensors
         self.group_specs = group_specs  # List[GroupSpec] or None
         self._build_per_env_indices()
 
@@ -56,7 +56,7 @@ class CronosWrapper:
         # Integrated Modules
         self.suite = task_suite
         self.scheduler = task_scheduler
-        # V0.4 M3: prefer the parametric workspace-AABB detector when the
+        # prefer the parametric workspace-AABB detector when the
         # YAML config supplies one; fall back to the named registry (e.g.
         # `low_z`) selected via the CLI flag. The YAML form wins because it
         # carries scene-specific bounds that can't be expressed as a string.
@@ -68,7 +68,7 @@ class CronosWrapper:
                 detector = name
         else:
             detector = getattr(args, "unsuitable_detector", "low_z")
-        # V0.4 M3: HSR respawn scope (per_env|per_actor|all). YAML override
+        # HSR respawn scope (per_env|per_actor|all). YAML override
         # wins, else fall back to the CLI default on args.
         scope = getattr(args, "hsr_reset_scope", "per_env")
         if unsuitable_detector_cfg is not None and "reset_scope" in unsuitable_detector_cfg:
@@ -94,13 +94,13 @@ class CronosWrapper:
         self.action_tokenizer = action_tokenizer
 
     def _build_per_env_indices(self):
-        """V0.3 M1: Build per-env object/plate index tensors from group_specs.
+        """Build per-env object/plate index tensors from group_specs.
 
         When group_specs is provided and groups have per-group obj/recep,
         creates per-env tensors. Otherwise falls back to global args scalars.
         """
         if not self.group_specs:
-            # No group specs — use global scalar args (V0.2 path)
+            # No group specs — use global scalar args (default path)
             self._per_env_obj = None
             self._per_env_plate = None
             return
@@ -119,7 +119,7 @@ class CronosWrapper:
                 if slot < len(g.obj):
                     t[start:end] = g.obj[slot]
                 else:
-                    t[start:end] = 0  # V0.3 M2: hidden slot marker (0 → -1 after -1 in env)
+                    t[start:end] = 0  # hidden slot marker (0 → -1 after -1 in env)
             self._per_env_obj.append(t)
 
         # Per-env plate indices (1-based, 0 = hidden), shape (num_slots, num_envs)
@@ -131,7 +131,7 @@ class CronosWrapper:
                 if slot < len(g.recep):
                     t[start:end] = g.recep[slot]
                 else:
-                    t[start:end] = 0  # V0.3 M2: hidden slot marker
+                    t[start:end] = 0  # hidden slot marker
             self._per_env_plate.append(t)
 
         # Per-env overlay indices (0-based) — only when ALL groups specify int background
@@ -157,7 +157,7 @@ class CronosWrapper:
             "obj_set": obj_set_override if obj_set_override else self.args.obj_set,
         }
         if group_idx_override is not None and self.group_specs:
-            # V0.3 eval path: broadcast one group's indices to all envs
+            # eval path: broadcast one group's indices to all envs
             g = self.group_specs[group_idx_override]
             env_n = getattr(self.args, "env_n", 2)
             env_m = getattr(self.args, "env_m", 1)
@@ -169,7 +169,7 @@ class CronosWrapper:
                 options["select_overlay_ids"] = torch.full(
                     (self.num_envs,), g.background, dtype=torch.long, device=self.device)
         elif self._per_env_obj is not None:
-            # V0.3 training path: per-env tensors
+            # training path: per-env tensors
             for i, t in enumerate(self._per_env_obj):
                 options[f"obj{i+1}_index"] = t
             for i, t in enumerate(self._per_env_plate):
@@ -177,7 +177,7 @@ class CronosWrapper:
             if self._per_env_overlay is not None:
                 options["select_overlay_ids"] = self._per_env_overlay
         else:
-            # V0.2: global scalars
+            # global scalars
             options["obj1_index"] = self.args.obj1_index
             options["obj2_index"] = self.args.obj2_index
             options["obj3_index"] = self.args.obj3_index
@@ -336,7 +336,7 @@ class CronosWrapper:
         self.reward_shaper.reward_old.zero_()
 
     def get_env_state(self):
-        """V0.3.1: snapshot the SAPIEN scene state (object/receptacle poses,
+        """snapshot the SAPIEN scene state (object/receptacle poses,
         robot qpos/qvel, articulation kinematics) as a per-env tensor.
 
         Used to preserve training state across an eval boundary in non-episodic
@@ -350,7 +350,7 @@ class CronosWrapper:
         return self.env.unwrapped.get_state()
 
     def set_env_state(self, state):
-        """V0.3.1: restore a previously-snapshotted scene state.
+        """restore a previously-snapshotted scene state.
 
         Caller MUST re-apply the current training task via `set_task(...)` after
         calling this — `set_state` restores poses but not the env's per-env
@@ -368,7 +368,7 @@ class CronosWrapper:
         self.scheduler = scheduler
 
     def set_group_specs(self, group_specs):
-        """V0.3 M1: Set per-group specs and rebuild per-env index tensors."""
+        """Set per-group specs and rebuild per-env index tensors."""
         self.group_specs = group_specs
         self._build_per_env_indices()
 

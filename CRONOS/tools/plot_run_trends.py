@@ -1,15 +1,13 @@
-"""Render the 4-panel `trends.png` dashboard for a P-5/P-6 PPO training run.
+"""Render the 4-panel `trends.png` dashboard for a PPO training run.
 
-Layout (matches the reference dashboard shape; the user-facing image at
-[`reports/figures/<date>_P*-trends.png`](../../reports/figures/) and the
-in-run-dir live copy at `<glob_dir>/trends.png`):
+Layout:
 
   ┌──────────────────────────────────────────────┬──────────────────────────────────┐
   │ Task performance: success & grasp             │ Policy drift  mean(approx_kl)    │
   │  rollout succ (5-ep MA)  + raw faint          │  per-ep mean(approx_kl) over     │
   │  rollout grasp (5-ep MA) + raw faint          │  the update's minibatches        │
-  │  eval ID succ (per eval point)                │  (the `aggregator → wandb.log`   │
-  │  eval OOD succ (per eval point)               │  scalar from `training/ppo.py`)  │
+  │  eval ID succ (per eval point)                │                                  │
+  │  eval OOD succ (per eval point)               │                                  │
   ├──────────────────────────────────────────────┼──────────────────────────────────┤
   │ LoRA trust region  clip_fraction / episode    │ Value head  explained_var        │
   │  per-ep mean(clip_fraction) — the fraction   │  per-ep mean(1 - Var(ret-val)/    │
@@ -23,21 +21,19 @@ Data sources:
   - wandb cloud history (via the public `wandb.Api()`) — per-episode
     aggregated train metrics + the `rollout/<task>/*` per-task panels.
 
-The script is **idempotent** and **side-effect-only-on-disk**: it does not
-modify the running training process and can be invoked at any time (between
-eval points, after the run ends, etc.). Calling it during an eval may capture
-a partially-written `eval_success.csv`; that's harmless — the next call
-will refresh.
+The script is idempotent and side-effect-only-on-disk: it does not modify
+the running training process and can be invoked at any time (between eval
+points, after the run ends, etc.). Calling it during an eval may capture a
+partially-written `eval_success.csv`; that's harmless — the next call refreshes.
 
 Usage:
     python tools/plot_run_trends.py \\
-        --run-dir wandb/run-20260608_135140-one6land/files/glob \\
-        --max-episodes 32 \\
-        --out reports/figures/2026-06-08_P5-trends.png
+        --run-dir <path>/wandb/run-<ts>-<id>/files/glob \\
+        --max-episodes <N> \\
+        --out <out-path>.png
 
 The `--out` PNG is written; a copy also lands in `<run-dir>/trends.png` so
-each run's dir has a live in-place dashboard. Title encodes the run name and
-"live @ ep<N>/<total>" so refreshing it isn't ambiguous.
+each run's dir has a live in-place dashboard.
 """
 import argparse
 import csv
@@ -426,8 +422,7 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
     X-axis is **rollout steps** (`total_steps` from `wandb.log(...)` at
     main.py:1095 — cumulative env-steps = `num_envs × episode_len × N`)
     so each tick corresponds to a fixed amount of environment interaction
-    regardless of `num_envs`/`episode_len` configuration changes (the
-    same unit the McNemar baseline / NF-15 paired re-runs anchor on).
+    regardless of `num_envs`/`episode_len` configuration changes.
 
     Resume support: see `render(...)` — pass prior wandb run ids and
     glob `eval_success.csv` paths via `extra_run_ids` / `extra_eval_csvs`
@@ -549,8 +544,8 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
         ax.set_title(label, fontsize=11)
         ax.set_xlabel("total_steps  (num_envs × episode_len, cumulative)")
         ax.set_ylim(0, 1)
-        # Thousand-separator x ticks so the cumulative step counts stay
-        # readable as they grow into the 100K+ range during P-5/P-6.
+        # Thousand-separator x ticks so cumulative step counts stay
+        # readable as they grow into the 100K+ range.
         ax.xaxis.set_major_formatter(
             matplotlib.ticker.FuncFormatter(lambda x, _p: f"{int(x):,}")
         )

@@ -2,9 +2,9 @@
 
 Mirrors `simpler_env.policies.openvla.openvla_train.OpenVLAPolicy` so CRONOS
 can swap policies via `--policy` without touching the eval or PPO loops. PPO
-surface (P-2 in `plans/2026-06-05_spatialvla-ppo-implementation.md`) mirrors
-OpenVLA's openvla_train.py:21-271 — LoRA r32 on the L7 target set, two AdamW
-(`params_vla` lr 1e-4 / `params_vh` lr 3e-3), full save/load round-trip.
+surface mirrors OpenVLA's `openvla_train.py:21-271` — LoRA r32 on the L7
+target set, two AdamW (`params_vla` lr 1e-4 / `params_vh` lr 3e-3), full
+save/load round-trip.
 
 Eval contract (called by `eval_only.py` and `wrapper.CronosWrapper`):
     - `__init__`         : load processor + model on GPU, set action-stats,
@@ -38,7 +38,7 @@ LoRA target_modules (the L7 set per the plan):
     Projector              : linear  (only `multi_modal_projector.linear` ends
                               with `.linear`)
     Ego3D                  : position_embedding_head.0, position_embedding_head.3
-    `modules_to_save=[]`     → `spatial_embed_tokens` stays frozen (M4 / NF-7
+    `modules_to_save=[]`     → `spatial_embed_tokens` stays frozen (
                               ground-truth: those embeddings are checkpoint-
                               specific to the sft-bridge bin geometry and must
                               not drift during PPO).
@@ -86,11 +86,11 @@ class SpatialVLAPolicy:
     `vla_lr`, `vla_vhlr`, `vla_optim_beta1`, `vla_optim_beta2`.
     """
 
-    # NF-2 / H2: action token width per single action — buffer width. NOT the
+    # action token width per single action — buffer width. NOT the
     # continuous DoF (which is 7, returned by `get_action_dim` and consumed by
     # the wrapper decoder). main.py:333 reads this to size the replay buffer's
     # `actions.dat` memmap; conflating with DoF would either size the buffer
-    # wrong or crash the per-step gather. See plan §P-3 / NF-2.
+    # wrong or crash the per-step gather. See .
     act_token_len: int = 3
 
     def __init__(self, all_args, device_id: int):
@@ -128,7 +128,7 @@ class SpatialVLAPolicy:
 
         # Deterministic value-head init mirrors `OpenVLAPolicy.__init__:51-53`
         # (from_pretrained's internal HF init isn't seeded). Required for
-        # P-1/P-4 gate determinism across reruns.
+        # gate determinism across reruns.
         torch.manual_seed(self.args.seed)
         torch.cuda.manual_seed_all(self.args.seed)
         self.vla.value_head._init_weights()
@@ -138,12 +138,12 @@ class SpatialVLAPolicy:
         # `eval_only.py:164` returns the bridge_orig/1.0.0 stats. Shared dict
         # reference, no copy, so the two views can't drift.
         self.vla.set_action_stats(self.processor.statistics)
-        # NF-7 geometry derivation: single source of truth for the per-range
+        # geometry derivation: single source of truth for the per-range
         # token bounds. Imported by the gates as module-level globals; calling
         # this BEFORE PEFT avoids any proxy-getattr surprises.
         self.vla.set_action_tokenizer(self.processor.action_tokenizer)
 
-        # LoRA wrap (P-2 / M4). The no-`vla_load_path` branch is the fresh
+        # LoRA wrap. The no-`vla_load_path` branch is the fresh
         # PPO start; the load branch resumes a saved adapter. Either way the
         # value head is fully trainable (not LoRA-wrapped) and lives in a
         # separate optimizer (`vh_optimizer`).
@@ -218,7 +218,7 @@ class SpatialVLAPolicy:
             else:
                 print(f"Warning: training_state not found in {training_state_path}")
 
-    # --- optimizer split (M5 / NF-11) -----------------------------------------
+    # --- optimizer split  -----------------------------------------
 
     def _setup_optimizer(self):
         """Split trainable params into `params_vla` (LoRA) and `params_vh`
@@ -280,7 +280,7 @@ class SpatialVLAPolicy:
         )
 
         if action_ids is not None:
-            # M3 / P-2: build the suffix from the EXACT sampled token ids.
+            # build the suffix from the EXACT sampled token ids.
             # `processor(..., suffix_actions=...)` would *re-discretize* via
             # the action tokenizer — wrong for off-policy scoring where we
             # need to score the actually-sampled tokens. Instead pass the
@@ -303,9 +303,9 @@ class SpatialVLAPolicy:
     def get_action(self, x: dict, deterministic: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single-step action (PPO unit + single-step eval baseline).
 
-        NF-14 return-order trap: returns `(values, action_ids, logprobs)` —
-        OPPOSITE order from `evaluate_actions`'s `(logprobs, entropy, values)`.
-        Mirrors `OpenVLAPolicy.get_action` openvla_train.py:156-172.
+        Returns `(values, action_ids, logprobs)` — OPPOSITE order from
+        `evaluate_actions`'s `(logprobs, entropy, values)`. Mirrors
+        `OpenVLAPolicy.get_action` openvla_train.py:156-172.
         """
         temperature = self.args.vla_temperature_eval if deterministic else self.args.vla_temperature
         do_sample = (temperature != 0.0)
@@ -357,9 +357,8 @@ class SpatialVLAPolicy:
     def evaluate_actions(self, x: dict, action_ids: torch.Tensor, return_diagnostics: bool = False):
         """Score (s, a) for the PPO update loop.
 
-        NF-6: `return_diagnostics=False` for production callers so they unpack
-        a 3-tuple; the gates pass `True` to grab the raw forward tensors and
-        verify G2a/G3a with offsets written out independently.
+        `return_diagnostics=False` for production callers so they unpack a
+        3-tuple; test paths pass `True` to grab the raw forward tensors.
         """
         features = self._preprocess_obs(x, action_ids=action_ids)
         out = self.vla.evaluate_action(
@@ -406,7 +405,7 @@ class SpatialVLAPolicy:
         """Pass-through to the model; the adapter wired Option A' at load."""
         return self.vla.get_action_stats(unnorm_key)
 
-    # --- save / load (M5 / FR-9 / NF-11) ---------------------------------------
+    # --- save / load ---------------------------------------------------------
 
     def save(self, path: Path, extra_state: dict = None) -> None:
         """Persist adapter + value head + both optimizers + norm stats.
@@ -444,8 +443,8 @@ class SpatialVLAPolicy:
 
         Tears down the current model, fresh-loads the base from `vla_path`,
         wraps it with `PeftModel.from_pretrained`, re-bridges stats + the
-        action tokenizer (NF-7 geometry derivation), restores the value head
-        and both optimizers from `training_state.pt`.
+        action tokenizer, restores the value head, and re-creates both
+        optimizers from `training_state.pt`.
         """
         path = Path(path)
 

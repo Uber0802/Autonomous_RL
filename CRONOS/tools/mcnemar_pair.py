@@ -1,14 +1,14 @@
-"""Compute the pooled paired-McNemar gate (P-5/P-6 done-criterion).
+"""Compute the pooled paired-McNemar gate.
 
 Reads two `eval_per_trial.csv` files (zero-shot baseline + post-RL eval at
-the SAME `--seed` — NF-15) and computes the paired McNemar statistic on
+the SAME `--seed`) and computes the paired McNemar statistic on
 the pooled discordant pairs across all tasks of one `eval_kind`
 (`in_domain` for the plan's primary gate; `out_of_domain` for context).
 
 Each row of the input CSV is one trial:
     seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix
 
-Pairing key (NF-16): `(eval_kind, task, env_idx)`. Under the same `--seed`,
+Pairing key: `(eval_kind, task, env_idx)`. Under the same `--seed`,
 the episodic `eval_only.py` reset is seed-determined and policy-
 independent (wrapper.py:42-44), so two runs at the same seed yield byte-
 identical inits per (task, env_idx) — no `episode_id` is needed in the key.
@@ -120,7 +120,7 @@ def mcnemar(baseline, post_rl, kind: str, metric: str = "success"):
 def main():
     p = argparse.ArgumentParser("mcnemar_pair")
     p.add_argument("--baseline", required=True, type=Path,
-                   help="zero-shot baseline eval_per_trial.csv (NF-15 same-seed)")
+                   help="zero-shot baseline eval_per_trial.csv")
     p.add_argument("--post-rl", required=True, type=Path,
                    help="post-RL eval_per_trial.csv (SAME `--seed`, post-PPO checkpoint)")
     p.add_argument("--kinds", default="in_domain,out_of_domain",

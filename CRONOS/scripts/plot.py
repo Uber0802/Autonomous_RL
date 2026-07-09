@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""V0.4 success-curve aggregator + plotter — CSV-native replacement for V0.1's plot.py.
+"""Success-curve aggregator + plotter — reads long-form `eval_success.csv` files.
 
-V0.1 plot.py read pre-pivoted .xlsx files (sheets: ID Curve(EP), OOD Curve(EP),
-ID Curve(Reset), OOD Curve(Reset)) where each sheet had one column per task.
-V0.4 instead reads `eval_success.csv` directly — the canonical long-form per-run
-log written by main.py's SuccessRecorder. Schema:
+Input CSV schema (written by `main.py`'s `SuccessRecorder`):
 
     episode, total_steps, total_resets, eval_kind, group, task, scene, n_envs,
     success, grasp, obj_grasped
@@ -17,13 +14,12 @@ Workflow
    - `aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
    - `summary.csv` (final-value mean ± std per group × eval_kind)
    - 4 main PNGs: `<name>_<eval_kind>_<x_axis>.png`
-   - 2 gap PNGs: `<name>_gap_<eval_kind>.png` (success vs grasp overlaid — the
-     V0.3 seed-4 placement-collapse diagnostic from V0.4 M2)
+   - 2 gap PNGs: `<name>_gap_<eval_kind>.png` (success vs grasp overlaid)
 
 Adding a new run = append its `eval_success.csv` path to the right group's
 `csv_paths` list, then rerun. No code changes.
 
-Requires: pandas, numpy, matplotlib. No scipy dependency (uses np.interp).
+Requires: pandas, numpy, matplotlib.
 """
 
 from __future__ import annotations
@@ -183,8 +179,7 @@ def per_run_series(df: pd.DataFrame, eval_kind: str, x_axis: str,
     Each eval round writes one row per (group, task) pair. We:
       1. Filter to eval_kind.
       2. Group by the eval-round key (episode, x_axis) and take the mean of
-         `metric` over (group, task) — this matches the "Average across tasks"
-         line in V0.1 plot.py's `avg=True` mode.
+         `metric` over (group, task) — an "average across tasks" line.
       3. Return a single-column frame indexed by `x_axis` with `metric` values.
 
     If the run never logged this `eval_kind`, returns an empty frame.
@@ -229,8 +224,7 @@ def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
     usable = [s for s in series_list if not s.empty]
     if not usable:
         return np.empty((0,)), np.empty((0, n_points))
-    # Prepend a (0, 0) start point so the curves all anchor at the origin
-    # (matches V0.1 plot.py's `np.concatenate(([0], ...))`).
+    # Prepend a (0, 0) start point so the curves all anchor at the origin.
     prepped = []
     for s in usable:
         x = np.concatenate(([0.0], s[x_axis].to_numpy(dtype=float)))
@@ -289,6 +283,19 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
         except (FileNotFoundError, TypeError, ValueError) as e:
             print(f"  [WARN] {spec.label}: {e}")
             continue
+        # Apply BOTH end_steps and end_resets crops at the row level so every
+        # x_axis view sees the same eval-point subset. Without this, a run
+        # cropped to end_steps on the step-axis would still contribute its
+        # post-crop rows to the reset-axis view (its post-crop total_steps
+        # rows still have valid total_resets), producing curves that no longer
+        # look like re-scaled versions of each other.
+        def _row_crop(d):
+            if cfg.end_steps is not None:
+                d = d[d["total_steps"] <= float(cfg.end_steps)]
+            if cfg.end_resets is not None:
+                d = d[d["total_resets"] <= float(cfg.end_resets)]
+            return d
+        dfs = [_row_crop(d) for d in dfs]
         for eval_kind in cfg.eval_kinds:
             for x_axis in cfg.x_axes:
                 x_clip = (cfg.end_steps if x_axis == "total_steps"
@@ -346,8 +353,7 @@ def _format_axis(ax, x_axis: str, y_label: str = "Success Rate") -> None:
 def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
                      cfg: PlotConfig, out_path: Path) -> None:
     """One PNG per (eval_kind × x_axis). Overlays mean ± std envelopes for each
-    config group on the same axes (one line per group). Matches V0.1 plot.py's
-    `avg=True` mode."""
+    config group on the same axes (one line per group)."""
     sub = long_df[(long_df["eval_kind"] == eval_kind) &
                   (long_df["x_axis"] == x_axis) &
                   (long_df["metric"] == "success")]
@@ -383,8 +389,8 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
 
 def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
                     cfg: PlotConfig, out_path: Path) -> None:
-    """V0.4 M2 diagnostic: success vs grasp overlaid. A persistent gap (grasp
-    high, success low) is the V0.3 seed-4 placement-collapse signature."""
+    """Success vs grasp overlaid. A persistent gap (grasp high, success low)
+    is the placement-collapse signature."""
     sub = long_df[(long_df["eval_kind"] == eval_kind) &
                   (long_df["x_axis"] == "total_steps")]
     if sub.empty:

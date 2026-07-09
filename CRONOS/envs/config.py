@@ -1,4 +1,4 @@
-"""CRONOS V0.2 — YAML experiment config loader.
+"""CRONOS — YAML experiment config loader.
 
 A single YAML file fully describes an experiment: per-group object/receptacle
 indices, task sequences with symbolic refs, eval tasks, and global task ordering.
@@ -11,7 +11,7 @@ Three task ordering modes:
 
 Example config::
 
-    cronos_version: V0.2
+    cronos_version: V0.4
     task_order: sequential
     num_envs: 64
 
@@ -55,14 +55,14 @@ _KNOWN_TOP_KEYS = {
     "num_envs",
     "scene",
     "groups",
-    "fan_out",  # V0.3 M3: sub-group fan-out (default True)
-    "unsuitable_detector",  # V0.4 M3: HSR detector config (name + workspace AABB)
-    # Legacy V0.2 flat keys (still accepted for backward compat / CLI-only mode)
+    "fan_out",  # sub-group fan-out (default True)
+    "unsuitable_detector",  # HSR detector config (name + workspace AABB)
+    # Legacy flat keys (still accepted for backward compat / CLI-only mode)
     "env_n", "env_m",
     "obj1_index", "obj2_index", "obj3_index",
     "plate1_index", "plate2_index", "plate3_index",
     "task_filter",
-    # P-3: policy / VLA overrides (mirrored into Args by main.py's YAML→Args loop).
+    # policy / VLA overrides (mirrored into Args by main.py's YAML→Args loop).
     "policy", "vla_path", "vla_unnorm_key", "vla_lr", "vla_vhlr",
 }
 
@@ -99,9 +99,9 @@ class CronosConfig:
     task_order: str = "sequential"
     num_envs: Optional[int] = None
     scene: Optional[str] = None
-    fan_out: bool = True              # V0.3 M3: sub-group fan-out (default True)
+    fan_out: bool = True              # sub-group fan-out (default True)
     groups: List[GroupSpec] = field(default_factory=list)
-    unsuitable_detector: Optional[dict] = None   # V0.4 M3: raw YAML block, parsed in wrapper
+    unsuitable_detector: Optional[dict] = None   # raw YAML block, parsed in wrapper
 
     # Legacy fields (populated when using old flat format or CLI-only)
     env_n: Optional[int] = None
@@ -114,7 +114,7 @@ class CronosConfig:
     plate3_index: Optional[int] = None
     task_filter: Optional[List[Union[int, str]]] = None
 
-    # P-3: policy / VLA overrides — optional in YAML, propagated to `Args` by
+    # policy / VLA overrides — optional in YAML, propagated to `Args` by
     # main.py's YAML→Args loop (CLI still wins). Lets a training config like
     # `configs/spatialvla_2x2_train.yaml` pin the SpatialVLA policy / model
     # path / `bridge_orig/1.0.0` unnorm key without forcing every command line
@@ -297,8 +297,9 @@ def validate_config(config: CronosConfig, total_segments: Optional[int] = None):
                         f"V23: groups[{i}] has {n_unique} unique tasks and "
                         f"{g.num_envs} envs. fan_out requires group_envs % unique_tasks == 0.")
 
-    # V16: sequential mode — warn if groups have unequal sequence lengths
-    # (V0.3: relaxed from error to warning; scheduler handles per-group cursors)
+    # V16: sequential mode — warn if groups have unequal sequence lengths.
+    # This is a warning (not error) because the scheduler handles per-group
+    # cursors independently.
     if config.task_order == "sequential" and len(groups) > 1:
         lengths = [len(g.task_sequence) for g in groups if g.task_sequence]
         if lengths and len(set(lengths)) > 1:
@@ -471,7 +472,7 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
         plate2_index=raw.get("plate2_index"),
         plate3_index=raw.get("plate3_index"),
         task_filter=task_filter,
-        # P-3: policy / VLA overrides — populated only if the YAML provides
+        # policy / VLA overrides — populated only if the YAML provides
         # them. main.py's YAML→Args loop reads them with `not _cli_provided`
         # so a CLI flag still wins.
         policy=raw.get("policy"),

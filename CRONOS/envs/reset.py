@@ -15,16 +15,16 @@ class ResetStrategy:
         self.num_envs = num_envs
         self.device = device
         self.reset_unsuitable_count = 0
-        # V0.2 M2 Phase A+B: pluggable detector. Default `low_z` preserves
-        # V0.1 behavior. Phase B closes the loop: `reset_unsuitable_envs`
-        # now consults the detector via `per_actor_class()` and passes the
-        # resulting masks to the env's respawn path. The detector is the
-        # single source of truth for which envs/actors are unsuitable.
+        # Pluggable detector. Default `low_z` is the threshold-based rule
+        # (`obj_z < 0.7 | recep_z < 0.7`). `reset_unsuitable_envs` consults the
+        # detector via `per_actor_class()` and passes the resulting masks to
+        # the env's respawn path. The detector is the single source of truth
+        # for which envs/actors are unsuitable.
         self.detector: UnsuitableDetector = get_detector(detector)
-        # V0.4 M3: HSR respawn scope. Three granularities:
+        # HSR respawn scope. Three granularities:
         #   "per_actor" — respawn only the specific actor (obj OR recep) that
         #                 tripped the detector. Other actors of the same env
-        #                 stay where they were. V0.3.1 behavior.
+        #                 stay where they were.
         #   "per_env"   — respawn BOTH actors (obj + recep) of any env where
         #                 either is flagged. Other envs untouched. DEFAULT —
         #                 matches the natural "reset this env's task" semantic.
@@ -40,7 +40,7 @@ class ResetStrategy:
         """Identifies environments with objects in unsuitable positions (e.g., fallen).
 
         Delegates to the registered detector. Returns a list of env indices
-        for backward compatibility with the V0.1 API; convert to a bool mask
+        for backward compatibility with the API; convert to a bool mask
         upstream if you need it in tensor form.
         """
         mask = self.detector(self.env.unwrapped)
@@ -76,7 +76,7 @@ class ResetStrategy:
         """Respawns objects/receptacles in envs where the detector flagged
         them as unsuitable (fallen, ejected from workspace, etc.).
 
-        V0.4 M3 (HSR Bug 1): the previous V0.3.1 implementation called
+        M3 (HSR Bug 1): the previous implementation called
         ``self.reset_robot()`` unconditionally before the respawn, which made
         ``--reset-unsuitable --no-reset-robot`` silently behave like LSR+HSR.
         Now this method does ONLY the object-side respawn; the train loop
@@ -89,18 +89,18 @@ class ResetStrategy:
             masks = self.detector.per_actor_class(unwrapped)
             obj_mask = masks["obj"]
             recep_mask = masks["recep"]
-            reasons = masks.get("reasons")  # V0.4 M3c: optional per-env diagnostics
+            reasons = masks.get("reasons")  # optional per-env diagnostics
         else:
             any_mask = self.detector(unwrapped)
             obj_mask = any_mask
             recep_mask = any_mask
 
-        # V0.4 M3 (full-env fix): derive a `fully_reset_envs` mask from the
+        # derive a `fully_reset_envs` mask from the
         # scope. bridge_multi.reset_unsuitable_envs uses this to respawn
         # EVERY actor (all N carrots + all M plates) of each flagged env —
         # not just the task-relevant pair, which leaves non-task-relevant
         # actors lingering wherever they fell. per_actor scope keeps the
-        # V0.3.1 single-actor path (obj_mask / recep_mask passed through).
+        # Single-actor path (obj_mask / recep_mask passed through).
         # Reasons are preserved unchanged so the log line still explains *why*
         # the trigger fired, regardless of how widely the reset is applied.
         fully_reset_envs = None

@@ -407,18 +407,18 @@ class BasePickPlace(BaseEnv):
                               reasons=None, fully_reset_envs=None):
         """Respawns envs whose objects/receptacles have fallen.
 
-        V0.2 M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
+        M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
         (by ``ResetStrategy.reset_unsuitable_envs``), they come from the
         registered ``UnsuitableDetector`` and are the source of truth for
         which task-relevant actor (current carrot or current plate) to respawn
-        per env. When omitted, falls back to the V0.1 inlined ``< 0.7``
+        per env. When omitted, falls back to the inlined ``< 0.7``
         thresholds for backward compatibility.
 
-        V0.4 M3c: optional ``reasons`` is a list[dict[env_idx, str]] from the
+        M3c: optional ``reasons`` is a list[dict[env_idx, str]] from the
         detector explaining which axis violated the workspace AABB; printed
         with the HSR log line so HSR fires are diagnostic-grade.
 
-        V0.4 M3 (full-env fix): optional ``fully_reset_envs`` is a bool tensor
+        M3 (full-env fix): optional ``fully_reset_envs`` is a bool tensor
         of shape ``(num_envs,)`` from the per_env / all scopes. For each env
         with ``fully_reset_envs[i] == True``, every actor of that env (all N
         carrots AND all M plates, not just the task-relevant pair) is
@@ -435,7 +435,7 @@ class BasePickPlace(BaseEnv):
         plate_actor = [self.objs_plate[n] for n in select_plate]
 
         # Get unsuitable object/recep masks. Prefer masks injected by the
-        # registered detector; fall back to inlined V0.1 thresholds if the
+        # registered detector; fall back to inlined thresholds if the
         # caller didn't provide them (e.g. older test paths).
         if obj_mask is None or recep_mask is None:
             obj_z = self.get_obj_pos()[:, 2]
@@ -467,7 +467,7 @@ class BasePickPlace(BaseEnv):
         quant_indices = indices % l2
         quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
 
-        # V0.3.1 HSR fix: respawn the env's task carrot/plate at the position
+        # HSR: respawn the env's task carrot/plate at the position
         # of the active slot it actually occupies. Use the per-env `_reset_mask`
         # trick (proven correct for physics — only respawned envs are touched).
         # Note: this means the post-respawn frame has a 1-step camera lag (the
@@ -489,7 +489,7 @@ class BasePickPlace(BaseEnv):
         active_c = (all_c == self.select_carrot_ids.unsqueeze(0)).int().argmax(dim=0)  # (num_envs,)
         active_p = (all_p == self.select_plate_ids.unsqueeze(0)).int().argmax(dim=0)   # (num_envs,)
 
-        # V0.4 M3 (full-env fix): build the set of envs that need every actor
+        # build the set of envs that need every actor
         # respawned. For those envs we iterate over ALL N carrot slots + ALL M
         # plate slots (skipping hidden slots) instead of the single
         # task-relevant pair. Other envs fall through to the per-actor path.
@@ -517,7 +517,7 @@ class BasePickPlace(BaseEnv):
             for slot in range(N):
                 cid = int(all_c[slot, env_i].item())
                 if cid < 0:
-                    continue  # hidden slot (V0.3 M2 mixed-N/M)
+                    continue  # hidden slot (M2 mixed-N/M)
                 name = self.carrot_names[cid]
                 actor = self.objs_carrot[name]
                 phys = self._slot(slot)
@@ -547,8 +547,8 @@ class BasePickPlace(BaseEnv):
                 s = self._slot(int(active_c[idx].item()))
                 _masked_set_pose(a, idx, pos[s], quant[0])
 
-        # V0.4 M3a: snapshot the current robot qpos BEFORE _settle so we can
-        # restore it after. In V0.3.1 the post-_settle snap forced the arm to
+        # snapshot the current robot qpos BEFORE _settle so we can
+        # restore it after. In the post-_settle snap forced the arm to
         # `self.initial_qpos`, which broke HSR-only semantics by silently
         # resetting the robot whenever HSR fired. The drift during _settle's
         # 0.5s of physics is still a real problem (PD control can't hold pose
@@ -566,7 +566,7 @@ class BasePickPlace(BaseEnv):
 
         flagged = sorted(set(obj_low_z_list) | set(recep_low_z_list) | full_envs_set)
         if reasons:
-            # V0.4 M3c: flatten per-env reasons to a compact one-line summary.
+            # flatten per-env reasons to a compact one-line summary.
             # `reasons[i]` is {} for healthy envs and {i: "axis violation"} otherwise.
             reason_str = ", ".join(
                 f"env{i}: {next(iter(reasons[i].values()))}"
@@ -574,7 +574,7 @@ class BasePickPlace(BaseEnv):
             )
         else:
             reason_str = ""
-        # V0.4 M3 (full-env fix): show envs that were actually respawned,
+        # show envs that were actually respawned,
         # broken down by which path handled them. The per-actor lists are
         # empty under per_env / all scopes (ResetStrategy zeros them so the
         # full-env path handles every actor of those envs — no double-set).
@@ -786,7 +786,7 @@ class BaseMultiPickPlace(BasePickPlace):
 
 
 
-# --- V0.2 M2 Phase B: legacy TwoObjectOneReceptacle and OneObjectTwoReceptacle
+# --- M2 Phase B: legacy TwoObjectOneReceptacle and OneObjectTwoReceptacle
 # classes were deleted here. Their behavior is preserved by PickPlaceNxM-v1(N=2, M=1)
 # and PickPlaceNxM-v1(N=1, M=2) below; see _NxM_PRESETS.
 
@@ -979,7 +979,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             for i in range(self.NUM_OBJECTS):
                 cid = self._all_carrot_ids[i][env_idx]
                 if cid < 0:
-                    continue  # V0.3 M2: hidden slot
+                    continue  # hidden slot
                 if object[env_idx] == self.model_db_carrot[self.carrot_names[cid]]["name"]:
                     new_carrot_ids.append(cid)
                     found = True
@@ -993,7 +993,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             for i in range(self.NUM_RECEPTACLES):
                 pid = self._all_plate_ids[i][env_idx]
                 if pid < 0:
-                    continue  # V0.3 M2: hidden slot
+                    continue  # hidden slot
                 if receptacle[env_idx] == self.model_db_plate[self.plate_names[pid]]["name"]:
                     new_plate_ids.append(pid)
                     found = True
@@ -1020,7 +1020,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             for i in range(self.NUM_OBJECTS):
                 cid = self._all_carrot_ids[i][env_idx]
                 if cid < 0:
-                    continue  # V0.3 M2: hidden slot
+                    continue  # hidden slot
                 names.append(self.model_db_carrot[self.carrot_names[cid]]["name"])
             result.append(names)
         return result
@@ -1032,7 +1032,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             for i in range(self.NUM_RECEPTACLES):
                 pid = self._all_plate_ids[i][env_idx]
                 if pid < 0:
-                    continue  # V0.3 M2: hidden slot
+                    continue  # hidden slot
                 names.append(self.model_db_plate[self.plate_names[pid]]["name"])
             result.append(names)
         return result
@@ -1114,7 +1114,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         self.agent.robot.set_pose(self.initial_robot_pos)
         self.agent.reset(init_qpos=self.initial_qpos)
 
-        # V0.3.1 fix: push the just-set CPU state (robot at initial pose +
+        # Fix: push the just-set CPU state (robot at initial pose +
         # initial qpos) to the GPU so the camera renders the robot at its
         # initial pose. Without this, BaseEnv.reset()'s post-init render reads
         # the stale GPU state from the prior _settle (when the robot was at
@@ -1156,7 +1156,7 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
 
 
 
-# --- V0.2 M2 Phase B: PickPlaceNxM-v1 -------------------------------------
+# --- M2 Phase B: PickPlaceNxM-v1 -------------------------------------
 #
 # Single parametric backbone for every (N, M) shape CRONOS supports. Replaces
 # the 8 legacy `@register_env` shims that lived above. Built on top of
@@ -1246,7 +1246,7 @@ class PickPlaceNxM(GenericNxMPickPlace):
     Usage:
         gym.make("PickPlaceNxM-v1", num_envs=64, N=2, M=1, ...)
 
-    Defaults to (N=2, M=1) for parity with the V0.1 baseline run. The
+    Defaults to (N=2, M=1) for parity with the baseline run. The
     accepted (N, M) pairs are exactly the 8 shapes in `_NxM_PRESETS`.
     """
 
@@ -1264,7 +1264,7 @@ class PickPlaceNxM(GenericNxMPickPlace):
         self.SLOT_ORDER = spec["SLOT_ORDER"]
         self.DEFAULT_OBJ_INDICES = spec["DEFAULT_OBJ_INDICES"]
         self.DEFAULT_PLATE_INDICES = spec["DEFAULT_PLATE_INDICES"]
-        # V0.2 M4: extract scene_spec before it hits ManiSkill's parent chain
+        # extract scene_spec before it hits ManiSkill's parent chain
         # (which rejects unknown kwargs). Store on self so BaseEnv.__init__
         # can read it via getattr(self, '_scene_spec', None).
         self._scene_spec_arg = kwargs.pop("scene_spec", None)

@@ -19,7 +19,7 @@ def huber_loss(e, d):
 
 
 class OpenVLAPolicy:
-    # NF-2 / H2: action tokens per step → buffer width (`actions.dat` is `[ep_len,
+    # action tokens per step → buffer width (`actions.dat` is `[ep_len,
     # envs, act_token_len]`). OpenVLA's discrete action representation has
     # tokens == DoF == 7, so the buffer width matches the continuous DoF
     # returned by `get_action_dim`; SpatialVLA decouples them (3 tokens,

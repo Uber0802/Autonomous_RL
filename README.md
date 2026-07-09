@@ -4,9 +4,10 @@ CRONOS is a refactored robotic manipulation training benchmark designed for **no
 
 ## Features
 - **YAML-driven experiment configs** — per-group objects, receptacles, task sequences, eval tasks, and fan-out settings in a single file.
-- **Sub-group fan-out** (V0.3) — all tasks in a group run simultaneously on different env sub-groups, matching AutoRL's default multi-task gradient mixing.
-- **Per-env rotation eval** (V0.3) — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
-- **Per-group objects/backgrounds** (V0.3) — different groups can have different physical objects and visual overlays in the same training run.
+- **Sub-group fan-out** — all tasks in a group run simultaneously on different env sub-groups, matching AutoRL's default multi-task gradient mixing.
+- **Per-env rotation eval** — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
+- **Per-group objects/backgrounds** — different groups can have different physical objects and visual overlays in the same training run.
+- **Dual VLA support** — `--policy openvla|spatialvla` switches between OpenVLA-7B and SpatialVLA-4B adapters (7-token vs 3-token action sequences).
 - **Modular Environment**: Decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
 - **Efficient Rollouts**: Multi-task execution with GPU-parallelized ManiSkill environments.
 - **Robust Training**: PPO implementation with memory-mapped replay buffers.
@@ -86,11 +87,11 @@ chmod +x *.sh
 
 `setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
 
-**Hotfix** for the `runtime_version` ImportError you hit on a pre-V0.4 install:
+**Hotfix** for the `runtime_version` ImportError (protobuf 4.x vs 5.x mismatch on `import tensorflow_datasets`):
 ```bash
 pip install "tensorflow-metadata<1.21" "protobuf>=3.20,<5"
 ```
-(setup.sh now pins these permanently so this won't recur on fresh envs.)
+(setup.sh pins these permanently so this won't recur on fresh envs.)
 
 ### 4. (Optional) Ubuntu 22.04 prerequisite
 
@@ -144,7 +145,7 @@ How `setup.sh` picks the install: the 1st positional arg picks the LM stack + wh
 
 ### Training
 ```bash
-# V0.4 training: 6 positional args
+# 6 positional args
 bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla]
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
 #                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
@@ -181,7 +182,7 @@ Key training flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--config-path` | required | YAML experiment config |
-| `--policy` | `openvla` | `openvla` or `spatialvla` (V0.4) |
+| `--policy` | `openvla` | `openvla` or `spatialvla` |
 | `--num-envs` | 64 | Total parallel environments |
 | `--segment-len` | 80 | Steps per segment (AutoRL: 80) |
 | `--ppo-update-len` | 80 | Steps between PPO updates |
@@ -190,7 +191,7 @@ Key training flags:
 | `--eval-at-start` | false | Run eval before first training episode |
 | `--enable-backward` / `--backward-interval N` | off | LSR — backward policy alternating with forward at step interval N |
 | `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
-| `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (V0.3.1 parity) \| `all` |
+| `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
 | `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
 | `--reset-mode` | `episode` | `episode` \| `none` (non-episodic) |
 
@@ -201,7 +202,7 @@ Key training flags:
 - `--eval-mode sequential` (default): runs `--eval-sequences N` orderings of the eval tasks. The first ordering is the training task order (sequence 0, AutoRL `eval_training_seq=True` convention); subsequent orderings are random permutations. Within each ordering, tasks switch one-by-one without env reset (matches AutoRL `render_seq`).
 - `--eval-mode single`: runs each task in `eval_tasks` once independently, all envs on the same task per pass (matches AutoRL `render`).
 
-**Note:** the V0.3 fan-out rotation eval (per-env rotation) is no longer the default for standalone eval — it lives only inside `train()` for training-time eval. Use `--eval-at-start` if you want the rotation eval against a checkpoint loaded by main.py.
+**Note:** the fan-out rotation eval (per-env rotation) is not used for standalone eval — it lives only inside `train()` for training-time eval. Use `--eval-at-start` if you want the rotation eval against a checkpoint loaded by main.py.
 
 **Wrapper script** (recommended — sets the right env vars):
 ```bash
@@ -246,9 +247,9 @@ Common eval flags:
 | `--record-video` | true | Write mp4s under `glob/eval_videos/{prefix}/` |
 | `--vla-temperature-eval` | 0.6 | Sampling temperature for the policy |
 
-### Visualization (V0.4)
+### Visualization
 
-CRONOS V0.4 ships two complementary plotting tools — one per-run live dashboard, one cross-run aggregator.
+CRONOS ships two complementary plotting tools — one per-run live dashboard, one cross-run aggregator.
 
 #### Per-run live dashboard — `tools/plot_run_trends.py`
 
@@ -344,7 +345,7 @@ Each training config under `configs/` has a matching eval config under `configs/
 | `one_group_pure_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Default 2x2 single-group eval |
 | `one_group_seq_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Same eval as pure_random — neither has a canonical training order |
 | `one_group_sequential_3x3.yaml` | `eval/one_group_3x3.yaml` | 9 tasks; sequence 0 = auto-generated NxM order from training config |
-| `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | **Multi-group standalone eval is V0.4 work** — see caveat in the file |
+| `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | Multi-group standalone eval — see caveat in the file |
 
 ## YAML Config Format
 
@@ -354,7 +355,7 @@ Configs live in `configs/`. A single YAML file fully describes an experiment.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `cronos_version` | string | — | Config format version (e.g. `V0.3`) |
+| `cronos_version` | string | — | Config format version (e.g. `V0.4`) |
 | `task_order` | string | `sequential` | `sequential`, `pure_random`, or `sequence_random` |
 | `fan_out` | bool | `true` | All tasks run simultaneously within each group (AutoRL default) |
 
@@ -426,7 +427,7 @@ The config loader validates:
 ### Minimal single-group config
 
 ```yaml
-cronos_version: V0.3
+cronos_version: V0.4
 task_order: sequential
 
 groups:
@@ -440,7 +441,7 @@ groups:
 ### Two-group config with different objects and receptacles
 
 ```yaml
-cronos_version: V0.3
+cronos_version: V0.4
 task_order: sequential
 
 groups:
@@ -471,7 +472,7 @@ groups:
 
 CRONOS has two distinct eval semantics for two different use-cases.
 
-### Training-time eval — per-env rotation (V0.3)
+### Training-time eval — per-env rotation
 
 Used inside `main.py train()` (eval-at-start + periodic mid-training eval). Fan-out across envs: each env independently rotates through the eval tasks so all eval tasks are scored every eval round without idle envs.
 
@@ -488,7 +489,7 @@ Divisibility constraints (validated at config load):
 
 In non-episodic mode (`reset_mode=none`), the training scene state is snapshotted before each mid-training eval and restored after, so eval's `env.reset` calls don't break the live simulation continuity that non-episodic training relies on.
 
-### Standalone eval — AutoRL-style broadcast (V0.3.1)
+### Standalone eval — AutoRL-style broadcast
 
 Used by `eval_only.py` and `main.py --eval-single` / `--eval-sequential`. All envs run the same `(object, receptacle)` for one `segment_len`-step rollout (no fan-out). Two modes, configurable via `--eval-mode`:
 
@@ -508,14 +509,4 @@ This is the eval mode used by `scripts/eval.sh` and the per-training eval config
 - `configs/eval/` — Per-training eval configs (smaller `num_envs`, `task_order: sequence_random`)
 - `scripts/` — Shell scripts for training and eval
 - `doc/` — Design documents (plan, reasoning) per version
-
-## Version History
-
-| Version | Key additions |
-|---|---|
-| V0.1 | Initial CRONOS: env wrapper, PPO, basic training |
-| V0.2 | YAML configs, task scheduler, eval CSV, checkpoint/resume, config validation |
-| V0.3 | Per-group objects/overlay, mixed N/M, sub-group fan-out, per-env rotation eval, config_history, eval_only.py |
-| V0.3.1 | Standalone-eval refactor (`runner.eval` restored, AutoRL `render` port) — `eval_only.py` and `--eval-single` / `--eval-sequential` now use broadcast eval; `eval_mode=sequential` default; per-training eval configs in `configs/eval/`; non-episodic state preserved across mid-training eval via `get_env_state` / `set_env_state`; HSR respawn now uses per-env active-slot indexing (was hardcoded to V0.1's (N=2,M=1) layout); first-frame GPU-sync fix at episode init; `T2560` horizon added to `scripts/train.sh` |
-| V0.4 | Dual-VLA release: `--policy openvla\|spatialvla` switch + `train.sh ... [vla]` 6th-positional arg + `${VLA_TAG}` in `RUN_TAG`. HSR detector overhaul: `WorkspaceAABBDetector` (xyz AABB via YAML), `--hsr-reset-scope` (`per_env` default), full-env reset path in `bridge_multi.reset_unsuitable_envs`. Reset-mode reconceptualization: `LSR` = backward-policy training (not gripper reset); `train.sh` recipes baked in `--enable-backward --backward-interval 1` for LSR/LSR+HSR/noep. `train.sh` max_reset formula corrected (`max_ep × segs_per_ep × num_envs`). Video pipeline: T frames per training segment (AutoRL parity, no pre-step append). Plot tooling: `scripts/plot.py` + `plot_config.json` (resume-chain support) + per-eval `<glob_dir>/trends.png` 4-panel dashboard via `tools/plot_run_trends.py`. Installer hardening: `setup.sh [policy]` arg, script-dir anchor, `tensorflow-metadata<1.21` + `protobuf<5` pins, post-install sanity check |
 

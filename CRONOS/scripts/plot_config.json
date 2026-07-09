@@ -4,9 +4,6 @@
     "condition (a label on the plot); each group's `csv_paths` is the list of",
     "eval_success.csv files from the seeds/replicates of that condition.",
     "",
-    "Adding a new run = append its eval_success.csv path to the right group's",
-    "csv_paths list and re-run: python scripts/plot.py --config scripts/plot_config.json",
-    "",
     "Each entry in `csv_paths` is one seed. The entry can be either:",
     "  - a string: a single eval_success.csv",
     "  - a list of strings: a RESUME CHAIN (parent first, downstream child last)",
@@ -16,34 +13,26 @@
     "Optional per-group filters: `cronos_group_filter` (subset of CRONOS groups,",
     "e.g. ['group_A']) and `task_filter` (subset of task strings).",
     "",
-    "Optional global crops: `end_steps`, `end_resets`."
+    "Optional global crops: `end_steps`, `end_resets`.",
+    "",
+    "Run: python scripts/plot.py --config scripts/plot_config.json"
   ],
-  "out_dir": "/mnt/home/ChengDian/workspace/Benchmark/CRONOS/scripts/results/v04_main",
-  "name": "v04_main",
+  "out_dir": "",
+  "name": "",
   "smoothing_window": 5,
   "n_interp_points": 500,
   "end_steps": null,
   "end_resets": null,
   "groups": [
     {
-      "label": "noep seed1 (T320 parent + T1280 noep)",
-      "color": "#97bb8f",
-      "csv_paths": [
-        [
-          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260602_200103-21hzvche/glob/eval_success.csv",
-          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T1280-noep-seed1/wandb/run-20260608_185650-szroxl0d/glob/eval_success.csv"
-        ]
-      ]
+      "label": "",
+      "color": "",
+      "csv_paths": []
     },
     {
-      "label": "normal seed1 (T320 parent + T1280 normal)",
-      "color": "#5a5a5a",
-      "csv_paths": [
-        [
-          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260602_200103-21hzvche/glob/eval_success.csv",
-          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T1280-normal-seed1/wandb/run-20260606_030340-lomv2ak4/glob/eval_success.csv"
-        ]
-      ]
+      "label": "",
+      "color": "",
+      "csv_paths": []
     }
   ]
 }

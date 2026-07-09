@@ -1,4 +1,4 @@
-"""CRONOS V0.2 — metrics.
+"""CRONOS — metrics.
 
 SuccessRecorder owns `eval_success.csv` plus the `counters.json` sidecar,
 and builds the wandb eval panel payload (per-task scalars + overlay + mean).
