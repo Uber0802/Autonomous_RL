@@ -8,41 +8,41 @@
 #   [gpu]:    default | blackwell                          (default: default)
 #
 # Policy axis — picks which VLA(s) to install and which LM stack to pin:
-#   * all          — V0.4 LM stack + both OpenVLA & SpatialVLA pillars
-#   * openvla      — V0.4 LM stack + OpenVLA pillar only
-#   * spatialvla   — V0.4 LM stack + SpatialVLA pillar only
-#   * openvla_v01  — V0.1 LM stack + OpenVLA pillar only (cannot run --policy spatialvla)
+#   * all          — dual-VLA stack + both OpenVLA & SpatialVLA pillars
+#   * openvla      — dual-VLA stack + OpenVLA pillar only
+#   * spatialvla   — dual-VLA stack + SpatialVLA pillar only
+#   * openvla_v01  — lightweight stack + OpenVLA pillar only (cannot run --policy spatialvla)
 #
 # GPU axis — picks the torch wheel channel + version:
 #   * default      — cu121 wheels (Ampere / Ada / Hopper, sm_80…sm_90)
-#                    V0.4 LM stack → torch 2.5.1+cu121 (SpatialVLA pyproject pin)
-#                    V0.1 LM stack → torch 2.2.0+cu121 (OpenVLA pyproject pin)
+#                    dual-VLA stack → torch 2.5.1+cu121 (SpatialVLA pyproject pin)
+#                    lightweight stack → torch 2.2.0+cu121 (OpenVLA pyproject pin)
 #   * blackwell    — cu128 wheels with torch 2.7.0+cu128 (sm_75…sm_120)
 #                    The cu128 channel does NOT ship torch 2.2.0, so the V0.1
-#                    Blackwell variant runs the V0.1 LM pins on top of torch 2.7+cu128
+#                    Blackwell variant runs the lightweight pins on top of torch 2.7+cu128
 #                    (functionally V0.1-compat but NOT bit-equivalent to V0.1 cu121
 #                    numerics — different cuBLAS GEMM tile order + attention kernel).
 #
 # Recommended workflows (4-env 2×2 matrix):
 #
-#   cronos_envV0.4 — V0.4 LM, default GPU (Ampere/Ada/Hopper):
-#       conda create -n cronos_envV0.4 python=3.10 -y
-#       conda activate cronos_envV0.4
+#   cronos_env — dual-VLA, default GPU (Ampere/Ada/Hopper):
+#       conda create -n cronos_env python=3.10 -y
+#       conda activate cronos_env
 #       cd Benchmark/CRONOS && bash setup.sh all
 #
-#   cronos_envV0.4_blackwell — V0.4 LM, Blackwell:
-#       conda create -n cronos_envV0.4_blackwell python=3.10 -y
-#       conda activate cronos_envV0.4_blackwell
+#   cronos_env_blackwell — dual-VLA, Blackwell:
+#       conda create -n cronos_env_blackwell python=3.10 -y
+#       conda activate cronos_env_blackwell
 #       cd Benchmark/CRONOS && bash setup.sh all blackwell
 #
-#   cronos_envV0.1 — V0.1 LM, default GPU (Ampere/Ada/Hopper; bit-exact to V0.1 baselines):
-#       conda create -n cronos_envV0.1 python=3.10 -y
-#       conda activate cronos_envV0.1
+#   cronos_env_lite — lightweight, default GPU (Ampere/Ada/Hopper; bit-exact to V0.1 baselines):
+#       conda create -n cronos_env_lite python=3.10 -y
+#       conda activate cronos_env_lite
 #       cd Benchmark/CRONOS && bash setup.sh openvla_v01
 #
-#   cronos_envV0.1_blackwell — V0.1 LM, Blackwell:
-#       conda create -n cronos_envV0.1_blackwell python=3.10 -y
-#       conda activate cronos_envV0.1_blackwell
+#   cronos_env_lite_blackwell — lightweight, Blackwell:
+#       conda create -n cronos_env_lite_blackwell python=3.10 -y
+#       conda activate cronos_env_lite_blackwell
 #       cd Benchmark/CRONOS && bash setup.sh openvla_v01 blackwell
 #
 # The script `cd`s to its own directory so the editable installs of the sibling
@@ -52,11 +52,11 @@
 #
 # Pin rationale:
 #
-#   V0.4 LM stack — SpatialVLA hard-pins transformers≥4.43 (its model code
-#   imports HybridCache), so the V0.4 LM stack is needed any time SpatialVLA
+#   dual-VLA stack — SpatialVLA hard-pins transformers≥4.43 (its model code
+#   imports HybridCache), so the dual-VLA stack is needed any time SpatialVLA
 #   is in the picture. Side effect: OpenVLA-7B PPO peak rises from ~40 GB →
 #   ~55 GB, which exceeds Ada-class GPU memory (so OpenVLA on Ada needs the
-#   V0.1 LM stack).
+#   lightweight stack).
 #     * transformers==4.47.0      — SpatialVLA's model files use APIs from 4.47
 #                                    (GenerationMixin layout, Gemma2 logits format).
 #                                    Hard ceiling: <4.50 (GenerationMixin removed).
@@ -65,7 +65,7 @@
 #     * torch (cu121 path)        — 2.5.1, matches SpatialVLA's pyproject pin.
 #     * torch (cu128 path)        — 2.7.0, lowest stable cu128 build with sm_120.
 #
-#   V0.1 LM stack (openvla_v01) — OpenVLA-only, mirrors the original cronos_env
+#   lightweight stack (openvla_v01) — OpenVLA-only, mirrors the original cronos_env
 #   pins. The SpatialVLA install is skipped entirely; its lazy import in
 #   `main.py:270-271` / `eval_only.py:140` is never fired under --policy openvla.
 #     * transformers==4.40.1      — OpenVLA pyproject pin; below 4.43, so the
@@ -93,9 +93,9 @@
 #                                    keeps the wheels in sync.
 #
 # OpenVLA's setup.py declares the V0.1-style pins (torch 2.2.0, transformers 4.40.1,
-# tokenizers 0.19.1); on the V0.4 LM stack pip prints a dep-conflict warning but
-# the runtime API is compatible (verified end-to-end on cronos_envV0.4 and by the
-# post-install sanity check at the bottom of this script). On the V0.1 LM stack
+# tokenizers 0.19.1); on the dual-VLA stack pip prints a dep-conflict warning but
+# the runtime API is compatible (verified end-to-end on cronos_env and by the
+# post-install sanity check at the bottom of this script). On the lightweight stack
 # with cu121 the pins match exactly and there is no warning.
 
 set -e
@@ -158,9 +158,9 @@ case $POLICY in
 esac
 
 # ----- torch wheel (depends on both POLICY and GPU) ----------------------
-# cu121 channel: torch 2.2.0 (V0.1 LM) / 2.5.1 (V0.4 LM).
+# cu121 channel: torch 2.2.0 (lightweight) / 2.5.1 (dual-VLA).
 # cu128 channel: torch 2.7.0 for both LM stacks — cu128 wheels do not exist
-# for torch 2.2 or 2.5; the V0.1 LM blackwell variant therefore runs the
+# for torch 2.2 or 2.5; the lightweight blackwell variant therefore runs the
 # V0.1 transformers/peft pins on top of torch 2.7 (NOT bit-equivalent to V0.1
 # cu121 numerics, but transformers/peft ABI still V0.1).
 if [ "$GPU" = "blackwell" ]; then
@@ -185,12 +185,12 @@ echo "[setup.sh] Stack: $STACK_LABEL"
 if [ -z "$CONDA_DEFAULT_ENV" ] || [ "$CONDA_DEFAULT_ENV" = "base" ]; then
     # Suggested env name by the 2x2 matrix (LM stack × GPU class).
     if [ "$LM_STACK" = "V0.1" ]; then
-        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_envV0.1_blackwell"
-        else                              SUGGESTED_ENV="cronos_envV0.1"
+        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_env_lite_blackwell"
+        else                              SUGGESTED_ENV="cronos_env_lite"
         fi
     else
-        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_envV0.4_blackwell"
-        else                              SUGGESTED_ENV="cronos_envV0.4"
+        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_env_blackwell"
+        else                              SUGGESTED_ENV="cronos_env"
         fi
     fi
     echo "[setup.sh] WARNING: no non-base conda env is active."
