@@ -25,25 +25,47 @@
 #
 # Recommended workflows (4-env 2×2 matrix):
 #
-#   cronos_env — dual-VLA, default GPU (Ampere/Ada/Hopper):
-#       conda create -n cronos_env python=3.10 -y
-#       conda activate cronos_env
+# Env names encode the two axes that actually differ, because those are what
+# decide whether a run fits in memory and whether it reproduces a baseline:
+#
+#       cronos_<lm-stack>_<torch-channel>
+#         lm-stack       tf447 = transformers 4.47 / peft 0.14  (both VLAs)
+#                        tf440 = transformers 4.40.1 / peft 0.11.1 (OpenVLA only)
+#         torch-channel  cu121 = Ampere/Ada/Hopper   cu128 = Blackwell
+#
+# The old names (cronos_env, cronos_env_blackwell, cronos_env_lite,
+# cronos_env_lite_blackwell) are still accepted everywhere — nothing reads the
+# env name programmatically, it only appears in these instructions and in the
+# "no env active" warning below. Rename at your convenience:
+#       conda rename -n cronos_env cronos_tf447_cu121
+#
+#   cronos_tf447_cu121 (was cronos_env) — both VLAs, Ampere/Ada/Hopper:
+#       conda create -n cronos_tf447_cu121 python=3.10 -y
+#       conda activate cronos_tf447_cu121
 #       cd Benchmark/CRONOS && bash setup.sh all
 #
-#   cronos_env_blackwell — dual-VLA, Blackwell:
-#       conda create -n cronos_env_blackwell python=3.10 -y
-#       conda activate cronos_env_blackwell
+#   cronos_tf447_cu128 (was cronos_env_blackwell) — both VLAs, Blackwell:
+#       conda create -n cronos_tf447_cu128 python=3.10 -y
+#       conda activate cronos_tf447_cu128
 #       cd Benchmark/CRONOS && bash setup.sh all blackwell
 #
-#   cronos_env_lite — lightweight, default GPU (Ampere/Ada/Hopper; bit-exact to V0.1 baselines):
-#       conda create -n cronos_env_lite python=3.10 -y
-#       conda activate cronos_env_lite
+#   cronos_tf440_cu121 (was cronos_env_lite) — OpenVLA only, Ampere/Ada/Hopper;
+#   bit-exact to V0.1 baselines:
+#       conda create -n cronos_tf440_cu121 python=3.10 -y
+#       conda activate cronos_tf440_cu121
 #       cd Benchmark/CRONOS && bash setup.sh openvla_v01
 #
-#   cronos_env_lite_blackwell — lightweight, Blackwell:
-#       conda create -n cronos_env_lite_blackwell python=3.10 -y
-#       conda activate cronos_env_lite_blackwell
+#   cronos_tf440_cu128 (was cronos_env_lite_blackwell) — OpenVLA only, Blackwell:
+#       conda create -n cronos_tf440_cu128 python=3.10 -y
+#       conda activate cronos_tf440_cu128
 #       cd Benchmark/CRONOS && bash setup.sh openvla_v01 blackwell
+#
+# The tf440 split exists only because upgrading transformers for SpatialVLA
+# pushed OpenVLA-7B PPO peak from ~40 GB to ~55 GB, past what an Ada-class
+# 48 GB card holds. That is a workaround, not a design goal: `tools/bench_rollout.py`
+# measures throughput and peak memory per stack so the regression can be
+# attributed and, ideally, removed — at which point tf440 can be retired and
+# this matrix collapses to one env per torch channel.
 #
 # The script `cd`s to its own directory so the editable installs of the sibling
 # pillars (`../ManiSkill`, `../SimplerEnv`, `../openvla`, `../SpatialVLA`)
@@ -183,16 +205,10 @@ echo "[setup.sh] Stack: $STACK_LABEL"
 # Fail fast if no conda env is active (otherwise pip silently installs into the
 # system / base interpreter — easy to lose 10 minutes on a wrong target env).
 if [ -z "$CONDA_DEFAULT_ENV" ] || [ "$CONDA_DEFAULT_ENV" = "base" ]; then
-    # Suggested env name by the 2x2 matrix (LM stack × GPU class).
-    if [ "$LM_STACK" = "V0.1" ]; then
-        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_env_lite_blackwell"
-        else                              SUGGESTED_ENV="cronos_env_lite"
-        fi
-    else
-        if [ "$GPU" = "blackwell" ]; then SUGGESTED_ENV="cronos_env_blackwell"
-        else                              SUGGESTED_ENV="cronos_env"
-        fi
-    fi
+    # Suggested env name by the 2x2 matrix: cronos_<lm-stack>_<torch-channel>.
+    if [ "$LM_STACK" = "V0.1" ]; then LM_TAG="tf440"; else LM_TAG="tf447"; fi
+    if [ "$GPU" = "blackwell" ]; then CU_TAG="cu128"; else CU_TAG="cu121"; fi
+    SUGGESTED_ENV="cronos_${LM_TAG}_${CU_TAG}"
     echo "[setup.sh] WARNING: no non-base conda env is active."
     echo "                  Activate the target env first, e.g."
     echo "                    conda create -n $SUGGESTED_ENV python=3.10 -y"

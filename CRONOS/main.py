@@ -8,7 +8,6 @@ import signal
 import atexit
 import json
 import random
-import itertools
 import datetime
 import subprocess
 import numpy as np
@@ -23,7 +22,7 @@ import pprint
 
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
-from envs.scheduler import TaskScheduler
+from envs.scheduler import TaskScheduler, build_eval_sequences
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO, aggregate_train_results
 from training.buffer import CronosReplayBuffer
@@ -83,9 +82,14 @@ class Args:
     #                env trips. Visually uniform across the batch.
     # YAML can override via `unsuitable_detector.reset_scope`.
     hsr_reset_scope: str = "per_env"
-    # dump (env, obj/recep, x, y, z) at the END of every
-    # segment (before any HSR/LSR reset) to glob/end_of_segment_xyz.csv. Used
-    # to anchor `workspace_aabb` bounds from observed steady-state positions.
+    # Dump the full pose state (every object slot, every receptacle slot, and the
+    # gripper — position + quaternion) at the END of every segment, before any
+    # HSR/LSR reset, to glob/segment_pose.csv.
+    record_segment_pose: bool = False
+    # Deprecated alias for --record-segment-pose. The old flag wrote
+    # end_of_segment_xyz.csv with only the task-selected pair and only xyz;
+    # it now enables the superset recorder. Kept so existing launch scripts
+    # keep working.
     record_end_of_segment_xyz: bool = False
     enable_backward: bool = False
     backward_interval: int = 1
@@ -644,6 +648,12 @@ class CronosRunner:
             self.env.set_task(object, receptacle)
         else:
             self.env.set_task(object, receptacle)
+            # Reopen the measurement window on a continued segment — see
+            # `CronosWrapper.begin_segment`. Without it `_elapsed_steps` keeps
+            # the env truncated from step 1, turning `success` into a
+            # time-average and letting grasp flags carry over across tasks.
+            # Scene state is untouched, so chained-sequence continuity holds.
+            self.env.begin_segment()
             obs = self.env.get_obs_image()
         instruction = self.env.get_language_instructions()
 
@@ -819,9 +829,43 @@ class CronosRunner:
 
         return results
 
+    def _flush_rollout_rows(self):
+        """Backfill GAE-derived columns onto pending rows, then write them out.
+
+        Must run after `buffer.compute_gae()` and before `buffer.reset()` — the
+        arrays are only valid in that window.
+
+        The buffer lays segments out along its env axis: `end_segment()` advances
+        `curr_env` by `num_envs` per segment, so buffer slot `k` is segment
+        `k // num_envs`, env `k % num_envs`. `_pending_rollout_rows` is appended
+        in exactly that order (segment-major, env-minor), so row index == slot
+        index and no key matching is needed. Rows beyond the buffer's filled
+        width keep empty GAE columns rather than borrowing another segment's.
+        """
+        rows = getattr(self, "_pending_rollout_rows", None)
+        if not rows:
+            return
+        n_slots = self.buffer.num_env
+        if n_slots > 0:
+            # Mean over the segment's timesteps, per buffer slot.
+            returns = self.buffer.returns[:, :n_slots, 0].mean(axis=0)
+            values = self.buffer.value_preds[:-1, :n_slots, 0].mean(axis=0)
+            advs = self.buffer.advantages[:, :n_slots, 0].mean(axis=0)
+            for k, row in enumerate(rows):
+                if k >= n_slots:
+                    break
+                row["return_gae"] = float(returns[k])
+                row["value_mean"] = float(values[k])
+                row["advantage_mean"] = float(advs[k])
+        self.recorder.log_rollout_segments(rows)
+        self._pending_rollout_rows = []
+
     def _run_ppo_update(self, ppo_log_path):
         """Runs one PPO update on the current buffer, then resets it."""
         self.buffer.compute_gae()
+        # Drain the rollout rows for the segments this update covers while the
+        # GAE arrays are still live (buffer.reset() below invalidates them).
+        self._flush_rollout_rows()
         self.policy.prep_training()
         train_results = []
         for _ in range(self.args.alg_ppo_epoch):
@@ -878,6 +922,33 @@ class CronosRunner:
         # rollout returns.
         self._rollout_per_task = {}        # {(obj, recep): {metric: [floats]}}
 
+        # Per-env, per-segment rollout record (rollout_success.csv). Same
+        # granularity as eval's per-trial rows, taken at rollout time.
+        #
+        # `reward_sum` is the plain sum of the shaped reward the policy actually
+        # received. Note `RewardShaper` emits a potential *difference*, so this
+        # telescopes to (potential at segment end - potential at segment start)
+        # — it is the PPO training signal, not a conventional return, which is
+        # why the discounted sum is tracked separately below.
+        seg_reward_sum = torch.zeros(self.args.num_envs, device=self.device)
+        seg_disc_return = torch.zeros(self.args.num_envs, device=self.device)
+        seg_step = 0                        # steps elapsed inside current segment
+        # Rows wait here until the PPO update computes GAE for their segment;
+        # `_run_ppo_update` fills in return_gae/value/advantage and flushes.
+        self._pending_rollout_rows = []
+
+        # env index -> YAML group name, so each row can be attributed to the
+        # group whose objects/background that env is running.
+        if self.yaml_config and self.yaml_config.groups:
+            from envs.config import get_group_starts
+            _starts = get_group_starts(self.yaml_config.groups)
+            env_group = []
+            for gi, g in enumerate(self.yaml_config.groups):
+                env_group.extend([g.name] * (_starts[gi + 1] - _starts[gi]))
+            env_group += ["default"] * max(0, self.args.num_envs - len(env_group))
+        else:
+            env_group = ["default"] * self.args.num_envs
+
         for step_idx in tqdm(range(self.args.episode_len), desc="Rollout", leave=False):
             # 1. Action Prediction (Vectorized/Micro-batched)
             with torch.no_grad():
@@ -888,6 +959,14 @@ class CronosRunner:
 
             # 3. Buffer Storage
             self.buffer.insert(next_obs, action, logprob, value, reward, 1.0 - truncated.float())
+
+            # 3b. Per-env reward accumulation for rollout_success.csv. Both sums
+            # run over the same r_t the buffer just stored, so they can be read
+            # against `return_gae` without re-deriving anything.
+            r_flat = reward.reshape(-1).to(seg_reward_sum.dtype)
+            seg_reward_sum += r_flat
+            seg_disc_return += (self.args.buffer_gamma ** seg_step) * r_flat
+            seg_step += 1
 
             # 4. Video Recording — M1: append POST-step obs only, matching
             # AutoRL train_ms3_ppo.py:580-581. Recording pre-step `obs` at step 0
@@ -924,6 +1003,56 @@ class CronosRunner:
                             if vals is not None and env_i < len(vals):
                                 slot[metric].append(float(vals[env_i]))
 
+                # per-env row for rollout_success.csv, captured at the same
+                # point and from the same `ep_info` as the per-task aggregate
+                # above — so `success` here is the segment-terminal value, the
+                # identical definition eval reports. `return_gae` is left unset;
+                # `_run_ppo_update` backfills it once GAE runs for this segment.
+                seg_total_steps = episode_base_steps + (step_idx + 1) * self.args.num_envs
+                backward_mask = self.env.reward_shaper.backward.reshape(-1).tolist()
+                r_sum = seg_reward_sum.tolist()
+                d_ret = seg_disc_return.tolist()
+
+                def _metric(name, env_i):
+                    """Per-env terminal value, or '' when the env didn't report."""
+                    vals = ep_info.get(name)
+                    return float(vals[env_i]) if vals and env_i < len(vals) else ""
+
+                for env_i in range(self.args.num_envs):
+                    obj_i = objs[env_i] if env_i < len(objs) else ""
+                    rec_i = receps[env_i] if env_i < len(receps) else ""
+                    self._pending_rollout_rows.append({
+                        "episode": episode,
+                        "segment": segment_id + 1,
+                        "total_steps": seg_total_steps,
+                        # Live total, not base+delta: `soft_reset_count` is
+                        # already cumulative across the run, so adding the
+                        # episode base would count prior soft resets twice.
+                        "total_resets": self.hard_reset_count + self.soft_reset_count,
+                        "env_idx": env_i,
+                        "group": env_group[env_i] if env_i < len(env_group) else "default",
+                        "task": f"put {obj_i} on {rec_i}",
+                        "obj": obj_i,
+                        "recep": rec_i,
+                        # In LSR / noep the policy alternates forward and backward
+                        # goals, but `success` always reflects the FORWARD
+                        # predicate. Without this column a backward segment's 0
+                        # is indistinguishable from a failed forward one.
+                        "direction": "backward" if (env_i < len(backward_mask)
+                                                    and backward_mask[env_i]) else "forward",
+                        "success": _metric("success", env_i),
+                        "consecutive_grasp": _metric("consecutive_grasp", env_i),
+                        "is_src_obj_grasped": _metric("is_src_obj_grasped", env_i),
+                        "reward_sum": r_sum[env_i],
+                        "return_discounted": d_ret[env_i],
+                        "return_gae": "",
+                        "value_mean": "",
+                        "advantage_mean": "",
+                    })
+                seg_reward_sum.zero_()
+                seg_disc_return.zero_()
+                seg_step = 0
+
                 # save the just-completed segment (T post-step frames)
                 # BEFORE any reset runs. The reset+_settle then executes in
                 # physics but contributes no recorded frame — the next segment's
@@ -932,12 +1061,12 @@ class CronosRunner:
                 if self.args.record_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
 
-                # dump end-of-segment xyz for every env's
-                # task-relevant obj + recep BEFORE the HSR/LSR reset overwrites
-                # them. Used to derive `workspace_aabb` bounds from observed
-                # steady-state positions.
-                if self.args.record_end_of_segment_xyz:
-                    self._record_segment_xyz(episode, segment_id)
+                # dump the full pose state (every object + receptacle slot and
+                # the gripper, position + quaternion) BEFORE the HSR/LSR reset
+                # overwrites it, so the coordinates are the steady state the
+                # policy produced rather than a post-respawn placement.
+                if self.args.record_segment_pose or self.args.record_end_of_segment_xyz:
+                    self._record_segment_pose(episode, segment_id, seg_total_steps)
 
                 segment_id += 1
 
@@ -1269,36 +1398,76 @@ class CronosRunner:
         final_resets = self.hard_reset_count + self.soft_reset_count
         print(f"Training complete: episode={final_episode}, total_steps={final_steps}, total_resets={final_resets}")
 
-    def _record_segment_xyz(self, episode, segment_id):
-        """Append one row per (env, actor) to glob/end_of_segment_xyz.csv.
+    def _record_segment_pose(self, episode, segment_id, total_steps):
+        """Append the full scene pose state to glob/segment_pose.csv.
 
-        M3 measurement helper. `segment_id` is 0-indexed (matches the
-        save_video_segment call); we write it 1-indexed for the CSV so the
-        episode/segment columns line up with the train_videos/`rollout_epX_segY`
-        directory names. Same for `episode`.
+        One row per (env, actor) at the end of every segment, where "actor"
+        covers **every** object slot and **every** receptacle slot plus the
+        gripper — not just the pair the current task happens to select. Pose is
+        the full `pq`: position xyz + quaternion wxyz.
+
+        This supersedes the earlier `end_of_segment_xyz.csv`, which recorded only
+        the task-selected pair and only xyz. That one existed to anchor
+        `workspace_aabb` bounds from observed steady-state positions (and as a
+        reference for the non-episodic restore path); this one is a general
+        record of where everything ended up, so orientation and the untouched
+        distractor objects are both needed.
+
+        Called BEFORE the HSR/LSR resets of this boundary, so the coordinates
+        are the steady state the policy actually produced rather than a
+        post-respawn position.
+
+        `episode` already arrives 1-based from `train()` (`iteration + 1`) while
+        `segment_id` is 0-based; only the latter is incremented here. The old
+        `end_of_segment_xyz.csv` incremented both and so labelled every row one
+        episode ahead of the matching `train_videos/rollout_epX_segY` directory.
+
+        Hidden slots (a group declaring fewer objects than the batch-wide N)
+        write NaN, so every segment contributes a fixed row count and the file
+        pivots cleanly.
         """
         unwrapped = self.env.env.unwrapped
-        obj = unwrapped.get_obj_pos().cpu().numpy()
-        recep = unwrapped.get_recep_pos().cpu().numpy()
+        poses = unwrapped.get_all_slot_poses()
         try:
             instr = self.env.get_language_instructions()
         except Exception:
             instr = [""] * self.args.num_envs
-        csv = self.glob_dir / "end_of_segment_xyz.csv"
-        write_hdr = not csv.exists()
-        with open(csv, "a") as f:
+
+        csv_path = self.glob_dir / "segment_pose.csv"
+        write_hdr = not csv_path.exists()
+        ep_1, seg_1 = episode, segment_id + 1
+
+        # Materialize on CPU once per segment rather than per row — these are
+        # GPU tensors and a per-row .item() would sync 64x(N+M) times.
+        def _np(pair):
+            p, q = pair
+            return p.detach().cpu().numpy(), q.detach().cpu().numpy()
+
+        rows = []
+        for kind, entries, name_lists in (
+            ("obj", poses["obj"], poses["obj_names"]),
+            ("recep", poses["recep"], poses["recep_names"]),
+        ):
+            for slot, (pair, names) in enumerate(zip(entries, name_lists)):
+                p, q = _np(pair)
+                rows.append((kind, slot, names, p, q))
+        g_p, g_q = _np(poses["gripper"])
+        rows.append(("gripper", 0, [""] * self.args.num_envs, g_p, g_q))
+
+        with open(csv_path, "a") as f:
             if write_hdr:
-                f.write("episode,segment,env,actor,task,x,y,z\n")
-            ep_1 = episode + 1
-            seg_1 = segment_id + 1
+                f.write("episode,segment,total_steps,env,actor_kind,slot,"
+                        "model_name,task,px,py,pz,qw,qx,qy,qz\n")
             for i in range(self.args.num_envs):
-                # Quote the task in case it contains commas (it doesn't today
+                # Quote task/model in case they contain commas (they don't today
                 # but defensive — CSV-safe).
                 task_str = str(instr[i]).replace('"', '""') if i < len(instr) else ""
-                f.write(f"{ep_1},{seg_1},{i},obj,\"{task_str}\","
-                        f"{obj[i,0]:.6f},{obj[i,1]:.6f},{obj[i,2]:.6f}\n")
-                f.write(f"{ep_1},{seg_1},{i},recep,\"{task_str}\","
-                        f"{recep[i,0]:.6f},{recep[i,1]:.6f},{recep[i,2]:.6f}\n")
+                for kind, slot, names, p, q in rows:
+                    model = str(names[i]).replace('"', '""') if i < len(names) else ""
+                    f.write(f"{ep_1},{seg_1},{total_steps},{i},{kind},{slot},"
+                            f"\"{model}\",\"{task_str}\","
+                            f"{p[i,0]:.6f},{p[i,1]:.6f},{p[i,2]:.6f},"
+                            f"{q[i,0]:.6f},{q[i,1]:.6f},{q[i,2]:.6f},{q[i,3]:.6f}\n")
 
     def _refresh_trends_image(self):
         """re-render the trends dashboards after each
@@ -1398,17 +1567,15 @@ def main():
 
     elif args.eval_sequential:
         # Multi-sequence permutation eval
-        import random as _random
         runner.env.reset()
         task_pool = runner.scheduler.task_pool
         print(f"Task Pool: {task_pool}")
 
-        perms = list(itertools.permutations(task_pool))
-        training_seq = perms.pop(0)  # first permutation = training order
-
-        _random.seed(args.seed)
-        selected_perms = _random.sample(perms, min(args.eval_sequences - 1, len(perms)))
-        all_sequences = [training_seq] + selected_perms
+        # Shared with eval_only.py — sequence 0 is the training order, the rest
+        # are distinct random permutations. Same draw as the previous inline
+        # `random.sample(list(permutations(pool))[1:], k)`, minus the factorial
+        # materialization for large pools.
+        all_sequences = build_eval_sequences(task_pool, args.eval_sequences, args.seed)
 
         print(f"Running Sequential Evaluation across {len(all_sequences)} sequences...")
         for seq_idx, task_list in enumerate(all_sequences):

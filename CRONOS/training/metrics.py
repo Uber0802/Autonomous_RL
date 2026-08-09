@@ -47,6 +47,49 @@ EVAL_FIELDS: Tuple[str, ...] = (
     "obj_grasped",
 )
 
+# Per-env, per-segment rollout record — the training-time counterpart of
+# `eval_success.csv`. One row per (episode, segment, env). Deliberately shares
+# the dual x-axis columns (`total_steps` / `total_resets`) so rollout and eval
+# curves can be plotted against the same axis without a join.
+#
+# `success` / `consecutive_grasp` / `is_src_obj_grasped` use the *identical*
+# definition as eval: the value at the segment's final step, with the grasp
+# flags latched within that segment only. Training gets this for free because
+# `reset_robot()` clears `_elapsed_steps` and the grasp latches every segment;
+# sequential eval needs `CronosWrapper.begin_segment()` to match.
+#
+# The three value columns answer different questions and are all kept:
+#   reward_sum        — Σ r_t, the raw shaped signal PPO consumed. Because
+#                       `RewardShaper` emits a potential *difference*, this
+#                       telescopes to (potential_end - potential_start); useful
+#                       for reconciling against the buffer, misleading alone.
+#   return_discounted — Σ γ^t r_t over the same rewards. Plain Monte-Carlo, no
+#                       bootstrap: "what did this segment earn".
+#   return_gae        — the buffer's GAE return (advantage + value), i.e. what
+#                       the critic actually regresses onto. Pairs with
+#                       `value_mean` / `advantage_mean` and with the
+#                       `value_explained_variance` PPO scalar.
+ROLLOUT_FIELDS: Tuple[str, ...] = (
+    "episode",
+    "segment",
+    "total_steps",
+    "total_resets",
+    "env_idx",
+    "group",
+    "task",
+    "obj",
+    "recep",
+    "direction",
+    "success",
+    "consecutive_grasp",
+    "is_src_obj_grasped",
+    "reward_sum",
+    "return_discounted",
+    "return_gae",
+    "value_mean",
+    "advantage_mean",
+)
+
 
 def _slugify(s: str) -> str:
     """wandb-friendly task key: lowercase, spaces → underscores."""
@@ -78,9 +121,11 @@ class SuccessRecorder:
         self.glob_dir.mkdir(parents=True, exist_ok=True)
 
         self.eval_csv_path = self.glob_dir / "eval_success.csv"
+        self.rollout_csv_path = self.glob_dir / "rollout_success.csv"
         self.counters_path = self.glob_dir / "counters.json"
 
         self._ensure_header(self.eval_csv_path, EVAL_FIELDS)
+        self._ensure_header(self.rollout_csv_path, ROLLOUT_FIELDS)
 
         # eval_history[eval_kind][task] -> list of (total_steps, success)
         self.eval_history: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
@@ -107,6 +152,27 @@ class SuccessRecorder:
                 os.fsync(f.fileno())
             except OSError:
                 pass  # fsync may fail on some tmpfs; not critical
+
+    def log_rollout_segments(self, rows: List[Dict[str, object]]) -> None:
+        """Append per-env rollout rows for one or more completed segments.
+
+        Batched rather than row-at-a-time: a segment produces `num_envs` rows at
+        once and the caller flushes a whole PPO update's worth, so one open/
+        fsync per flush instead of 64+ keeps this off the rollout's critical
+        path. Unknown keys are dropped and missing ones written empty, so adding
+        a column to `ROLLOUT_FIELDS` never breaks an existing caller.
+        """
+        if not rows:
+            return
+        with open(self.rollout_csv_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(ROLLOUT_FIELDS))
+            for row in rows:
+                w.writerow({k: row.get(k, "") for k in ROLLOUT_FIELDS})
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
 
     def _rebuild_eval_history(self) -> None:
         """Populate `eval_history` from `eval_success.csv` if present."""

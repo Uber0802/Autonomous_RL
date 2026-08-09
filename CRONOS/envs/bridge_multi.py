@@ -885,6 +885,65 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             return p
         return self.get_plate_pose()
 
+    def _gather_slot_pose(self, slot_ids, actors, names):
+        """Pose of one logical slot for every env, as (p [b,3], q [b,4]).
+
+        A slot holds a different model in different envs (fan-out puts several
+        groups in one batch), so the pose has to be gathered per model with a
+        mask, the same way `get_carrot_pose` does. Envs whose slot is hidden
+        (`select` index -1, i.e. the group declared fewer objects than the env's
+        N) get NaN rather than a silent zero — a zero here is indistinguishable
+        from an actor that genuinely sits at the origin, and would quietly
+        become a real data point downstream.
+        """
+        p = torch.full((self.num_envs, 3), float("nan"), device=self.device)
+        q = torch.full((self.num_envs, 4), float("nan"), device=self.device)
+        for name, actor in actors.items():
+            mask = (slot_ids == names.index(name))
+            if mask.any():
+                p[mask] = actor.pose.p[mask]
+                q[mask] = actor.pose.q[mask]
+        return p, q
+
+    def get_all_slot_poses(self):
+        """Full per-env pose state of the manipulable scene.
+
+        Unlike `get_obj_pos()` / `get_recep_pos()` — which read `extra_stats` and
+        so only cover the pair the *current task* selected — this returns every
+        object slot and every receptacle slot, plus the gripper, with
+        orientation as well as position.
+
+        Returns::
+
+            {
+              "obj":     [(p, q), ...]   # NUM_OBJECTS entries, each [b,3] / [b,4]
+              "recep":   [(p, q), ...]   # NUM_RECEPTACLES entries
+              "gripper": (p, q)
+              "obj_names":   [[str] * b, ...]   # per-slot, per-env model name
+              "recep_names": [[str] * b, ...]
+            }
+
+        Model names are returned per env because the same slot index maps to
+        different models across groups; without them a row of coordinates cannot
+        be attributed to an actual object.
+        """
+        out = {"obj": [], "recep": [], "obj_names": [], "recep_names": []}
+        for slot_ids in self._all_carrot_ids:
+            out["obj"].append(self._gather_slot_pose(slot_ids, self.objs_carrot, self.carrot_names))
+            out["obj_names"].append(
+                [self.carrot_names[i] if i >= 0 else "" for i in slot_ids.tolist()]
+            )
+        for slot_ids in self._all_plate_ids:
+            out["recep"].append(self._gather_slot_pose(slot_ids, self.objs_plate, self.plate_names))
+            out["recep_names"].append(
+                [self.plate_names[i] if i >= 0 else "" for i in slot_ids.tolist()]
+            )
+        # Gripper midpoint, matching how `evaluate()` derives `extra_pos_gripper`.
+        g_p = (self.agent.finger1_link.pose.p + self.agent.finger2_link.pose.p) / 2
+        g_q = (self.agent.finger1_link.pose.q + self.agent.finger2_link.pose.q) / 2
+        out["gripper"] = (g_p, g_q)
+        return out
+
     def _initialize_episode_pre(self, env_idx, options):
         """AutoRL-aligned episode initialization.
 

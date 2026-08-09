@@ -29,27 +29,34 @@ cd <repo-directory>
 
 Pick one of four envs depending on which policies you need and which GPU class you have:
 
-2×2 matrix (LM stack × GPU class):
+2×2 matrix (LM stack × GPU class). Names are `cronos_<lm-stack>_<torch-channel>`:
+`tf447` = transformers 4.47 / peft 0.14 (serves both VLAs), `tf440` = transformers
+4.40.1 / peft 0.11.1 (OpenVLA only); `cu121` = Ampere/Ada/Hopper, `cu128` = Blackwell.
+
+> Renamed from `cronos_env` / `cronos_env_blackwell` / `cronos_env_lite` /
+> `cronos_env_lite_blackwell`, which did not say which stack they carried. Nothing
+> reads the env name programmatically, so existing envs keep working — rename with
+> `conda rename -n cronos_env cronos_tf447_cu121` when convenient.
 
 | Env | `setup.sh` args | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
 |---|---|---|---|---|---|---|
-| `cronos_env` | `setup.sh all` | `torch==2.5.1+cu121` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Ampere / Ada / Hopper (sm_80…sm_90) | ~55 GB | Hopper / A100 (both VLAs); Ada (SpatialVLA only — OpenVLA OOMs 48 GB) |
-| **`cronos_env_blackwell`** | `setup.sh all blackwell` | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Blackwell (sm_75…sm_120) | ~55 GB | Blackwell (both VLAs; 96 GB has plenty of room) |
-| `cronos_env_lite` | `setup.sh openvla_v01` | `torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Ampere / Ada / Hopper (sm_50…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; **bit-exact** to V0.1 baseline runs |
-| `cronos_env_lite_blackwell` | `setup.sh openvla_v01 blackwell` | `torch==2.7.0+cu128` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Blackwell (sm_75…sm_120) | ~45 GB | OpenVLA-only on Blackwell with V0.1 transformers ABI (not bit-exact to V0.1 cu121 — cu128 changes cuBLAS/attention kernels — but transformers/peft surface identical) |
+| `cronos_tf447_cu121` | `setup.sh all` | `torch==2.5.1+cu121` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Ampere / Ada / Hopper (sm_80…sm_90) | ~55 GB | Hopper / A100 (both VLAs); Ada (SpatialVLA only — OpenVLA OOMs 48 GB) |
+| **`cronos_tf447_cu128`** | `setup.sh all blackwell` | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Blackwell (sm_75…sm_120) | ~55 GB | Blackwell (both VLAs; 96 GB has plenty of room) |
+| `cronos_tf440_cu121` | `setup.sh openvla_v01` | `torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Ampere / Ada / Hopper (sm_50…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; **bit-exact** to V0.1 baseline runs |
+| `cronos_tf440_cu128` | `setup.sh openvla_v01 blackwell` | `torch==2.7.0+cu128` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Blackwell (sm_75…sm_120) | ~45 GB | OpenVLA-only on Blackwell with V0.1 transformers ABI (not bit-exact to V0.1 cu121 — cu128 changes cuBLAS/attention kernels — but transformers/peft surface identical) |
 
 ```bash
 # Pick the env that matches your GPU + policy needs, e.g.:
-conda create -n cronos_env_blackwell -y python=3.10        # Blackwell + both VLAs
-conda activate cronos_env_blackwell
+conda create -n cronos_tf447_cu128 -y python=3.10        # Blackwell + both VLAs
+conda activate cronos_tf447_cu128
 
 # or one of:
-#   cronos_env                — both VLAs on Hopper/A100 (SpatialVLA-only on Ada)
-#   cronos_env_lite           — OpenVLA-only, Ada-friendly, V0.1-bit-exact
-#   cronos_env_lite_blackwell — OpenVLA-only on Blackwell, V0.1 transformers ABI
+#   cronos_tf447_cu121 — both VLAs on Hopper/A100 (SpatialVLA-only on Ada)
+#   cronos_tf440_cu121 — OpenVLA-only, Ada-friendly, V0.1-bit-exact
+#   cronos_tf440_cu128 — OpenVLA-only on Blackwell, V0.1 transformers ABI
 ```
 
-> **Bit-exact note:** Only `cronos_env_lite` reproduces V0.1 baseline PPO logs bit-for-bit. `cronos_env_lite_blackwell` upgrades torch (no V0.1-era cu128 wheels exist), so it shares V0.1's transformers/peft *ABI* but not its exact cuBLAS/attention kernels. `cronos_env*` envs upgrade both torch and transformers, so their PPO logs drift ~10⁻² from V0.1 in the first 1000 minibatches and converge to <0.2% by PPO step 100 — algorithmically correct, numerically different. For bit-exact ablations, run the baseline arm in the **same env** as the test arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
+> **Bit-exact note:** Only `cronos_tf440_cu121` reproduces V0.1 baseline PPO logs bit-for-bit. `cronos_tf440_cu128` upgrades torch (no V0.1-era cu128 wheels exist), so it shares V0.1's transformers/peft *ABI* but not its exact cuBLAS/attention kernels. The dual-VLA (`tf447`) envs upgrade both torch and transformers, so their PPO logs drift ~10⁻² from V0.1 in the first 1000 minibatches and converge to <0.2% by PPO step 100 — algorithmically correct, numerically different. For bit-exact ablations, run the baseline arm in the **same env** as the test arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
 
 ### 3. Run the setup script
 
@@ -62,10 +69,10 @@ chmod +x *.sh
 #   [gpu]:    default | blackwell                          (default: default)
 
 # Four canonical invocations (one per 2x2 env above):
-./setup.sh all                       # → cronos_env                (cu121, Ada/Hopper, both VLAs)
-./setup.sh all blackwell             # → cronos_env_blackwell      (cu128, Blackwell, both VLAs)
-./setup.sh openvla_v01               # → cronos_env_lite           (cu121, Ada/Hopper, OpenVLA, V0.1-bit-exact)
-./setup.sh openvla_v01 blackwell     # → cronos_env_lite_blackwell (cu128, Blackwell, OpenVLA)
+./setup.sh all                       # → cronos_tf447_cu121 (cu121, Ada/Hopper, both VLAs)
+./setup.sh all blackwell             # → cronos_tf447_cu128 (cu128, Blackwell, both VLAs)
+./setup.sh openvla_v01               # → cronos_tf440_cu121 (cu121, Ada/Hopper, OpenVLA, V0.1-bit-exact)
+./setup.sh openvla_v01 blackwell     # → cronos_tf440_cu128 (cu128, Blackwell, OpenVLA)
 
 # Subset modes (dual-VLA stack with only one VLA pillar installed):
 ./setup.sh openvla                   # dual-VLA, OpenVLA pillar only (skips SpatialVLA)
@@ -73,6 +80,8 @@ chmod +x *.sh
 ```
 
 > **Memory budget — pick the right env for your GPU.** The dual-VLA stack lifts OpenVLA-7B PPO peak memory from ~40 GB → ~55 GB (`transformers==4.47` HybridCache + `peft==0.14` fast path + newer torch caching), which **does not fit on Ada-class GPUs (48 GB)**. If you only need OpenVLA on Ada, the lightweight stack (`torch==2.2.0+cu121` + `transformers==4.40.1`, ~40 GB peak) still fits 1 OpenVLA-7B PPO on a 48 GB Ada. See [Lightweight env](#6-optional-lightweight-openvla-only-env-for-ada-class-gpus).
+>
+> The `tf440` split is a workaround for that regression, not a design goal. `tools/bench_rollout.py` measures throughput and peak memory per stack with a phase breakdown, so the ~15 GB can be attributed and ideally removed — at which point `tf440` retires and the matrix collapses to one env per torch channel. The memory figures in the table above are historical reports, not `bench_rollout.py` output; re-measure on your own hardware before relying on them.
 
 `setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
 
@@ -96,16 +105,16 @@ sudo apt-get install -y libglvnd-dev
 Blackwell cards (RTX PRO 6000, RTX 5090, B200) ship `sm_120` SASS, which only `+cu128` torch wheels include. Pass `blackwell` as `setup.sh`'s 2nd arg to install the Blackwell-compatible variant of either LM stack:
 
 ```bash
-./setup.sh all blackwell             # cronos_env_blackwell — both VLAs
-./setup.sh openvla_v01 blackwell     # cronos_env_lite_blackwell — OpenVLA-only, V0.1 transformers ABI
+./setup.sh all blackwell             # cronos_tf447_cu128 — both VLAs
+./setup.sh openvla_v01 blackwell     # cronos_tf440_cu128 — OpenVLA-only, V0.1 transformers ABI
 ```
 
 Both variants pin `torch==2.7.0+cu128` (the lowest stable cu128 build with sm_120). What differs is the LM stack:
 
 | Env | Transformers/peft/tokenizers | OpenVLA peak | Bit-exact to V0.1 cu121? |
 |---|---|---|---|
-| `cronos_env_blackwell` | V0.4 (4.47 / 0.14 / 0.21) | ~55 GB | No — also drifts from V0.1 |
-| `cronos_env_lite_blackwell` | V0.1 (4.40.1 / 0.11.1 / 0.19.1) | ~45 GB | No — cu128 changes cuBLAS/attention kernels, but transformers ABI matches V0.1 |
+| `cronos_tf447_cu128` | V0.4 (4.47 / 0.14 / 0.21) | ~55 GB | No — also drifts from V0.1 |
+| `cronos_tf440_cu128` | V0.1 (4.40.1 / 0.11.1 / 0.19.1) | ~45 GB | No — cu128 changes cuBLAS/attention kernels, but transformers ABI matches V0.1 |
 
 **No torch build is simultaneously V0.1-era *and* Blackwell-compatible.** The cu128 channel does not ship `torch==2.2.0` (cu128 wheels start at torch 2.7), and torch 2.2.0+cu121 has no `sm_120` SASS or PTX. Bit-exact V0.1 baseline replication is therefore Ada/Hopper-only by physics of GPU release dates.
 
@@ -116,8 +125,8 @@ Both variants pin `torch==2.7.0+cu128` (the lowest stable cu128 build with sm_12
 For Ada-class GPUs (L40S, RTX 6000 Ada, A6000 — 48 GB), the dual-VLA stack's ~55 GB OpenVLA-7B PPO peak does **not** fit. The lightweight `openvla_v01` mode pins the lightweight stack (`transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1`) and — on `cu121` — pins `torch==2.2.0` to match V0.1 exactly. OpenVLA-7B PPO peak stays at ~40 GB, fitting one PPO on a 48 GB Ada with headroom.
 
 ```bash
-conda create -n cronos_env_lite -y python=3.10
-conda activate cronos_env_lite
+conda create -n cronos_tf440_cu121 -y python=3.10
+conda activate cronos_tf440_cu121
 cd Benchmark/CRONOS
 ./setup.sh openvla_v01
 ```
@@ -126,7 +135,7 @@ Tradeoffs:
 - ✅ Fits on Ada (48 GB) — restores parity with V0.1's running memory profile.
 - ✅ Numerically bit-exact against V0.1 baseline runs (same cuBLAS GEMM tile order + attention kernels).
 - ❌ Cannot run `--policy spatialvla` — transformers ≥ 4.43 needed for the `HybridCache` import in SpatialVLA's `model/modeling_gemma2.py`. `setup.sh openvla_v01` skips the `../SpatialVLA` editable install entirely; the policy's lazy import in [main.py:270-271](CRONOS/main.py#L270-L271) and [eval_only.py:140](CRONOS/eval_only.py#L140) is gated by `--policy spatialvla` so it never fires under OpenVLA-only runs.
-- ❌ Will not run on Blackwell as-is — pass `blackwell` as the 2nd arg to install the Blackwell variant: `./setup.sh openvla_v01 blackwell` produces `cronos_env_lite_blackwell` (lightweight stack on `torch==2.7.0+cu128`; loses cu121 bit-exactness but keeps V0.1 transformers ABI).
+- ❌ Will not run on Blackwell as-is — pass `blackwell` as the 2nd arg to install the Blackwell variant: `./setup.sh openvla_v01 blackwell` produces `cronos_tf440_cu128` (lightweight stack on `torch==2.7.0+cu128`; loses cu121 bit-exactness but keeps V0.1 transformers ABI).
 
 How `setup.sh` picks the install: the 1st positional arg picks the LM stack + which sibling pillars get installed, the 2nd picks the torch wheel channel. See the header comment in `setup.sh` for the full pin rationale and the 4-env recommended workflows.
 
@@ -182,7 +191,25 @@ Key training flags:
 | `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
 | `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
 | `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
-| `--reset-mode` | `episode` | `episode` \| `none` (non-episodic) |
+| `--reset-mode` | `per_episode` | `per_episode` \| `none` (non-episodic) |
+| `--record-segment-pose` | off | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv` |
+
+### Training-time outputs
+
+Written to the run's `glob/` on every run; full column specs in
+[`doc/data_schemas.md`](CRONOS/doc/data_schemas.md).
+
+| File | Contents |
+|---|---|
+| `rollout_success.csv` | one row per (episode, segment, env): `success` / grasp at segment end, `reward_sum`, `return_discounted`, `return_gae`, `value_mean`, `advantage_mean`, plus a `direction` column marking forward vs backward segments |
+| `segment_pose.csv` | one row per (episode, segment, env, actor) with full `pq`; only with `--record-segment-pose` |
+| `eval_success.csv` | aggregate per (eval point, group, task) |
+
+`rollout_success.csv` uses the **same** `success` definition as eval — the value
+at the segment's final step — so rollout and eval curves are directly
+comparable; they differ only in when they are sampled. Under LSR/noep, filter
+`direction == 'forward'` before aggregating: the env's success predicate is
+always the forward one, so backward segments score 0 by construction.
 
 ### Evaluation (standalone)
 
@@ -221,7 +248,8 @@ python eval_only.py \
 | File | Contents |
 |---|---|
 | `eval_success.csv` | one row per (group, task, eval_kind) with `success`, `grasp`, `obj_grasped` |
-| `eval_report.txt` | human-readable per-eval summary (rotation table + per-task means) |
+| `eval_per_trial.csv` | one row per (sequence, task, env) — the pairing key `tools/mcnemar_pair.py` needs. Carries both scoring semantics: `success` (independent) and `success_chained` (cumulative AND along the sequence) |
+| `eval_report.txt` | human-readable per-eval summary (rotation table + per-task means, both semantics) |
 | `eval_videos/{kind}/eval_ep{M}/env{i}.mp4` | one mp4 per env per eval episode (if `--record-video`) |
 | `run_config.json` / `run_config.yaml` | exact args + resolved YAML at run time |
 
@@ -489,13 +517,73 @@ Used by `eval_only.py` and `main.py --eval-single` / `--eval-sequential`. All en
 
 This is the eval mode used by `scripts/eval.sh` and the per-training eval configs under `configs/eval/`.
 
+#### Sequential scoring: independent vs chained
+
+A sequential eval emits **both** semantics per trial, so one run answers both
+questions and no re-run is needed to switch lens:
+
+| Column in `eval_per_trial.csv` | Semantics |
+|---|---|
+| `success` | **independent** — this task judged on its own, whatever happened earlier in the sequence. AutoRL's semantics. |
+| `success_chained` | **chained** — cumulative AND along `task_idx` within one `(obj_set, sequence, env)`. Once an env fails a task, every later task in that sequence scores 0 for it. |
+
+Independent measures single-task capability; chained measures how far into a
+sequence the policy survives, and is deliberately order-sensitive — the same
+task set under different permutations gives different chained values. They
+coincide at `task_idx == 0`.
+
+#### Accounting fix (affects numbers from prior runs)
+
+Sequential eval deliberately does not reset between tasks. That left ManiSkill's
+`_elapsed_steps` at the time limit, so from the second task onward the env
+reported `truncated` on *every* step — the aggregate `success` silently became a
+time-average instead of a terminal value (under-reporting), grasp flags carried
+over between tasks (over-reporting), and `eval_per_trial.csv` sampled the wrong
+timestep entirely. `CronosWrapper.begin_segment()` now reopens the measurement
+window at each task boundary without touching the scene, so eval and training
+compute `success` and grasp identically.
+
+**Sequential-eval numbers from before this change are not comparable to numbers
+after it.** Single-task eval and all training-time metrics are unaffected. The
+same defect exists upstream in AutoRL's `--only_render_seq`; a correct AutoRL
+baseline can be rebuilt from its own artifacts with `tools/parse_autorl_eval.py`
+without modifying AutoRL. Full analysis in
+[`doc/eval_audit.md`](CRONOS/doc/eval_audit.md).
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `tools/plot_run_trends.py` | Per-run live 4-panel dashboard (see [Visualization](#visualization)) |
+| `scripts/plot.py` | Cross-run aggregator over `eval_success.csv` files |
+| `tools/mcnemar_pair.py` | Paired McNemar gate over `eval_per_trial.csv` |
+| `tools/parse_autorl_eval.py` | Rebuild a correct per-trial baseline from an AutoRL run's video filenames (read-only; AutoRL is never modified) |
+| `tools/bench_rollout.py` | Rollout throughput + GPU peak memory per package stack, with a phase breakdown (inference / env.step / buffer / PPO update) |
+
+`bench_rollout.py` exists to make the four-env split answerable rather than
+permanent: it attributes the OpenVLA memory regression (~40 GB → ~55 GB after the
+transformers/peft upgrade needed by SpatialVLA) to a phase and a package set. Run
+the identical command under each env and diff the JSONs — keep the seed, config
+and all length flags fixed, since throughput depends on `num_envs`,
+`segment_len` and `buffer_inferbatch`.
+
+```bash
+python tools/bench_rollout.py \
+    --config-path configs/one_group_seq_random_2x2.yaml \
+    --policy openvla --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig \
+    --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
+    --bench-episodes 2 --bench-warmup-episodes 1 \
+    --bench-out reports/bench/openvla_tf447_cu121.json
+```
+
 ## Architecture
 - `envs/` — Environment wrapper, config loader, task scheduler, bridge_multi env
-- `training/` — PPO algorithm and replay buffer
+- `training/` — PPO algorithm, replay buffer, metrics/CSV recorders
 - `main.py` — Training entry point (train + eval)
 - `eval_only.py` — Standalone eval script (no training)
 - `configs/` — YAML training configs
 - `configs/eval/` — Per-training eval configs (smaller `num_envs`, `task_order: sequence_random`)
 - `scripts/` — Shell scripts for training and eval
-- `doc/` — Design documents (plan, reasoning) per version
+- `tools/` — Analysis, plotting, benchmarking and AutoRL-interop utilities
+- `doc/` — Design documents: [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs)
 

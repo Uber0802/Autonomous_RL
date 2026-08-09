@@ -14,7 +14,6 @@ Usage:
 import logging
 logging.getLogger("mani_skill").setLevel(logging.ERROR)
 
-import itertools
 import json
 import random
 import sys
@@ -31,7 +30,7 @@ from mani_skill.utils.visualization.misc import images_to_video
 
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
-from envs.scheduler import TaskScheduler
+from envs.scheduler import TaskScheduler, build_eval_sequences
 import envs.bridge_multi  # Trigger environment registration
 from training.metrics import SuccessRecorder
 
@@ -92,6 +91,12 @@ class EvalRunner:
 
     def __init__(self, args: EvalArgs):
         self.args = args
+
+        # Chained-success (semantics A) state: (obj_set, seq_idx) -> per-env
+        # running AND over the tasks completed so far in that sequence. Reset at
+        # task_idx == 0. Keyed by obj_set so the in_domain and out_of_domain
+        # sweeps over the same sequences do not contaminate each other.
+        self._chain_success = {}
 
         np.random.seed(args.seed)
         random.seed(args.seed)
@@ -304,9 +309,14 @@ class EvalRunner:
             f.write(header)
             for task_name, stats in results:
                 success = stats.get("success", 0.0)
+                chained = stats.get("success_chained", 0.0)
                 grasp = stats.get("consecutive_grasp", 0.0)
                 obj_grasped = stats.get("is_src_obj_grasped", 0.0)
-                f.write(f"  {task_name:<45s} success: {success:.4f}  grasp: {grasp:.4f}  obj_grasped: {obj_grasped:.4f}\n")
+                # `success` = independent (B); `chained` = cumulative AND over
+                # the sequence so far (A). They coincide at task_idx 0.
+                f.write(f"  {task_name:<45s} success: {success:.4f}  "
+                        f"chained: {chained:.4f}  grasp: {grasp:.4f}  "
+                        f"obj_grasped: {obj_grasped:.4f}\n")
             f.write("\n")
 
     @torch.no_grad()
@@ -329,6 +339,16 @@ class EvalRunner:
             self.env.set_task(object, receptacle)
         else:
             self.env.set_task(object, receptacle)
+            # Continue from the live scene, but reopen the measurement window:
+            # without this the previous segment's `_elapsed_steps` keeps the env
+            # permanently truncated (so `info["episode"]` fires every step and
+            # `success` degrades into a time-average) and the latched grasp
+            # flags carry over from the previous task. `begin_segment` clears
+            # only those counters — poses stay put, so the no-reset continuity
+            # this eval mode exists to measure is preserved. Result: identical
+            # accounting to a training segment (terminal `success`, grasp
+            # latched within this segment only).
+            self.env.begin_segment()
             obs = self.env.get_obs_image()
         instruction = self.env.get_language_instructions()
 
@@ -375,24 +395,64 @@ class EvalRunner:
         # `--seed` produce byte-identical (task_idx, env_i) inits — no
         # `episode_id` is needed in the key under the same-seed contract.
         # File: `<glob_dir>/eval_per_trial.csv`. Columns:
-        #   seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix
+        #   seq_idx,task_idx,obj_set,task,env_idx,
+        #   success,success_chained,grasp,obj_grasped,prefix
+        #
+        # Two scoring semantics, both emitted so one eval answers both
+        # questions without a re-run:
+        #   `success`         — independent (B): this task judged on its own,
+        #                       regardless of what happened earlier in the
+        #                       sequence. This is AutoRL's semantics, correctly
+        #                       computed.
+        #   `success_chained` — chained (A): cumulative AND along `task_idx`
+        #                       within one (obj_set, seq_idx, env_idx). Once an
+        #                       env fails a task, every later task in that
+        #                       sequence scores 0 for that env. Measures how far
+        #                       into a sequence the policy stays alive; unlike
+        #                       B it is order-sensitive, so the same task set
+        #                       under different permutations gives different
+        #                       numbers by design.
         per_trial_csv = self.glob_dir / "eval_per_trial.csv"
         wrote_header = per_trial_csv.exists()
-        successes = env_infos.get("success", [0.0] * self.args.num_envs)
-        grasps = env_infos.get("consecutive_grasp", [0.0] * self.args.num_envs)
-        obj_grasps = env_infos.get("is_src_obj_grasped", [0.0] * self.args.num_envs)
+        n_envs = self.args.num_envs
+        successes = env_infos.get("success", [0.0] * n_envs)
+        grasps = env_infos.get("consecutive_grasp", [0.0] * n_envs)
+        obj_grasps = env_infos.get("is_src_obj_grasped", [0.0] * n_envs)
+
+        # One terminal sample per env is the contract: `info["episode"]` must
+        # fire on the segment's final step only. More than that means the env
+        # was already truncated on entry, which silently turns `success` into a
+        # time-average and makes the per-env indexing below read the wrong
+        # timestep — the exact failure `CronosWrapper.begin_segment` prevents.
+        if len(successes) > n_envs:
+            print(f"[WARN] eval: expected {n_envs} terminal samples per metric, "
+                  f"got {len(successes)}. The segment was truncated before its "
+                  f"final step, so per-trial rows are sampled from the wrong "
+                  f"timestep and the aggregate is a time-average. Check that "
+                  f"begin_segment() runs on the reset=False path.")
+
+        # Chain state carries across tasks within one (obj_set, sequence).
+        chain_key = (obj_set, iteration)
+        if task_idx == 0:
+            chain = [1.0] * n_envs
+        else:
+            chain = self._chain_success.get(chain_key, [1.0] * n_envs)
+
         with open(per_trial_csv, "a") as f:
             if not wrote_header:
-                f.write("seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix\n")
-            for env_i in range(self.args.num_envs):
+                f.write("seq_idx,task_idx,obj_set,task,env_idx,"
+                        "success,success_chained,grasp,obj_grasped,prefix\n")
+            for env_i in range(n_envs):
                 obj_i = object[env_i] if env_i < len(object) else object[-1]
                 rec_i = receptacle[env_i] if env_i < len(receptacle) else receptacle[-1]
                 task_str = f"put {obj_i} on {rec_i}"
                 s = float(successes[env_i]) if env_i < len(successes) else 0.0
                 g = float(grasps[env_i]) if env_i < len(grasps) else 0.0
                 og = float(obj_grasps[env_i]) if env_i < len(obj_grasps) else 0.0
+                chain[env_i] = chain[env_i] * s   # 0/1 values → cumulative AND
                 f.write(f"{iteration},{task_idx},{obj_set},{task_str},"
-                        f"{env_i},{s:.4f},{g:.4f},{og:.4f},{prefix}\n")
+                        f"{env_i},{s:.4f},{chain[env_i]:.4f},{g:.4f},{og:.4f},{prefix}\n")
+        self._chain_success[chain_key] = chain
 
         if record:
             for env_i in range(self.args.num_envs):
@@ -410,7 +470,12 @@ class EvalRunner:
                     fps=10, verbose=False,
                 )
 
-        return {k: float(np.mean(v)) for k, v in env_infos.items() if v}
+        stats = {k: float(np.mean(v)) for k, v in env_infos.items() if v}
+        # Semantics A alongside B. `success` above is the independent score;
+        # `success_chained` is the fraction of envs that have cleared every task
+        # of this sequence up to and including this one.
+        stats["success_chained"] = float(np.mean(chain)) if chain else 0.0
+        return stats
 
     def _build_sequences(self, task_pool):
         """Return list of task orderings to evaluate.
@@ -421,13 +486,7 @@ class EvalRunner:
         if self.args.eval_mode == "single":
             return [[t] for t in task_pool]
 
-        all_perms = list(itertools.permutations(task_pool))
-        training_seq = tuple(task_pool)
-        other_perms = [p for p in all_perms if p != training_seq]
-        n_random = max(0, self.args.eval_sequences - 1)
-        random.seed(self.args.seed)
-        sampled = random.sample(other_perms, min(n_random, len(other_perms)))
-        return [list(training_seq)] + [list(p) for p in sampled]
+        return build_eval_sequences(task_pool, self.args.eval_sequences, self.args.seed)
 
     def run(self):
         """Run AutoRL-style eval (sequential default) for in-domain + out-of-domain."""
@@ -470,6 +529,7 @@ class EvalRunner:
                     )
                     print(f"    seq{seq_idx} task{task_idx}: {task_str} "
                           f"success={stats.get('success', 0.0):.4f} "
+                          f"chained={stats.get('success_chained', 0.0):.4f} "
                           f"grasp={stats.get('consecutive_grasp', 0.0):.4f}")
                     scalars = self.recorder.log_eval(
                         episode=0,

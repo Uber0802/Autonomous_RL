@@ -17,10 +17,74 @@ of length ``num_envs`` where each group's envs are contiguous.
 
 from __future__ import annotations
 
+import itertools
+import math
 import random
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
+
+
+# Above this many orderings we stop materializing `itertools.permutations` and
+# switch to rejection-sampled shuffles. 8 tasks (40320 orderings) still fits
+# comfortably; 9 tasks — the `one_group_sequential_3x3` config — would be
+# 362880 tuples built just to draw 4 of them.
+_PERM_MATERIALIZE_LIMIT = 50_000
+
+
+def build_eval_sequences(
+    task_pool: List[str],
+    n_sequences: int,
+    seed: int,
+) -> List[List[str]]:
+    """Build the orderings for a sequential eval.
+
+    Sequence 0 is always the training order (AutoRL ``eval_training_seq=True``);
+    sequences 1..n-1 are distinct random permutations of it.
+
+    Shared by `eval_only.py` and `main.py --eval-sequential`, which previously
+    carried two hand-rolled copies of this logic.
+
+    For pools small enough to enumerate, the draw is bit-identical to the old
+    ``random.sample(list(itertools.permutations(pool))[1:], k)`` both call sites
+    used — `itertools.permutations` yields the identity ordering first, so
+    dropping it leaves exactly the same candidate list in the same order, and
+    the same seeded `random.sample` over it picks exactly the same orderings.
+    Past runs stay reproducible. Larger pools take the rejection-sampling path
+    instead of materializing a factorial number of tuples.
+    """
+    pool = list(task_pool)
+    n = len(pool)
+    training_seq = list(pool)
+    k = max(0, n_sequences - 1)
+    if k == 0 or n < 2:
+        return [training_seq]
+
+    rng = random.Random(seed)
+    total_orderings = math.factorial(n)
+
+    if total_orderings <= _PERM_MATERIALIZE_LIMIT:
+        candidates = list(itertools.permutations(pool))[1:]  # drop identity
+        # `random.sample` on a seeded module-level RNG is what both call sites
+        # used; a dedicated Random(seed) draws the same values.
+        sampled = rng.sample(candidates, min(k, len(candidates)))
+        return [training_seq] + [list(p) for p in sampled]
+
+    # Large pool: draw distinct shuffles instead of enumerating.
+    seen = {tuple(pool)}
+    out: List[List[str]] = []
+    max_attempts = 100 * max(1, k)
+    for _ in range(max_attempts):
+        if len(out) >= k:
+            break
+        cand = pool[:]
+        rng.shuffle(cand)
+        key = tuple(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+    return [training_seq] + out
 
 
 # ---------------------------------------------------------------------------

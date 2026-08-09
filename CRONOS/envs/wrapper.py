@@ -315,6 +315,41 @@ class CronosWrapper:
         self.reset_strategy.reset_robot()
         return self.get_obs_image()
 
+    def begin_segment(self):
+        """Open a new measurement segment WITHOUT touching the scene.
+
+        Clears exactly the two pieces of per-segment bookkeeping that decide how
+        `success` / grasp get reported, and nothing else:
+
+        1. ``_elapsed_steps`` — `TimeLimitWrapper.step` recomputes
+           ``truncated = elapsed_steps >= max_episode_steps`` on EVERY step
+           (registration.py:160-168) and never auto-resets. Left at its previous
+           value, a continued segment is truncated from its very first step, so
+           `step()` emits ``info["episode"]`` on all `segment_len` steps instead
+           of once at the end — and the caller's `np.mean` over that
+           accumulation silently turns a terminal value into a time-average.
+        2. The latched grasp flags — `evaluate()` accumulates
+           ``is_src_obj_grasped`` / ``consecutive_grasp`` with ``|=``, and only
+           `reset_grasp_stats()` clears them, so otherwise they carry over from
+           the previous segment and monotonically saturate.
+
+        Training gets both for free: `reset_robot()` (on by default in every
+        reset mode) zeroes `_elapsed_steps` and calls `reset_grasp_stats()` at
+        each segment boundary. Sequential eval deliberately does NOT reset the
+        robot — continuity across tasks is the thing it measures — so it needs
+        the bookkeeping half on its own. Poses, velocities and contact state are
+        untouched; only the counters defining the reporting window are cleared.
+
+        Note: because the robot is not reset, a gripper still holding the object
+        from the previous task re-latches `is_src_obj_grasped` on the first
+        `evaluate()` of the new segment. That is the honest state under
+        continuity, not a leak from the previous segment's history.
+        """
+        unwrapped = self.env.unwrapped
+        env_idx = torch.arange(0, self.num_envs, device=self.device)
+        unwrapped._elapsed_steps[env_idx] = 0
+        unwrapped.reset_grasp_stats()
+
     def get_obs_image(self):
         """Directly retrieves the current observation image."""
         info = self.env.unwrapped.get_info()
