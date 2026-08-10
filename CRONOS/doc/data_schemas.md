@@ -174,6 +174,12 @@ when it sees this.
 filenames, with `grasp` / `obj_grasped` left empty (not recoverable — see the
 audit doc). Both sides then feed the same `mcnemar_pair.py` and `plot.py`.
 
+`mcnemar_pair.py` treats an empty cell as "not available": pairs missing the
+requested metric on either side are skipped and counted, and it says so instead
+of scoring them as zeros. So `--metric success` against a recovered AutoRL
+baseline works, and `--metric grasp` reports zero comparable pairs rather than
+producing a confident-looking result from nothing.
+
 ---
 
 ## `eval_success.csv`

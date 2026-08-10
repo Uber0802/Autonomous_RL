@@ -133,6 +133,14 @@ task orderings are hard.
 
 They coincide at `task_idx == 0`.
 
+### Where they are available
+
+Both columns come from `eval_only.py`, which is the path `scripts/eval.sh` and
+the `configs/eval/` configs use. `main.py --eval-sequential` gets the accounting
+fix but not the two columns: it has never written `eval_per_trial.csv` at all,
+only the aggregate `eval_success.csv`, so there is no per-env row to chain.
+Use `eval_only.py` when the chained score is wanted.
+
 ---
 
 ## 4. Recovering a correct AutoRL baseline

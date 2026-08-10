@@ -30,19 +30,41 @@ from pathlib import Path
 
 
 def read_per_trial(path: Path):
-    """Return {(eval_kind, task, env_idx): {success, grasp, obj_grasped}}."""
+    """Return {(eval_kind, task, env_idx): {success, success_chained, grasp, obj_grasped}}.
+
+    Columns may be absent or empty. `tools/parse_autorl_eval.py` reconstructs a
+    baseline from an AutoRL run's video filenames, which carry the terminal
+    `success` per env but nothing about grasp — those cells are written empty on
+    purpose. A missing value becomes None here rather than raising, and
+    `pooled_mcnemar` reports which metrics are actually comparable instead of
+    dying on a `float('')`.
+
+    `success_chained` is present on CRONOS runs from V0.91 and on recovered
+    AutoRL baselines; older CSVs simply lack the column.
+    """
+    def _num(row, col):
+        v = (row.get(col) or "").strip()
+        if not v:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
     by = {}
     with open(path) as f:
         for row in csv.DictReader(f):
-            kind = "in_domain" if row["prefix"].startswith("in_domain") else \
-                   ("out_of_domain" if row["prefix"].startswith("out_of_domain") else None)
+            prefix = row.get("prefix") or ""
+            kind = "in_domain" if prefix.startswith("in_domain") else \
+                   ("out_of_domain" if prefix.startswith("out_of_domain") else None)
             if kind is None:
                 continue
             key = (kind, row["task"], int(row["env_idx"]))
             by[key] = {
-                "success": float(row["success"]),
-                "grasp": float(row["grasp"]),
-                "obj_grasped": float(row["obj_grasped"]),
+                "success": _num(row, "success"),
+                "success_chained": _num(row, "success_chained"),
+                "grasp": _num(row, "grasp"),
+                "obj_grasped": _num(row, "obj_grasped"),
             }
     return by
 
@@ -71,6 +93,7 @@ def chi2_one_sided_p(chi2: float, b: int, c: int) -> float:
 def mcnemar(baseline, post_rl, kind: str, metric: str = "success"):
     """Pooled McNemar over all tasks of one eval_kind, computed on `metric`."""
     pairs_total = 0
+    skipped_missing = 0                                     # pair matched, metric absent on a side
     a = b = c = d = 0                                       # confusion-matrix counts
     per_task = {}                                           # task -> (baseline_succ, post_succ, n)
 
@@ -79,6 +102,12 @@ def mcnemar(baseline, post_rl, kind: str, metric: str = "success"):
             continue
         post_row = post_rl.get(key)
         if post_row is None:
+            continue
+        # A recovered AutoRL baseline carries `success` but no grasp columns, so
+        # a grasp gate against it has nothing to pair. Skip and report rather
+        # than crashing on None or silently scoring it as a zero.
+        if base_row.get(metric) is None or post_row.get(metric) is None:
+            skipped_missing += 1
             continue
         pairs_total += 1
         bv = int(round(base_row[metric]))
@@ -104,6 +133,7 @@ def mcnemar(baseline, post_rl, kind: str, metric: str = "success"):
         "kind": kind,
         "metric": metric,
         "pairs_total": pairs_total,
+        "skipped_missing_metric": skipped_missing,
         "agree_zero_zero": d,
         "agree_one_one": a,
         "discordant_b_gain": b,
@@ -141,6 +171,13 @@ def main():
         r = mcnemar(base, post, kind, metric=args.metric)
         print(f"### {kind}  ({args.metric})")
         print(f"  pairs            : {r['pairs_total']}")
+        if r["skipped_missing_metric"]:
+            # Most likely a recovered AutoRL baseline, which has `success` only.
+            print(f"  skipped (no '{args.metric}' on one side): "
+                  f"{r['skipped_missing_metric']}")
+        if r["pairs_total"] == 0:
+            print(f"  -> no comparable pairs for metric '{args.metric}'; "
+                  f"the statistics below are vacuous.")
         print(f"  baseline mean    : {r['baseline_mean']:.4f}  (per-task avg)")
         print(f"  post-RL mean     : {r['post_mean']:.4f}  (per-task avg)")
         print(f"  confusion (a,b,c,d) = (1→1, 0→1 gains, 1→0 losses, 0→0)")

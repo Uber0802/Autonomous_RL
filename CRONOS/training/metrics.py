@@ -125,7 +125,9 @@ class SuccessRecorder:
         self.counters_path = self.glob_dir / "counters.json"
 
         self._ensure_header(self.eval_csv_path, EVAL_FIELDS)
-        self._ensure_header(self.rollout_csv_path, ROLLOUT_FIELDS)
+        # rollout_success.csv gets its header on first write, not here: an
+        # eval-only run builds a recorder too and would otherwise leave an empty
+        # rollout CSV that looks like a rollout produced no rows.
 
         # eval_history[eval_kind][task] -> list of (total_steps, success)
         self.eval_history: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
@@ -164,6 +166,7 @@ class SuccessRecorder:
         """
         if not rows:
             return
+        self._ensure_header(self.rollout_csv_path, ROLLOUT_FIELDS)
         with open(self.rollout_csv_path, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(ROLLOUT_FIELDS))
             for row in rows:

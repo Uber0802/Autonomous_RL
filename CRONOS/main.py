@@ -1427,6 +1427,17 @@ class CronosRunner:
         pivots cleanly.
         """
         unwrapped = self.env.env.unwrapped
+        if not hasattr(unwrapped, "get_all_slot_poses"):
+            # The predecessor read `get_obj_pos()`, which lives on the base env,
+            # so this flag used to work anywhere. Per-slot coverage is built on
+            # `_all_carrot_ids` / `_all_plate_ids` and narrows that to the NxM
+            # family. Fail loudly at the first segment boundary rather than
+            # letting a run that was explicitly asked to record produce nothing.
+            raise AttributeError(
+                f"--record-segment-pose requires an env exposing "
+                f"get_all_slot_poses() (GenericNxMPickPlace and subclasses, "
+                f"e.g. PickPlaceNxM-v1); got {type(unwrapped).__name__}."
+            )
         poses = unwrapped.get_all_slot_poses()
         try:
             instr = self.env.get_language_instructions()
