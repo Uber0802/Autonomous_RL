@@ -84,8 +84,10 @@ class Args:
     hsr_reset_scope: str = "per_env"
     # Dump the full pose state (every object slot, every receptacle slot, and the
     # gripper — position + quaternion) at the END of every segment, before any
-    # HSR/LSR reset, to glob/segment_pose.csv.
-    record_segment_pose: bool = False
+    # HSR/LSR reset, to glob/segment_pose.csv. On by default: the record is
+    # cheap (num_envs x (N+M+1) rows per segment) and is the only source for
+    # where objects actually came to rest. Disable with --no-record-segment-pose.
+    record_segment_pose: bool = True
     # Deprecated alias for --record-segment-pose. The old flag wrote
     # end_of_segment_xyz.csv with only the task-selected pair and only xyz;
     # it now enables the superset recorder. Kept so existing launch scripts
@@ -1104,6 +1106,16 @@ class CronosRunner:
                     print(f"Total unsuitable resets: {self.soft_reset_count}")
                 if self.args.reset_robot:
                     next_obs = self.env.reset_robot()
+                else:
+                    # EER off. `reset_robot()` is the ONLY thing that zeroes
+                    # `_elapsed_steps` on the training path, and `truncated`
+                    # feeds the buffer's masks — left at the time limit the env
+                    # reports truncated on every step, masks go to 0, and GAE
+                    # degenerates to `returns = reward` with no bootstrapping.
+                    # `begin_segment()` reopens the accounting window without
+                    # touching the robot, which is the whole point of turning
+                    # EER off.
+                    self.env.begin_segment()
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()

@@ -143,8 +143,9 @@ How `setup.sh` picks the install: the 1st positional arg picks the LM stack + wh
 
 ### Training
 ```bash
-# 6 positional args
-bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla]
+# 7 positional args
+bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer]
+#                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
 #                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
 #                      │      │      │      └─ normal | LSR | HSR | LSR+HSR | noep (default: normal)
@@ -160,6 +161,9 @@ bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2
 
 # SpatialVLA, T1280 segment 'b', seed 1, GPU 2, non-episodic (LSR+HSR + reset_mode=none)
 bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
+
+# Same, but with the end effector never repositioned between segments
+bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla off
 ```
 
 `RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
@@ -174,7 +178,24 @@ bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
 | `LSR+HSR` | LSR + HSR | backward learning + soft respawn |
 | `noep` | LSR+HSR + `--reset-mode none` | non-episodic continuity (no inter-episode hard reset) |
 
-`--reset-robot` is on by default and orthogonal (gripper resets every segment in every mode).
+**EER (End-Effector Reset)** — the 7th positional arg, orthogonal to all five reset modes above:
+
+| eer | CLI flag added | Meaning |
+|---|---|---|
+| `on` (default) | (nothing — `--reset-robot` is already the `main.py` default) | gripper returns to its initial pose at every segment boundary, in every reset mode |
+| `off` | `--no-reset-robot` | fully continuous arm — nothing repositions the end effector between segments |
+
+`eer=off` appends `-noEER` to `RUN_TAG` so it lands in its own output directory;
+`eer=on` emits a command line byte-identical to before the option existed, so
+prior runs, resume paths and wandb dirs are unaffected.
+
+> `reset_robot()` is also the only thing that zeroes ManiSkill's `_elapsed_steps`
+> on the training path, and `truncated` feeds the PPO buffer's masks. With EER
+> off, the training loop calls `CronosWrapper.begin_segment()` instead, which
+> reopens the accounting window without touching the arm — otherwise every step
+> after the first segment would report truncated, masks would go to zero and GAE
+> would degenerate to `returns = reward` with no bootstrapping. This is the same
+> mechanism described in [`doc/eval_audit.md`](CRONOS/doc/eval_audit.md).
 
 Key training flags:
 | Flag | Default | Description |
@@ -192,7 +213,8 @@ Key training flags:
 | `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
 | `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
 | `--reset-mode` | `per_episode` | `per_episode` \| `none` (non-episodic) |
-| `--record-segment-pose` | off | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv` |
+| `--reset-robot` / `--no-reset-robot` | on | EER — return the gripper to its initial pose at every segment boundary |
+| `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
 
 ### Training-time outputs
 

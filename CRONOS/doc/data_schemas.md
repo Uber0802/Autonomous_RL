@@ -9,7 +9,7 @@ written with stdlib `csv`, and carry both x-axes (`total_steps` and
 | File | One row per | Written by | Enabled by |
 |---|---|---|---|
 | `rollout_success.csv` | (episode, segment, env) | training rollout | always |
-| `segment_pose.csv` | (episode, segment, env, actor) | training rollout | `--record-segment-pose` |
+| `segment_pose.csv` | (episode, segment, env, actor) | training rollout | always (`--no-record-segment-pose` to disable) |
 | `eval_success.csv` | (eval point, group, task) | training eval + `eval_only.py` | always |
 | `eval_per_trial.csv` | (sequence, task, env) | `eval_only.py` | always |
 
@@ -90,9 +90,9 @@ distinguishable rewards.
 
 ## `segment_pose.csv`
 
-Full pose state of the manipulable scene at the end of every segment. Enable
-with `--record-segment-pose` (`--record-end-of-segment-xyz` is kept as a
-deprecated alias).
+Full pose state of the manipulable scene at the end of every segment. On by
+default; disable with `--no-record-segment-pose`. (`--record-end-of-segment-xyz` is
+kept as a deprecated alias that also enables it.)
 
 | Column | Meaning |
 |---|---|

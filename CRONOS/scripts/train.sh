@@ -1,7 +1,7 @@
 #!/bin/bash
 # train.sh - CRONOS training: 3 horizons × 3 segments × 5 reset modes × 2 VLA policies.
 #
-# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla]
+# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer]
 #
 #   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c | t2560a|t2560b|t2560c
 #   seed:   random seed (default: 0)
@@ -9,6 +9,7 @@
 #   reset:  normal|LSR|HSR|LSR+HSR|noep (default: normal)
 #   config: YAML experiment config (default: configs/one_group_seq_random_2x2.yaml)
 #   vla:    openvla|spatialvla (default: openvla)
+#   eer:    on|off — End-Effector Reset (default: on)
 #
 # Reset modes:
 #   normal   — standard episodic training (hard reset every episode)
@@ -16,6 +17,16 @@
 #   HSR      — High-level State Reset: respawn fallen objects every task boundary
 #   LSR+HSR  — both backward + reset_unsuitable
 #   noep     — LSR+HSR without episodic reset (reset_mode=none)
+#
+# EER (End-Effector Reset) is orthogonal to all five reset modes: it controls
+# whether the gripper is returned to its initial pose at every segment boundary
+# (`--reset-robot`, on by default in main.py). Turning it OFF gives a fully
+# continuous arm — nothing repositions the end effector between segments.
+#   on   — gripper resets every segment, in every reset mode (historical behavior)
+#   off  — arm carries its pose across segment boundaries (`--no-reset-robot`)
+# With eer=off the run tag gains a `-noEER` suffix so it lands in its own output
+# directory; eer=on keeps the existing tag byte-for-byte, so prior runs and
+# resume paths are unaffected.
 #
 # VLA policies (both run in the same conda env after `bash setup.sh all`):
 #   openvla    — OpenVLA-7B + bridge_orig unnorm key
@@ -56,6 +67,7 @@ CUDA=${3:-3}
 RESET=${4:-normal}
 CONFIG=${5:-configs/one_group_seq_random_2x2.yaml}
 VLA=${6:-openvla}
+EER=${7:-on}
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA}
@@ -127,9 +139,28 @@ case $RESET in
   *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
 esac
 
+# --- EER (End-Effector Reset) → --reset-robot toggle ---
+# Orthogonal to $RESET: it decides whether the gripper returns to its initial
+# pose at each segment boundary. main.py defaults --reset-robot to true, so "on"
+# needs no flag and the emitted command line stays identical to before this
+# option existed.
+case $EER in
+  on)
+    EER_TAG=""
+    EER_ARGS=""
+    ;;
+  off)
+    # Tag only in the off case, so every existing run directory name, wandb dir
+    # and resume path is unchanged for the default.
+    EER_TAG="-noEER"
+    EER_ARGS="--no-reset-robot"
+    ;;
+  *) echo "Unknown eer: $EER"; echo "Valid: on|off"; exit 1 ;;
+esac
+
 # Derive config name from filename (e.g. configs/one_group_sequential_3x3.yaml → one_group_sequential_3x3)
 CONFIG_NAME=$(basename "$CONFIG" .yaml)
-RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}-seed${SEED}"
+RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}${EER_TAG}-seed${SEED}"
 WANDB_DIR="${WANDB_DIR:-${RUN_TAG}}"
 CKPT="${CKPT:-}"
 
@@ -186,7 +217,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
+COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS --record-video --wandb-dir \"$WANDB_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────
