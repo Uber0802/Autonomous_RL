@@ -215,9 +215,12 @@ def aggregate_train_results(train_results):
 
     agg = {}
     # Means
+    # `grpo_adv_zero_frac` is emitted only by CronosGRPO; the loop is
+    # key-driven, so it is simply absent from PPO payloads.
     for k in ("policy_loss", "value_loss", "entropy", "total_loss",
               "ratio_mean", "approx_kl", "clip_fraction",
-              "value_explained_variance", "grad_norm_vla", "grad_norm_vh"):
+              "value_explained_variance", "grad_norm_vla", "grad_norm_vh",
+              "grpo_adv_zero_frac"):
         if k in keys:
             agg[k] = _mean(k)
     # Median of medians (representative central ratio)

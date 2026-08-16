@@ -143,8 +143,9 @@ How `setup.sh` picks the install: the 1st positional arg picks the LM stack + wh
 
 ### Training
 ```bash
-# 7 positional args
-bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer]
+# 8 positional args
+bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo]
+#                      │      │      │      │       │        │     │     └─ ppo (default) | grpo | grpo-task
 #                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
 #                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
@@ -153,6 +154,12 @@ bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer]
 #                      │      └─ seed (default: 0)
 #                      └─ horizon tag: t80a..t2560c (12 horizons × 3 segment-len variants)
 ```
+
+Output directory: defaults to `./$RUN_TAG`, created before launch and passed as an
+**absolute** `--wandb-dir`. Override with `RUN_OUT_DIR=/data/runs/my-run`. Passing a
+relative or not-yet-existing directory used to make wandb silently redirect the whole
+run — every CSV, checkpoint and video — into `$TMPDIR`; `run_paths.py` now creates and
+validates the directory up front and fails loudly if wandb ignores it.
 
 Examples:
 ```bash
@@ -164,6 +171,18 @@ bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
 
 # Same, but with the end effector never repositioned between segments
 bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla off
+
+# GRPO instead of PPO — AutoRL-compatible grouping (one group per segment)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo
+
+# GRPO grouped per scene (segment × YAML group — same objects/receptacles/background)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-scene
+
+# GRPO grouped per task (segment × fan-out sub-block — narrowest, most apples-to-apples)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
+
+# Any GRPO mode with the std term overridden (tagged, so it lands in its own dir)
+GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
 ```
 
 `RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
@@ -202,6 +221,11 @@ Key training flags:
 |---|---|---|
 | `--config-path` | required | YAML experiment config |
 | `--policy` | `openvla` | `openvla` or `spatialvla` |
+| `--alg-name` | `ppo` | `ppo` (actor-critic + GAE) or `grpo` (critic-free) |
+| `--grpo-group-scope` | `batch` | GRPO only. What counts as one group: all three are per-segment. `batch` (whole segment — the statistic AutoRL uses, bit-identical) \| `scene` (segment × YAML group) \| `task` (segment × fan-out sub-block). Sizes for `four_group_sequential_2x2`: 64 / 16 / 4 |
+| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. See [`doc/grpo_autorl.md` §9](CRONOS/doc/grpo_autorl.md) |
+| `--alg-grpo-fix` | on | GRPO only. Compute reward statistics from non-zero rewards only (AutoRL's `alg_grpo_fix`) |
+| `--wandb-dir` | `""` | Run output root. Created and validated before `wandb.init`; a run that cannot land here fails instead of silently going to `$TMPDIR` |
 | `--num-envs` | 64 | Total parallel environments |
 | `--segment-len` | 80 | Steps per segment (AutoRL: 80) |
 | `--ppo-update-len` | 80 | Steps between PPO updates |
@@ -600,12 +624,13 @@ python tools/bench_rollout.py \
 
 ## Architecture
 - `envs/` — Environment wrapper, config loader, task scheduler, bridge_multi env
-- `training/` — PPO algorithm, replay buffer, metrics/CSV recorders
+- `training/` — PPO and GRPO algorithms, replay buffer, metrics/CSV recorders
 - `main.py` — Training entry point (train + eval)
 - `eval_only.py` — Standalone eval script (no training)
+- `run_paths.py` — Run output directory resolution, shared by both entry points
 - `configs/` — YAML training configs
 - `configs/eval/` — Per-training eval configs (smaller `num_envs`, `task_order: sequence_random`)
 - `scripts/` — Shell scripts for training and eval
 - `tools/` — Analysis, plotting, benchmarking and AutoRL-interop utilities
-- `doc/` — Design documents: [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs)
+- `doc/` — Design documents: [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs), [`grpo_autorl.md`](CRONOS/doc/grpo_autorl.md) (AutoRL GRPO review + CRONOS's grouping / std choices)
 

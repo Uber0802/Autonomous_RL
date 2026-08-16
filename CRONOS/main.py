@@ -20,11 +20,13 @@ from dataclasses import dataclass
 from collections import defaultdict
 import pprint
 
+from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler, build_eval_sequences
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO, aggregate_train_results
+from training.grpo import CronosGRPO
 from training.buffer import CronosReplayBuffer
 from training.metrics import SuccessRecorder
 from mani_skill.utils.visualization.misc import images_to_video
@@ -97,6 +99,49 @@ class Args:
     backward_interval: int = 1
     num_groups: int = 0             # 0 = dynamically scale with available tasks
 
+    # --- Algorithm ---
+    # `ppo` (actor-critic, GAE) or `grpo` (critic-free, group-normalized
+    # reward-to-go). Names follow AutoRL/RL4VLA so configs transfer.
+    alg_name: str = "ppo"                # ppo | grpo
+    # AutoRL's `alg_grpo_fix`: compute the reward statistics from NON-ZERO
+    # rewards only. The shaped reward is a potential difference, so most steps
+    # are exactly 0; including them would drag the mean to ~0 and make the std
+    # a measure of sparsity rather than of policy spread.
+    alg_grpo_fix: bool = True
+    # What counts as one GRPO group. Three nesting levels, widest to narrowest.
+    # ALL of them are scoped to a single segment — the group is (segment, block)
+    # — so the ladder is a clean nesting. Sizes in brackets are for
+    # `four_group_sequential_2x2` (64 envs = 4 YAML groups x 16 envs, 4 unique
+    # tasks per group).
+    #   "batch" [64] — one group per segment: every env, no further grouping.
+    #                  This is AutoRL's statistic: its `train_grpo` runs on a
+    #                  buffer holding exactly one segment of `num_envs`
+    #                  trajectories, so `compute_returns_grpo` pools precisely
+    #                  these 64. Verified bit-identical.
+    #   "scene" [16] — one group per (segment, YAML group). Envs compared share
+    #                  the same objects, receptacles and background overlay, but
+    #                  may be running different tasks within that scene.
+    #   "task"  [4]  — one group per (segment, fan-out sub-block). Only envs that
+    #                  ran the SAME (object, receptacle) in the SAME segment are
+    #                  compared. Narrowest and most apples-to-apples, but the
+    #                  group can get small enough that its rewards are often all
+    #                  identical — see the startup warning and
+    #                  `grpo_adv_zero_frac`.
+    # NOTE: "scene" here means a YAML `groups:` entry. It is unrelated to
+    # `--scene` (the named lighting/overlay spec in `envs/scenes.py`) and to the
+    # `scene` column in `eval_success.csv`.
+    grpo_group_scope: str = "batch"      # batch | scene | task
+    # What to divide the group-centred rewards by.
+    #   "group"  — that group's own std (AutoRL / textbook GRPO).
+    #   "global" — the std over the whole update. Groups are centred
+    #              independently but weighted equally, which removes the
+    #              difficulty bias per-group std introduces while keeping the
+    #              gradient scale stable.
+    #   "none"   — centring only (Dr. GRPO style).
+    # Under `grpo_group_scope=batch` the group IS the whole update, so "group"
+    # and "global" are the same thing. See `doc/grpo_autorl.md` §"是否需要 /std".
+    grpo_std_scope: str = "group"        # group | global | none
+
     # --- PPO / buffer ---
     alg_ppo_epoch: int = 1
     alg_gradient_accum: int = 20    # phaseO-5 attempted 20→4 (mb 8→40 + LM-trunk checkpointing);
@@ -147,7 +192,7 @@ class Args:
     record_video: bool = True
     ppo_log: str = "ppo_log.txt"            # per-minibatch PPO progress (in glob_dir)
     eval_report: str = "eval_report.txt"    # per-eval success rate summary (in glob_dir)
-    log_file: str = "run.log"               # tee of stdout for the whole run (in glob_dir); empty string disables
+    log_file: str = "run.log"               # tee of stdout for the whole run (in the wandb files/ dir, NOT glob/); empty string disables
 
 class CronosRunner:
     """Coordinates the CRONOS training workflow."""
@@ -181,12 +226,20 @@ class CronosRunner:
             config=args.__dict__,
             mode="online" if args.wandb else "offline",
         )
-        if args.wandb_dir:
-            wandb_kwargs["dir"] = args.wandb_dir
+        # Create + validate the root dir BEFORE wandb.init. Passing a relative,
+        # not-yet-existing path (what scripts/train.sh does) makes wandb fall
+        # back to the system temp dir with only a termwarn — see run_paths.py.
+        wandb_root = prepare_wandb_dir(args.wandb_dir)
+        if wandb_root:
+            wandb_kwargs["dir"] = wandb_root
         run = wandb.init(**wandb_kwargs)
+        verify_run_dir(run.dir, wandb_root)
         # X-axis: all metrics keyed on total_steps (environment steps)
         wandb.define_metric("total_steps")
         wandb.define_metric("eval_*", step_metric="total_steps")
+        # `glob/` is a SIBLING of `files/`, not a child — so wandb does NOT
+        # upload it. Everything durable (CSVs, checkpoints, videos) lives here
+        # and is local-only; only `files/` is synced to the wandb cloud.
         self.glob_dir = Path(run.dir).parent / "glob"
         self.glob_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir = Path(run.dir)  # wandb files/ dir (auto-synced)
@@ -276,7 +329,13 @@ class CronosRunner:
                 "'openvla' or 'spatialvla'."
             )
         self.policy = _Policy(args, device_id=device_id_other)
-        self.ppo = CronosPPO(args, self.policy)
+        # PPO or GRPO — same constructor signature, same `train_epoch` contract
+        # (list of per-minibatch dicts), so `_run_ppo_update` and
+        # `aggregate_train_results` are shared.
+        if args.alg_name == "grpo":
+            self.trainer = CronosGRPO(args, self.policy)
+        else:
+            self.trainer = CronosPPO(args, self.policy)
 
         # Initialize Env AFTER config + policy (env_n/env_m now correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
@@ -376,6 +435,9 @@ class CronosRunner:
             print(f"[SCHEDULER] restored cursor from checkpoint")
         print(f"[SCHEDULER] mode={args.task_order}, pool={self.scheduler.task_pool}")
 
+        # GRPO grouping: per-env sub-block id, fixed for the whole run.
+        self._build_grpo_env_blocks()
+
         # buffer width comes from the policy, NOT from
         # `get_action_dim` (= continuous DoF = 7 for both backends, drives the
         # wrapper decoder). For OpenVLA tokens==DoF==7; for SpatialVLA
@@ -399,6 +461,115 @@ class CronosRunner:
 
         if args.record_video:
             self.video_frames = [[] for _ in range(args.num_envs)]
+
+    def _build_grpo_env_blocks(self):
+        """Map each env to a block id, once per scope, fixed for the whole run.
+
+        The scheduler lays every YAML group's envs out contiguously and, with
+        `fan_out=True`, splits each group into one sub-block per unique task
+        (`envs/scheduler.py:297-311`). Config validation V22/V23 guarantees the
+        split is even, so the three nested levels are:
+
+            batch block     ->  all envs (a single block)
+            scene block g   ->  envs [starts[g], starts[g+1])
+            task block g,t  ->  envs [starts[g] + t*sub, starts[g] + (t+1)*sub)
+                                sub = groups[g].num_envs // len(task_pool)
+
+        Block membership is fixed for the run; what rotates each segment is
+        WHICH task a given sub-block runs (`_fan_out_offsets`). That is why the
+        buffer-side key combines the block id with the segment index — see
+        `_grpo_group_ids`.
+
+        With `fan_out=False`, or a single-task group, the task block degenerates
+        to the scene block (all the group's envs share one task anyway).
+
+        Sets `self._grpo_blocks`: {scope: (per-env id array, block count)}.
+        """
+        scene_blocks, n_scene = [], 0
+        task_blocks, n_task = [], 0
+        for gs in self.scheduler.group_states:
+            scene_blocks.extend([n_scene] * gs.num_envs)
+            n_scene += 1
+
+            n_tasks = len(gs.task_pool)
+            if self.scheduler.fan_out and n_tasks > 1:
+                sub = gs.num_envs // n_tasks
+                for t in range(n_tasks):
+                    task_blocks.extend([n_task + t] * sub)
+                # Remainder envs (only reachable if V23 was bypassed) join the
+                # last block rather than forming a ragged one.
+                remainder = gs.num_envs - sub * n_tasks
+                if remainder > 0:
+                    task_blocks.extend([n_task + n_tasks - 1] * remainder)
+                n_task += n_tasks
+            else:
+                task_blocks.extend([n_task] * gs.num_envs)
+                n_task += 1
+
+        ne = self.args.num_envs
+        # Pad any env not covered by a group into a final catch-all block.
+        for blocks, n in ((scene_blocks, n_scene), (task_blocks, n_task)):
+            if len(blocks) < ne:
+                blocks.extend([n] * (ne - len(blocks)))
+
+        # Block count is read back off the array so the catch-all pad block, if
+        # one was needed, is counted exactly once.
+        self._grpo_blocks = {"batch": (np.zeros(ne, dtype=np.int64), 1)}
+        for scope, blocks in (("scene", scene_blocks), ("task", task_blocks)):
+            arr = np.asarray(blocks[:ne], dtype=np.int64)
+            self._grpo_blocks[scope] = (arr, int(arr.max()) + 1)
+
+        self._report_grpo_grouping()
+
+    def _report_grpo_grouping(self):
+        """Print the selected grouping and warn when it is too narrow to help."""
+        scope = self.args.grpo_group_scope
+        if self.args.alg_name != "grpo":
+            return
+        arr, n_blocks = self._grpo_blocks[scope]
+        sizes = np.bincount(arr, minlength=n_blocks)
+        print(f"[GRPO] group_scope={scope}: {n_blocks} blocks/segment, "
+              f"sizes={sizes.tolist()}, std_scope={self.args.grpo_std_scope}")
+        smallest = int(sizes.min())
+        if smallest < 8:
+            # A group whose rewards all come out identical contributes zero
+            # gradient, and that gets rapidly more likely as the group shrinks.
+            # `grpo_adv_zero_frac` in wandb measures the real rate.
+            print(f"[WARN] smallest GRPO group has {smallest} envs. With few envs "
+                  f"per group the reward spread is often zero, which makes the "
+                  f"whole group's advantage zero — watch `grpo_adv_zero_frac`. "
+                  f"Raise per-group num_envs, widen --grpo-group-scope, or accept "
+                  f"the sparser signal.")
+            if self.args.grpo_std_scope == "group":
+                print(f"[WARN] --grpo-std-scope group divides by each group's own "
+                      f"std, which at this group size is both noisy and acts as a "
+                      f"per-group weight (imbalanced groups get amplified). "
+                      f"--grpo-std-scope global keeps the scale but drops the bias.")
+
+    def _grpo_group_ids(self, n_slots):
+        """Per-slot group id for `buffer.compute_grpo_returns`.
+
+        Buffer slot `k` is segment `k // num_envs`, env `k % num_envs`. All three
+        scopes key on **(segment, block)**, never on block alone:
+
+        - `task` must, because `TaskScheduler.update_index` rotates
+          `_fan_out_offsets` every segment, so the same sub-block runs a
+          different task in the next segment and pooling across segments would
+          compare unlike tasks.
+        - `scene` does not strictly have to — a scene block runs the same *set*
+          of tasks every segment — but does anyway, for consistency and because
+          segment N+1 starts from segment N's end state under non-episodic
+          continuity, so the two are not drawn from the same state distribution.
+        - `batch` is one block, so its group is the segment itself: `num_envs`
+          trajectories. That is exactly what AutoRL normalizes over — its
+          `train_grpo` runs on a buffer holding a single segment — so pooling
+          the whole `ppo_update_len` window instead would silently change the
+          statistic.
+        """
+        env_block, n_blocks = self._grpo_blocks[self.args.grpo_group_scope]
+        ne = self.args.num_envs
+        idx = np.arange(n_slots, dtype=np.int64)
+        return (idx // ne) * n_blocks + env_block[idx % ne]
 
     def _dump_run_config(self):
         """M1: write glob_dir/run_config.{json,yaml} before any SAPIEN
@@ -570,6 +741,12 @@ class CronosRunner:
             f"ppo_update_len ({args.ppo_update_len}) must be divisible by task_len ({args.task_len})"
         assert args.reset_mode in ("per_episode", "none"), \
             f"reset_mode must be 'per_episode' or 'none', got '{args.reset_mode}'"
+        assert args.alg_name in ("ppo", "grpo"), \
+            f"alg_name must be 'ppo' or 'grpo', got '{args.alg_name}'"
+        assert args.grpo_group_scope in ("batch", "scene", "task"), \
+            f"grpo_group_scope must be 'batch', 'scene' or 'task', got '{args.grpo_group_scope}'"
+        assert args.grpo_std_scope in ("group", "global", "none"), \
+            f"grpo_std_scope must be 'group', 'global' or 'none', got '{args.grpo_std_scope}'"
         if args.reset_mode == "none" and not args.reset_unsuitable:
             # user opts in to non-episodic without HSR
             # (object respawn). The original constraint was that under
@@ -863,15 +1040,30 @@ class CronosRunner:
         self._pending_rollout_rows = []
 
     def _run_ppo_update(self, ppo_log_path):
-        """Runs one PPO update on the current buffer, then resets it."""
-        self.buffer.compute_gae()
+        """Runs one policy update on the current buffer, then resets it.
+
+        Name kept as `_run_ppo_update` under GRPO too: `tools/bench_rollout.py`
+        monkey-patches this method by name to time the update phase.
+        """
+        # The only algorithm-dependent step: how `returns` / `advantages` are
+        # filled. Everything downstream (row flush, minibatch generator,
+        # train_epoch contract, result aggregation) is shared.
+        if self.args.alg_name == "grpo":
+            self.buffer.compute_grpo_returns(
+                group_ids=self._grpo_group_ids(self.buffer.num_env),
+                fix=self.args.alg_grpo_fix,
+                std_scope=self.args.grpo_std_scope,
+            )
+        else:
+            self.buffer.compute_gae()
         # Drain the rollout rows for the segments this update covers while the
-        # GAE arrays are still live (buffer.reset() below invalidates them).
+        # returns/advantages arrays are still live (buffer.reset() invalidates
+        # them below).
         self._flush_rollout_rows()
         self.policy.prep_training()
         train_results = []
         for _ in range(self.args.alg_ppo_epoch):
-            train_results.extend(self.ppo.train_epoch(self.buffer, log_path=ppo_log_path))
+            train_results.extend(self.trainer.train_epoch(self.buffer, log_path=ppo_log_path))
         self.buffer.reset()
         self.policy.prep_rollout()
         return train_results

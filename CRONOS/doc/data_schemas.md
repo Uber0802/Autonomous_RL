@@ -73,6 +73,24 @@ They answer different questions and disagree by construction:
   value). Pairs with `value_mean`, `advantage_mean`, and the
   `value_explained_variance` PPO scalar.
 
+### Under `--alg-name grpo` these three columns change meaning
+
+GRPO has no critic, so the same columns carry different quantities. The header
+does not change — check `run_config.json`'s `alg_name` before comparing runs.
+
+| Column | under PPO | under GRPO |
+|---|---|---|
+| `return_gae` | GAE return (`advantage + value`) | group-normalized, **undiscounted** reward-to-go — `buffer_gamma` / `buffer_lambda` are unused |
+| `advantage_mean` | GAE advantage, normalized over the whole update | identical to `return_gae` (GRPO has no baseline) |
+| `value_mean` | the critic's prediction | still the value head's output, but **untrained** — no gradient reaches it, so this is a frozen readout, not a critic |
+
+`reward_sum` and `return_discounted` are computed in the rollout loop and are
+unaffected by the algorithm choice, so they stay comparable across PPO and GRPO
+runs. `value_explained_variance` is absent from GRPO's wandb payload entirely;
+`grpo_adv_zero_frac` appears instead — the fraction of minibatch samples whose
+advantage is exactly zero, i.e. how often a group's rewards came out all
+identical and contributed no gradient. See [`grpo_autorl.md`](grpo_autorl.md).
+
 ### Timing of the GAE columns
 
 `success` and the reward sums are known at the segment boundary; `return_gae`,

@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from mani_skill.utils.visualization.misc import images_to_video
 
+from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler, build_eval_sequences
@@ -79,7 +80,7 @@ class EvalArgs:
     wandb: bool = False
     wandb_dir: str = ""
     record_video: bool = True
-    log_file: str = "eval.log"
+    log_file: str = "eval.log"              # tee of stdout (in the wandb files/ dir, NOT glob/)
     eval_report: str = "eval_report.txt"
 
     # --- Inference ---
@@ -109,11 +110,16 @@ class EvalRunner:
             config=args.__dict__,
             mode="online" if args.wandb else "offline",
         )
-        if args.wandb_dir:
-            wandb_kwargs["dir"] = args.wandb_dir
+        # Create + validate BEFORE wandb.init — see run_paths.py. Without this a
+        # relative/absent --wandb-dir sends the whole eval to the system temp dir.
+        wandb_root = prepare_wandb_dir(args.wandb_dir)
+        if wandb_root:
+            wandb_kwargs["dir"] = wandb_root
         run = wandb.init(**wandb_kwargs)
+        verify_run_dir(run.dir, wandb_root)
         wandb.define_metric("total_steps")
         wandb.define_metric("eval_*", step_metric="total_steps")
+        # `glob/` is a sibling of `files/` and is NOT synced to wandb.
         self.glob_dir = Path(run.dir).parent / "glob"
         self.glob_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir = Path(run.dir)

@@ -139,6 +139,104 @@ class CronosReplayBuffer:
         adv = self.returns[:, :self.num_env] - self.value_preds[:-1, :self.num_env]
         self.advantages[:, :self.num_env] = (adv - adv.mean()) / (adv.std() + 1e-5)
 
+    def compute_grpo_returns(self, group_ids=None, fix=True, std_scope="group"):
+        """GRPO returns/advantages — the critic-free counterpart of `compute_gae`.
+
+        Port of AutoRL `SeparatedReplayBuffer.compute_returns_grpo`
+        (`AutoRL/SimplerEnv/simpler_env/utils/replay_buffer.py:107-122`), with
+        the grouping and the std term made explicit instead of hard-wired.
+
+        The normalization is **step-level**, not trajectory-level: individual
+        `r_t` entries are centred/scaled, then accumulated into an *undiscounted*
+        reward-to-go. So `buffer_gamma` and `buffer_lambda` are unused here, and
+        the advantage varies along a trajectory. This matches AutoRL exactly.
+
+        Args:
+            group_ids: per-slot group id, length `num_env` (the filled slot
+                count), or None for one global group. Slot `k` is segment
+                `k // num_envs`, env `k % num_envs`, so the caller decides
+                whether "same group" means same task, same scene (YAML group),
+                or the whole batch — see `CronosRunner._grpo_group_ids`. None
+                reproduces AutoRL, which does no grouping.
+            fix: AutoRL's `alg_grpo_fix`. True → compute the statistics from the
+                **non-zero** rewards only and leave the zeros untouched. The
+                shaped reward is a potential *difference* (`envs/reward.py`), so
+                most steps are exactly 0; including them would drag the mean to
+                ~0 and inflate the std by the sparsity ratio rather than by
+                anything about the policy.
+            std_scope: what to divide the centred rewards by.
+                ``"group"``  — that group's own std (AutoRL / textbook GRPO).
+                ``"global"`` — the std over the whole update, so groups are
+                               centred independently but weighted equally.
+                ``"none"``   — no division (centring only).
+                See `doc/grpo_autorl.md` for the trade-off; the short version is
+                that per-group std doubles as a per-group *weight*, which is
+                harmless when the group is the whole batch and distorting when
+                the group is a handful of envs.
+
+        Writes `returns` and `advantages` in place over `[:, :num_env]`; shapes
+        are unchanged, so `feed_forward_generator` needs no changes.
+        """
+        if std_scope not in ("group", "global", "none"):
+            raise ValueError(
+                f"std_scope must be 'group', 'global' or 'none', got {std_scope!r}")
+
+        n = self.num_env
+        if n == 0:
+            return
+
+        rewards = np.asarray(self.rewards[:, :n])          # (ep_len, n, 1)
+        norm = rewards.copy()
+
+        # Entries that participate in the statistics AND get rescaled.
+        stat_mask = (rewards != 0) if fix else np.ones_like(rewards, dtype=bool)
+
+        # Global scale, used by std_scope="global". Computed over the same
+        # entries the per-group pass will touch, so the two agree on what counts.
+        all_vals = rewards[stat_mask]
+        global_std = all_vals.std() if all_vals.size else np.float32(0.0)
+
+        if group_ids is None:
+            col_sets = [np.arange(n)]
+        else:
+            gid = np.asarray(group_ids)[:n]
+            if gid.shape[0] != n:
+                raise ValueError(
+                    f"group_ids has {gid.shape[0]} entries but the buffer holds "
+                    f"{n} slots")
+            col_sets = [np.nonzero(gid == g)[0] for g in np.unique(gid)]
+
+        for cols in col_sets:
+            block = norm[:, cols]                          # fancy index → copy
+            mask = stat_mask[:, cols]
+            vals = rewards[:, cols][mask]
+            # A group whose rewards are all exactly zero has nothing to compare.
+            # Leave it at zero (no gradient) rather than dividing by an empty
+            # mean/std, which is a nan and a RuntimeWarning. AutoRL only ever
+            # takes the whole batch so it never hits this; per-task groups do,
+            # routinely, early in training.
+            if vals.size == 0:
+                continue
+            # In-place, in this order, to stay bit-identical to AutoRL's
+            # `rn[rn != 0] -= mean` / `/= std` on a float32 array.
+            sub = block[mask]
+            sub -= vals.mean()
+            if std_scope == "group":
+                sub /= (vals.std() + 1e-5)
+            elif std_scope == "global":
+                sub /= (global_std + 1e-5)
+            block[mask] = sub
+            norm[:, cols] = block
+
+        # Undiscounted, mask-terminated reward-to-go (AutoRL: no gamma).
+        acc = 0
+        for step in reversed(range(self.ep_len)):
+            acc = norm[step] + self.masks[step + 1, :n] * acc
+            self.returns[step, :n] = acc
+
+        # GRPO has no baseline: the advantage IS the normalized return.
+        self.advantages[:, :n] = self.returns[:, :n]
+
     def feed_forward_generator(self):
         """Yields minibatches for PPO training with optimized indexing."""
         batch_size = self.ep_len * self.num_env
