@@ -52,12 +52,40 @@ at different points in the loop.
 
 ### `direction` is load-bearing under LSR / noep
 
-With `--enable-backward`, segments alternate between the forward goal ("put X on
-Y") and the backward goal ("put X on table"). The env's `success` predicate is
-**always the forward one**. Without this column a backward segment's 0 is
-indistinguishable from a failed forward segment, and the aggregate success curve
-reads as a ~50% collapse that is purely an artifact of the alternation. Filter
-on `direction == 'forward'` for a comparable success curve.
+With `--enable-backward`, segments alternate between the forward goal and a
+**reset goal**. Three values, because `success` means something different in
+each:
+
+| `direction` | Goal | What `success` measures |
+|---|---|---|
+| `forward` | the scheduler's `put X on Y` | the task was completed |
+| `backward` | `put X on table` | **0 by construction** — the env still scores the forward pair |
+| `backward_recep` | `put X on <another receptacle>` | the object reached **that** receptacle |
+
+`backward_recep` only appears under `--backward-goal recep|mixed` (the
+perturbation option). It works by swapping the env's target receptacle, so the
+env's own `success` predicate and its language instruction both follow — which
+is why it is scored by the forward reward branch rather than by `src_on_table`.
+The receptacle is always chosen different from the forward task's; an env with
+only one receptacle falls back to `backward`.
+
+Filter `direction == 'forward'` for a success curve comparable to eval. Without
+this column a reset segment's 0 is indistinguishable from a failed forward
+segment, and the aggregate reads as a ~50% collapse that is purely an artifact
+of the alternation.
+
+Pre-perturbation runs only ever emit `forward` / `backward`, and those two
+labels are unchanged, so old and new CSVs stay directly comparable.
+
+### wandb per-task scalars are bucketed by direction
+
+Forward segments populate `rollout/<task>/{success, consecutive_grasp,
+is_src_obj_grasped}`; reset segments populate `rollout_reset/<task>/...`
+instead. Mixing them corrupts the key in both directions — a to-table segment
+contributes a structural 0 to the forward pair, and a to-receptacle segment
+contributes a genuine placement against a task the forward policy was never
+asked to perform. **This changes `rollout/<task>/*` values for existing LSR
+runs**: they previously included the backward segments' zeros.
 
 ### The three value columns
 

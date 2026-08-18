@@ -97,6 +97,21 @@ class Args:
     record_end_of_segment_xyz: bool = False
     enable_backward: bool = False
     backward_interval: int = 1
+    # Perturbation (arXiv:2004.12570 §4.1), implemented through the LSR reset
+    # goal rather than through a separate exploration controller. A reset policy
+    # that always drives the object back to the SAME canonical state keeps the
+    # forward policy's start-state distribution narrow, which is precisely the
+    # failure the paper identifies. Letting the reset segment sometimes place
+    # the object on a DIFFERENT receptacle widens that distribution using only
+    # tasks that already exist in the pool.
+    #   "table" — always "put X on table" (historical LSR; default, and the
+    #             path is byte-identical to before this option existed)
+    #   "recep" — always another receptacle, chosen != the forward task's
+    #   "mixed" — per-env, per-segment draw between the two
+    # Requires --enable-backward; an env with only one receptacle falls back to
+    # the table goal.
+    backward_goal: str = "table"       # table | recep | mixed
+    backward_recep_prob: float = 0.5   # P(receptacle variant) under "mixed"
     num_groups: int = 0             # 0 = dynamically scale with available tasks
 
     # --- Algorithm ---
@@ -193,6 +208,12 @@ class Args:
     ppo_log: str = "ppo_log.txt"            # per-minibatch PPO progress (in glob_dir)
     eval_report: str = "eval_report.txt"    # per-eval success rate summary (in glob_dir)
     log_file: str = "run.log"               # tee of stdout for the whole run (in the wandb files/ dir, NOT glob/); empty string disables
+
+# `RewardShaper` goal mode -> the `direction` value in rollout_success.csv.
+# "backward" (not "backward_table") keeps every pre-perturbation run's CSV
+# byte-identical, so old and new files stay directly comparable.
+_DIRECTION_LABEL = {0: "forward", 1: "backward", 2: "backward_recep"}
+
 
 class CronosRunner:
     """Coordinates the CRONOS training workflow."""
@@ -437,6 +458,12 @@ class CronosRunner:
 
         # GRPO grouping: per-env sub-block id, fixed for the whole run.
         self._build_grpo_env_blocks()
+
+        # Dedicated RNG for the backward-goal draw, so turning perturbation on
+        # does not shift the global `random` stream that the scheduler
+        # (`pure_random` / `sequence_random`) and the env's pose sampling draw
+        # from. Seeded off args.seed, so the draw is reproducible.
+        self._backward_rng = random.Random(args.seed + 977)
 
         # buffer width comes from the policy, NOT from
         # `get_action_dim` (= continuous DoF = 7 for both backends, drives the
@@ -747,6 +774,17 @@ class CronosRunner:
             f"grpo_group_scope must be 'batch', 'scene' or 'task', got '{args.grpo_group_scope}'"
         assert args.grpo_std_scope in ("group", "global", "none"), \
             f"grpo_std_scope must be 'group', 'global' or 'none', got '{args.grpo_std_scope}'"
+        assert args.backward_goal in ("table", "recep", "mixed"), \
+            f"backward_goal must be 'table', 'recep' or 'mixed', got '{args.backward_goal}'"
+        assert 0.0 <= args.backward_recep_prob <= 1.0, \
+            f"backward_recep_prob must be in [0, 1], got {args.backward_recep_prob}"
+        if args.backward_goal != "table" and not args.enable_backward:
+            raise ValueError(
+                f"--backward-goal {args.backward_goal} perturbs the LSR reset goal, "
+                f"but --enable-backward is off so no reset segment ever runs. "
+                f"Add --enable-backward (or use a reset mode that includes LSR: "
+                f"LSR, LSR+HSR, noep)."
+            )
         if args.reset_mode == "none" and not args.reset_unsuitable:
             # user opts in to non-episodic without HSR
             # (object respawn). The original constraint was that under
@@ -1114,7 +1152,7 @@ class CronosRunner:
         # per-env values per metric. Logged as `rollout/<task>/{success,
         # consecutive_grasp, is_src_obj_grasped}` by `train()` after this
         # rollout returns.
-        self._rollout_per_task = {}        # {(obj, recep): {metric: [floats]}}
+        self._rollout_per_task = {}        # {(prefix, obj, recep): {metric: [floats]}}
 
         # Per-env, per-segment rollout record (rollout_success.csv). Same
         # granularity as eval's per-trial rows, taken at rollout time.
@@ -1184,11 +1222,24 @@ class CronosRunner:
                 # it AFTER `scheduler.get_next_tasks()` advances mislabels
                 # every segment's metrics by one task.
                 ep_info = info.get("episode", {}) if isinstance(info, dict) else {}
+                # Per-env goal mode for this just-completed segment. Read once
+                # here so the CSV `direction` column and the per-task metric
+                # bucketing below agree on what each env was actually doing.
+                seg_modes = self.env.reward_shaper.mode.reshape(-1).tolist()
                 if ep_info:
                     for env_i in range(self.args.num_envs):
                         if env_i >= len(objs) or env_i >= len(receps):
                             continue
-                        key = (objs[env_i], receps[env_i])
+                        # Reset segments are bucketed separately. The env's
+                        # `success` predicate is the forward one for the pair
+                        # currently targeted, so mixing a reset segment into
+                        # `rollout/<task>/success` corrupts it in both
+                        # directions: a to-table segment always scores 0 for the
+                        # forward pair, and a to-receptacle segment scores a
+                        # genuine placement against a task the forward policy
+                        # was never asked to do.
+                        prefix = "rollout" if seg_modes[env_i] == 0 else "rollout_reset"
+                        key = (prefix, objs[env_i], receps[env_i])
                         slot = self._rollout_per_task.setdefault(
                             key, {"success": [], "consecutive_grasp": [], "is_src_obj_grasped": []}
                         )
@@ -1203,7 +1254,6 @@ class CronosRunner:
                 # identical definition eval reports. `return_gae` is left unset;
                 # `_run_ppo_update` backfills it once GAE runs for this segment.
                 seg_total_steps = episode_base_steps + (step_idx + 1) * self.args.num_envs
-                backward_mask = self.env.reward_shaper.backward.reshape(-1).tolist()
                 r_sum = seg_reward_sum.tolist()
                 d_ret = seg_disc_return.tolist()
 
@@ -1228,12 +1278,21 @@ class CronosRunner:
                         "task": f"put {obj_i} on {rec_i}",
                         "obj": obj_i,
                         "recep": rec_i,
-                        # In LSR / noep the policy alternates forward and backward
-                        # goals, but `success` always reflects the FORWARD
-                        # predicate. Without this column a backward segment's 0
-                        # is indistinguishable from a failed forward one.
-                        "direction": "backward" if (env_i < len(backward_mask)
-                                                    and backward_mask[env_i]) else "forward",
+                        # In LSR / noep the policy alternates forward and reset
+                        # goals. `success` is evaluated against whatever pair the
+                        # env is currently targeting, which differs per goal:
+                        #   forward         — the scheduler's pair; success means
+                        #                     the task was completed.
+                        #   backward        — "put X on table"; the env still
+                        #                     scores the FORWARD pair, so this is
+                        #                     0 by construction.
+                        #   backward_recep  — the pair was swapped to another
+                        #                     receptacle, so success means the
+                        #                     object reached THAT receptacle.
+                        # Filter `direction == 'forward'` for a task-success
+                        # curve comparable to eval.
+                        "direction": _DIRECTION_LABEL.get(
+                            seg_modes[env_i] if env_i < len(seg_modes) else 0, "forward"),
                         "success": _metric("success", env_i),
                         "consecutive_grasp": _metric("consecutive_grasp", env_i),
                         "is_src_obj_grasped": _metric("is_src_obj_grasped", env_i),
@@ -1279,7 +1338,16 @@ class CronosRunner:
 
                 # Task Switching (AutoRL Continual Learning Logic)
                 if self.args.enable_backward and forward_count >= self.args.backward_interval:
-                    self.env.set_backward()
+                    # Perturbation: the reset goal is chosen per env — "put X on
+                    # table", or "put X on <a different receptacle>". The latter
+                    # re-targets the env, so `receps` is rebound to what
+                    # actually ran and the CSV/metric attribution stays honest.
+                    objs, receps = self.env.set_backward_goals(
+                        objs, receps,
+                        goal=self.args.backward_goal,
+                        recep_prob=self.args.backward_recep_prob,
+                        rng=self._backward_rng,
+                    )
                     forward_count = 0
                 else:
                     self.scheduler.update_index()
@@ -1467,11 +1535,14 @@ class CronosRunner:
                 # consecutive_grasp, is_src_obj_grasped}` — slashes in the
                 # task pair are replaced with `_` to keep wandb's panel tree
                 # readable.
-                for (obj, recep), metrics in (self._rollout_per_task or {}).items():
+                # Forward segments keep the historical `rollout/` namespace
+                # unchanged. LSR reset segments go to `rollout_reset/` instead of
+                # contaminating it — see the bucketing comment in `run_rollout`.
+                for (prefix, obj, recep), metrics in (self._rollout_per_task or {}).items():
                     task_slug = f"{obj}_{recep}".replace(" ", "_").replace("/", "_")
                     for metric_name, vals in metrics.items():
                         if vals:
-                            log_payload[f"rollout/{task_slug}/{metric_name}"] = (
+                            log_payload[f"{prefix}/{task_slug}/{metric_name}"] = (
                                 float(sum(vals) / len(vals))
                             )
                 wandb.log(log_payload, step=total_steps)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # train.sh - CRONOS training: 3 horizons × 3 segments × 5 reset modes × 2 VLA policies.
 #
-# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo]
+# Usage: bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [perturb]
 #
 #   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c | t2560a|t2560b|t2560c
 #   seed:   random seed (default: 0)
@@ -18,6 +18,10 @@
 #             grpo-task   critic-free, one group per (segment, fan-out sub-block)
 #           Fine-tune the std term with GRPO_STD_SCOPE=group|global|none; see the
 #           algorithm block below for the per-mode defaults and why they differ.
+#   perturb: off|recep|mixed (default: off) — needs reset ∈ {LSR, LSR+HSR, noep}
+#             off    LSR reset goal is always "put X on table" (unchanged)
+#             recep  reset goal is another receptacle, != the forward task's
+#             mixed  per-env draw between the two; ratio via PERTURB_RECEP_PROB
 #
 # Reset modes:
 #   normal   — standard episodic training (hard reset every episode)
@@ -99,6 +103,7 @@ CONFIG=${5:-configs/one_group_seq_random_2x2.yaml}
 VLA=${6:-openvla}
 EER=${7:-on}
 ALGO=${8:-ppo}
+PERTURB=${9:-off}
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA}
@@ -245,6 +250,49 @@ case $ALGO in
   *) echo "Unknown algo: $ALGO"; echo "Valid: ppo|grpo|grpo-scene|grpo-task"; exit 1 ;;
 esac
 
+# --- Perturbation (arXiv:2004.12570 §4.1), via the LSR reset goal ---
+# A reset policy that always drives the object back to the SAME canonical state
+# keeps the forward policy's start-state distribution narrow — the exact failure
+# the paper identifies. Widening it here means letting the reset segment
+# sometimes place the object on a DIFFERENT receptacle instead of on the table.
+# Both goals use tasks that already exist in the pool, so there is no new task
+# string, no new reward term and no env change: swapping the target receptacle
+# makes the env's own `success` predicate and language instruction follow.
+#
+#   off    always "put X on table" (historical LSR). Default; emits no flag and
+#          no tag, and does not even draw from the RNG, so the command line and
+#          the numerics are identical to before this option existed.
+#   recep  always another receptacle, chosen != the forward task's
+#   mixed  per-env, per-reset-segment draw between the two
+#
+# Requires LSR (--enable-backward), i.e. reset ∈ {LSR, LSR+HSR, noep}; main.py
+# errors out otherwise. Envs with only one receptacle fall back to the table
+# goal. Tune the mixed ratio with PERTURB_RECEP_PROB (default 0.5).
+case $PERTURB in
+  off)
+    PTB_TAG=""
+    PTB_ARGS=""
+    ;;
+  recep)
+    PTB_TAG="-PTBrecep"
+    PTB_ARGS="--backward-goal recep"
+    ;;
+  mixed)
+    _p="${PERTURB_RECEP_PROB:-0.5}"
+    PTB_TAG="-PTBmixed${_p}"
+    PTB_ARGS="--backward-goal mixed --backward-recep-prob $_p"
+    ;;
+  *) echo "Unknown perturb: $PERTURB"; echo "Valid: off|recep|mixed"; exit 1 ;;
+esac
+
+if [ "$PERTURB" != "off" ]; then
+  case $RESET in
+    LSR|LSR+HSR|noep) ;;
+    *) echo "perturb=$PERTURB needs LSR (the reset segment it perturbs)."
+       echo "Use reset = LSR | LSR+HSR | noep, got '$RESET'."; exit 1 ;;
+  esac
+fi
+
 if [ -n "$_std_default" ]; then
   _std="${GRPO_STD_SCOPE:-$_std_default}"
   case $_std in
@@ -257,7 +305,7 @@ fi
 
 # Derive config name from filename (e.g. configs/one_group_sequential_3x3.yaml → one_group_sequential_3x3)
 CONFIG_NAME=$(basename "$CONFIG" .yaml)
-RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}${EER_TAG}${ALGO_TAG}-seed${SEED}"
+RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}${EER_TAG}${ALGO_TAG}${PTB_TAG}-seed${SEED}"
 CKPT="${CKPT:-}"
 
 # --- Run output directory ---
@@ -335,7 +383,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
+COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS $PTB_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────

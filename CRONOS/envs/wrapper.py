@@ -310,6 +310,103 @@ class CronosWrapper:
         self.reward_shaper.set_backward_mask(torch.ones(self.num_envs, dtype=torch.bool, device=self.device))
         self.reward_shaper.reward_old.zero_()
 
+    def get_available_receptacles(self):
+        """Per-env list of receptacle display names this env actually has.
+
+        Reads the env's own `_all_plate_ids` (one entry per receptacle slot,
+        `-1` for a slot hidden because this env's YAML group declares fewer
+        receptacles than the batch-wide M), so groups with different receptacle
+        sets each get their own list. Names are the display names
+        `set_current_task` matches on, not the model_db keys.
+        """
+        unwrapped = self.env.unwrapped
+        n_slots = getattr(unwrapped, "NUM_RECEPTACLES", 0)
+        out = [[] for _ in range(self.num_envs)]
+        for slot in range(n_slots):
+            ids = unwrapped._all_plate_ids[slot]
+            for env_i in range(self.num_envs):
+                pid = int(ids[env_i].item())
+                if pid < 0:
+                    continue  # hidden slot
+                name = unwrapped.model_db_plate[unwrapped.plate_names[pid]]["name"]
+                if name not in out[env_i]:
+                    out[env_i].append(name)
+        return out
+
+    def set_backward_goals(self, objs, receps, goal="table", recep_prob=0.5, rng=None):
+        """Open a backward (LSR reset) segment, choosing a goal per env.
+
+        This is the perturbation mechanism: instead of every reset segment
+        driving the object to the single canonical "on the table" state, a
+        fraction of envs are instead asked to place it on a **different
+        receptacle** than the forward task used. Both goals are reachable with
+        the existing task vocabulary — the receptacle variant is literally an
+        existing `put <obj> on <recep>` pair — so no new task string, no new
+        reward term, and no env change are involved.
+
+        How the receptacle variant works: swapping the env's target via
+        `set_current_task` makes the env's own `success` predicate mean "object
+        is on the other receptacle" and makes `get_language_instruction` emit
+        the matching sentence. So `RewardShaper` scores it with the FORWARD
+        branch (`success & is_src_obj_grasped`), not the `src_on_table` branch.
+
+        Args:
+            objs / receps: the currently active per-env task pair.
+            goal: "table" (historical LSR behaviour), "recep" (always the other
+                receptacle), or "mixed" (per-env draw with `recep_prob`).
+            recep_prob: probability of the receptacle variant under "mixed".
+            rng: `random.Random` used for the draw. A dedicated instance, so
+                enabling this does not perturb the global RNG stream that the
+                scheduler and env pose sampling consume.
+
+        Returns:
+            (objs, receps) with the swapped receptacles substituted, so the
+            caller's rollout CSV records the task that actually ran.
+        """
+        from .reward import MODE_BACK_TABLE, MODE_BACK_RECEP
+
+        modes = torch.full((self.num_envs,), MODE_BACK_TABLE,
+                           dtype=torch.long, device=self.device)
+
+        if goal == "table":
+            # Byte-identical to the pre-perturbation path: no draw is made, so
+            # the RNG stream is untouched and existing runs reproduce exactly.
+            self.reward_shaper.set_mode(modes)
+            self.reward_shaper.reward_old.zero_()
+            return objs, receps
+
+        if rng is None:
+            import random as _random
+            rng = _random
+        available = self.get_available_receptacles()
+        new_receps = list(receps)
+
+        for env_i in range(self.num_envs):
+            if goal == "mixed" and rng.random() >= recep_prob:
+                continue                      # keep the table goal for this env
+            current = receps[env_i] if env_i < len(receps) else None
+            # "different from the original task" — the whole point of the
+            # variant. An env with only one receptacle has no alternative and
+            # falls back to the table goal rather than re-issuing the forward
+            # task as its own reset.
+            candidates = [r for r in available[env_i] if r != current]
+            if not candidates:
+                continue
+            new_receps[env_i] = rng.choice(candidates)
+            modes[env_i] = MODE_BACK_RECEP
+
+        self.reward_shaper.set_mode(modes)
+        if bool((modes == MODE_BACK_RECEP).any().item()):
+            # Re-targets the env for the swapped envs and leaves the others on
+            # their existing pair. Also zeroes reward_old, which every goal
+            # switch needs — the reward is a potential DIFFERENCE, so a stale
+            # `reward_old` emits a spurious spike on the first step of the new
+            # goal.
+            self.set_task(objs, new_receps)
+        else:
+            self.reward_shaper.reward_old.zero_()
+        return objs, new_receps
+
     def reset_robot(self):
         """Performs a partial reset (robot only) for non-episodic transitions."""
         self.reset_strategy.reset_robot()

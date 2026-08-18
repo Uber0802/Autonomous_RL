@@ -143,9 +143,10 @@ How `setup.sh` picks the install: the 1st positional arg picks the LM stack + wh
 
 ### Training
 ```bash
-# 8 positional args
-bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo]
-#                      │      │      │      │       │        │     │     └─ ppo (default) | grpo | grpo-task
+# 9 positional args
+bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [perturb]
+#                      │      │      │      │       │        │     │     │      └─ off (default) | recep | mixed
+#                      │      │      │      │       │        │     │     └─ ppo (default) | grpo | grpo-scene | grpo-task
 #                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
 #                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
@@ -181,6 +182,13 @@ bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo
 # GRPO grouped per task (segment × fan-out sub-block — narrowest, most apples-to-apples)
 bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
 
+# Perturbation: the LSR reset goal is sometimes "put X on the OTHER receptacle"
+# instead of always "put X on table" — widens the forward policy's start states
+bash scripts/train.sh t320a 0 3 noep four_group_sequential_2x2 openvla on ppo mixed
+
+# Perturbation composes with GRPO (orthogonal dimensions)
+bash scripts/train.sh t320a 0 3 noep four_group_sequential_2x2 openvla on grpo-task recep
+
 # Any GRPO mode with the std term overridden (tagged, so it lands in its own dir)
 GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
 ```
@@ -196,6 +204,24 @@ GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential
 | `HSR` | `--reset-unsuitable` | respawn fallen / out-of-workspace actors at every task boundary |
 | `LSR+HSR` | LSR + HSR | backward learning + soft respawn |
 | `noep` | LSR+HSR + `--reset-mode none` | non-episodic continuity (no inter-episode hard reset) |
+
+**Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR:
+
+| perturb | CLI flags added | LSR reset goal |
+|---|---|---|
+| `off` (default) | (nothing) | always `put X on table` |
+| `recep` | `--backward-goal recep` | always another receptacle, chosen != the forward task's |
+| `mixed` | `--backward-goal mixed --backward-recep-prob P` | per-env draw between the two; `P` via `PERTURB_RECEP_PROB` |
+
+Both goals reuse tasks that already exist in the pool — the receptacle variant is
+literally an existing `put <obj> on <recep>` pair — so there is no new task string
+and no new reward term. Swapping the env's target receptacle makes its own
+`success` predicate and language instruction follow, which is why that variant is
+scored by the *forward* reward branch rather than by `src_on_table`. Motivation:
+a reset policy that always returns the object to one canonical state keeps the
+forward policy's start-state distribution narrow (arXiv:2004.12570 §4.1).
+`off` emits no flag, no tag, and does not draw from the RNG, so it is numerically
+identical to before the option existed.
 
 **EER (End-Effector Reset)** — the 7th positional arg, orthogonal to all five reset modes above:
 
@@ -238,6 +264,8 @@ Key training flags:
 | `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
 | `--reset-mode` | `per_episode` | `per_episode` \| `none` (non-episodic) |
 | `--reset-robot` / `--no-reset-robot` | on | EER — return the gripper to its initial pose at every segment boundary |
+| `--backward-goal` | `table` | LSR reset goal (perturbation). `table` = "put X on table" (unchanged) \| `recep` = another receptacle, != the forward task's \| `mixed` = per-env draw. Requires `--enable-backward` |
+| `--backward-recep-prob` | 0.5 | `mixed` only: P(receptacle variant) per env per reset segment |
 | `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
 
 ### Training-time outputs
