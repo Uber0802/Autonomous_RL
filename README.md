@@ -266,6 +266,7 @@ Key training flags:
 | `--reset-robot` / `--no-reset-robot` | on | EER — return the gripper to its initial pose at every segment boundary |
 | `--backward-goal` | `table` | LSR reset goal (perturbation). `table` = "put X on table" (unchanged) \| `recep` = another receptacle, != the forward task's \| `mixed` = per-env draw. Requires `--enable-backward` |
 | `--backward-recep-prob` | 0.5 | `mixed` only: P(receptacle variant) per env per reset segment |
+| `--segment-pose-phase` | `both` | `start` (state each segment begins from, after that boundary's resets) \| `end` (steady state the policy produced, before them) \| `both` |
 | `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
 
 ### Training-time outputs
@@ -374,6 +375,59 @@ python tools/plot_run_trends.py \
 ```
 
 (Auto-renders a sibling `<stem>-per_task.png` per-task breakdown next to `--out`.)
+
+#### Per-segment training curves — `tools/plot_rollout_success.py`
+
+Per-80-step success rate straight from the run's `rollout_success.csv`. That file
+holds one row per (episode, segment, env) written at every `task_len` boundary,
+so "per-80" is its native granularity — each point is the mean over one
+segment's `num_envs` rows, with no resampling. Needs no wandb access.
+
+```bash
+python tools/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--direction` | `forward` | `forward` \| `backward` \| `backward_recep` \| `all`. Reset segments score `success` against a different goal, so mixing them in reads as a ~50% collapse that is pure alternation artifact — see [`doc/data_schemas.md`](CRONOS/doc/data_schemas.md). `all` draws one series per direction. |
+| `--by` | `none` | Add a second panel split by `task` \| `group` \| `obj` \| `recep` |
+| `--x-axis` | `total_steps` | `total_steps` \| `segment` \| `episode` |
+| `--smooth` | 5 | Rolling-mean window in segments (1 disables) |
+
+The top panel overlays success, `consecutive_grasp` and `is_src_obj_grasped`;
+the success-vs-grasp gap is the placement-collapse diagnostic. Empty cells (an
+env that did not report at a boundary) are read as NaN and excluded from the
+means rather than as zeros.
+
+#### Per-segment position scatter — `tools/plot_segment_positions.py`
+
+Actor positions from `segment_pose.csv`. Each boundary is recorded twice — once
+**before** its HSR/EER resets (`phase=end`, the steady state the policy produced)
+and once **after** (`phase=start`, the initial state the next segment begins
+from, and after a full `env.reset()` at an episode boundary). `--phase` defaults
+to `start`, which is the distribution the forward policy actually faces.
+
+```bash
+python tools/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
+```
+
+One column per `actor_kind` (`obj` / `recep` / `gripper`); row 1 is an xy scatter
+coloured by episode (so drift over training is visible), row 2 is a `pz`
+histogram with the `low_z = 0.7` detector threshold marked and the fraction below
+it in the panel title — a direct read on how often objects are ending up off the
+table.
+
+| Flag | Description |
+|---|---|
+| `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
+| `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
+| `--segment` / `--episode-range LO:HI` / `--last-episodes N` | Narrow in time |
+| `--forward-only` | Join `rollout_success.csv` on (episode, segment, env) and keep only forward segments — worth using under LSR / noep, where half the segment ends are reset-goal states |
+| `--hexbin` | Density hexbin instead of the episode-coloured scatter |
+| `--workspace=X0,X1,Y0,Y1` | Overlay a rectangle, e.g. `workspace_aabb` bounds being validated. Use the `=` form — the bounds are negative and argparse would read them as a flag |
+
+Hidden slots (a group declaring fewer objects than the batch-wide N) are written
+as NaN by design and are dropped, with the count reported.
 
 #### Cross-run aggregator — `scripts/plot.py`
 
@@ -629,6 +683,8 @@ without modifying AutoRL. Full analysis in
 | Tool | Purpose |
 |---|---|
 | `tools/plot_run_trends.py` | Per-run live 4-panel dashboard (see [Visualization](#visualization)) |
+| `tools/plot_rollout_success.py` | Per-segment (per-80-step) rollout success rate from `rollout_success.csv` |
+| `tools/plot_segment_positions.py` | Per-segment actor position distribution from `segment_pose.csv` |
 | `scripts/plot.py` | Cross-run aggregator over `eval_success.csv` files |
 | `tools/mcnemar_pair.py` | Paired McNemar gate over `eval_per_trial.csv` |
 | `tools/parse_autorl_eval.py` | Rebuild a correct per-trial baseline from an AutoRL run's video filenames (read-only; AutoRL is never modified) |

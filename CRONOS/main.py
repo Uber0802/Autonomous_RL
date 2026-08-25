@@ -90,6 +90,20 @@ class Args:
     # cheap (num_envs x (N+M+1) rows per segment) and is the only source for
     # where objects actually came to rest. Disable with --no-record-segment-pose.
     record_segment_pose: bool = True
+    # Which side of the segment boundary to dump. A boundary is not a single
+    # instant: the end-of-segment state and the start of the next one are
+    # separated by HSR's actor respawn and by EER's `reset_robot()`, whose
+    # `_settle(0.5)` also lets objects drift. At an episode boundary they are
+    # separated by a full `env.reset()`.
+    #   "start" — the state each segment BEGINS from, i.e. after every reset at
+    #             that boundary has fired. This is the initial-state
+    #             distribution the forward policy actually faces, and what
+    #             --backward-goal (perturbation) is meant to widen.
+    #   "end"   — the steady state the policy produced, before any reset. What
+    #             `workspace_aabb` bounds should be anchored from.
+    #   "both"  — both, distinguished by the `phase` column (default; the record
+    #             is cheap and the two answer different questions).
+    segment_pose_phase: str = "both"   # start | end | both
     # Deprecated alias for --record-segment-pose. The old flag wrote
     # end_of_segment_xyz.csv with only the task-selected pair and only xyz;
     # it now enables the superset recorder. Kept so existing launch scripts
@@ -774,6 +788,8 @@ class CronosRunner:
             f"grpo_group_scope must be 'batch', 'scene' or 'task', got '{args.grpo_group_scope}'"
         assert args.grpo_std_scope in ("group", "global", "none"), \
             f"grpo_std_scope must be 'group', 'global' or 'none', got '{args.grpo_std_scope}'"
+        assert args.segment_pose_phase in ("start", "end", "both"), \
+            f"segment_pose_phase must be 'start', 'end' or 'both', got '{args.segment_pose_phase}'"
         assert args.backward_goal in ("table", "recep", "mixed"), \
             f"backward_goal must be 'table', 'recep' or 'mixed', got '{args.backward_goal}'"
         assert 0.0 <= args.backward_recep_prob <= 1.0, \
@@ -1121,6 +1137,13 @@ class CronosRunner:
             obs, instruct, _ = self.env.reset()
         self.buffer.warmup(obs, instruct)
 
+        # Start of segment 1 — recorded here because this is AFTER the episode's
+        # `env.reset()` (or, under reset_mode=none, after inheriting the previous
+        # episode's live state). Recording it before the reset would describe the
+        # previous episode, not the state this one begins from.
+        if self._pose_recording_enabled():
+            self._record_segment_pose(episode, 0, episode_base_steps, phase="start")
+
         # Record video for all envs
         self._video_envs = list(range(self.args.num_envs))
         self.video_frames = {i: [] for i in self._video_envs}
@@ -1314,12 +1337,14 @@ class CronosRunner:
                 if self.args.record_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
 
-                # dump the full pose state (every object + receptacle slot and
-                # the gripper, position + quaternion) BEFORE the HSR/LSR reset
-                # overwrites it, so the coordinates are the steady state the
-                # policy produced rather than a post-respawn placement.
-                if self.args.record_segment_pose or self.args.record_end_of_segment_xyz:
-                    self._record_segment_pose(episode, segment_id, seg_total_steps)
+                # phase="end": the full pose state BEFORE the HSR/LSR reset of
+                # this boundary overwrites it, so the coordinates are the steady
+                # state the policy produced rather than a post-respawn placement.
+                # The matching phase="start" record is taken after the resets,
+                # further down.
+                if self._pose_recording_enabled():
+                    self._record_segment_pose(episode, segment_id, seg_total_steps,
+                                              phase="end")
 
                 segment_id += 1
 
@@ -1376,6 +1401,16 @@ class CronosRunner:
                     # touching the robot, which is the whole point of turning
                     # EER off.
                     self.env.begin_segment()
+
+                # phase="start": the state the NEXT segment begins from — after
+                # HSR's respawn and after EER's `reset_robot()`, whose
+                # `_settle(0.5)` also nudges objects. This is the initial-state
+                # distribution the forward policy actually faces, so it is what
+                # a perturbation (`--backward-goal`) is meant to widen. Guarded
+                # like `buffer.warmup` below: no next segment, no start record.
+                if self._pose_recording_enabled() and step_idx + 1 < self.args.episode_len:
+                    self._record_segment_pose(episode, segment_id, seg_total_steps,
+                                              phase="start")
 
                 # Prepare for NEW segment instructions
                 instruct = self.env.get_language_instructions()
@@ -1673,7 +1708,11 @@ class CronosRunner:
         final_resets = self.hard_reset_count + self.soft_reset_count
         print(f"Training complete: episode={final_episode}, total_steps={final_steps}, total_resets={final_resets}")
 
-    def _record_segment_pose(self, episode, segment_id, total_steps):
+    def _pose_recording_enabled(self):
+        """Whether `segment_pose.csv` is being written at all."""
+        return bool(self.args.record_segment_pose or self.args.record_end_of_segment_xyz)
+
+    def _record_segment_pose(self, episode, segment_id, total_steps, phase="end"):
         """Append the full scene pose state to glob/segment_pose.csv.
 
         One row per (env, actor) at the end of every segment, where "actor"
@@ -1688,9 +1727,22 @@ class CronosRunner:
         record of where everything ended up, so orientation and the untouched
         distractor objects are both needed.
 
-        Called BEFORE the HSR/LSR resets of this boundary, so the coordinates
-        are the steady state the policy actually produced rather than a
-        post-respawn position.
+        `phase` says which side of the boundary this row describes, and is
+        written into the `phase` column. A segment boundary is not one instant:
+
+            phase="end"    called BEFORE this boundary's resets, so the
+                           coordinates are the steady state the policy actually
+                           produced rather than a post-respawn position.
+            phase="start"  called AFTER them — after HSR's respawn and after
+                           EER's `reset_robot()`, whose `_settle(0.5)` also
+                           nudges objects, and at an episode boundary after the
+                           full `env.reset()`. This is the initial-state
+                           distribution the next segment begins from.
+
+        Under `--reset-unsuitable` / `--reset-robot` (the latter on by default in
+        every reset mode) the two differ for the gripper always and for objects
+        often, so they are not interchangeable. `--segment-pose-phase` selects
+        which are written; the default writes both.
 
         `episode` already arrives 1-based from `train()` (`iteration + 1`) while
         `segment_id` is 0-based; only the latter is incremented here. The old
@@ -1701,6 +1753,10 @@ class CronosRunner:
         write NaN, so every segment contributes a fixed row count and the file
         pivots cleanly.
         """
+        want = self.args.segment_pose_phase
+        if want != "both" and phase != want:
+            return
+
         unwrapped = self.env.env.unwrapped
         if not hasattr(unwrapped, "get_all_slot_poses"):
             # The predecessor read `get_obj_pos()`, which lives on the base env,
@@ -1742,7 +1798,7 @@ class CronosRunner:
 
         with open(csv_path, "a") as f:
             if write_hdr:
-                f.write("episode,segment,total_steps,env,actor_kind,slot,"
+                f.write("episode,segment,phase,total_steps,env,actor_kind,slot,"
                         "model_name,task,px,py,pz,qw,qx,qy,qz\n")
             for i in range(self.args.num_envs):
                 # Quote task/model in case they contain commas (they don't today
@@ -1750,7 +1806,7 @@ class CronosRunner:
                 task_str = str(instr[i]).replace('"', '""') if i < len(instr) else ""
                 for kind, slot, names, p, q in rows:
                     model = str(names[i]).replace('"', '""') if i < len(names) else ""
-                    f.write(f"{ep_1},{seg_1},{total_steps},{i},{kind},{slot},"
+                    f.write(f"{ep_1},{seg_1},{phase},{total_steps},{i},{kind},{slot},"
                             f"\"{model}\",\"{task_str}\","
                             f"{p[i,0]:.6f},{p[i,1]:.6f},{p[i,2]:.6f},"
                             f"{q[i,0]:.6f},{q[i,1]:.6f},{q[i,2]:.6f},{q[i,3]:.6f}\n")

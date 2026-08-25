@@ -9,7 +9,7 @@ written with stdlib `csv`, and carry both x-axes (`total_steps` and
 | File | One row per | Written by | Enabled by |
 |---|---|---|---|
 | `rollout_success.csv` | (episode, segment, env) | training rollout | always |
-| `segment_pose.csv` | (episode, segment, env, actor) | training rollout | always (`--no-record-segment-pose` to disable) |
+| `segment_pose.csv` | (episode, segment, phase, env, actor) | training rollout | always (`--no-record-segment-pose` to disable) |
 | `eval_success.csv` | (eval point, group, task) | training eval + `eval_only.py` | always |
 | `eval_per_trial.csv` | (sequence, task, env) | `eval_only.py` | always |
 
@@ -31,7 +31,7 @@ that was actually running.
 | `env_idx` | parallel env index, `[0, num_envs)` |
 | `group` | YAML group this env belongs to |
 | `task` / `obj` / `recep` | the task this env ran during the segment |
-| `direction` | `forward` or `backward` — see below |
+| `direction` | `forward`, `backward` or `backward_recep` — see below |
 | `success` | segment-terminal success, 0/1 |
 | `consecutive_grasp` | latched within this segment, 0/1 |
 | `is_src_obj_grasped` | latched within this segment, 0/1 |
@@ -136,14 +136,15 @@ distinguishable rewards.
 
 ## `segment_pose.csv`
 
-Full pose state of the manipulable scene at the end of every segment. On by
-default; disable with `--no-record-segment-pose`. (`--record-end-of-segment-xyz` is
+Full pose state of the manipulable scene at **both sides** of every segment
+boundary — see `phase` below. On by default; disable with `--no-record-segment-pose`. (`--record-end-of-segment-xyz` is
 kept as a deprecated alias that also enables it.)
 
 | Column | Meaning |
 |---|---|
 | `episode`, `segment` | 1-based, matching `train_videos/rollout_ep<N>_seg<M>/` |
-| `total_steps` | cumulative env-steps at segment end |
+| `phase` | `start` or `end` — which side of the boundary, see below |
+| `total_steps` | cumulative env-steps at the boundary |
 | `env` | parallel env index |
 | `actor_kind` | `obj`, `recep`, or `gripper` |
 | `slot` | logical slot index within its kind (0-based); `0` for gripper |
@@ -176,11 +177,30 @@ indistinguishable from an actor genuinely at the origin and would silently
 become a real data point; `NaN` keeps the row count fixed per segment so the
 file pivots cleanly while excluding itself from means.
 
-### Recorded before the resets
+### `phase` — a boundary is not one instant
 
-The dump runs before HSR/LSR fire at that boundary, so coordinates are the
-steady state the policy produced, not a post-respawn placement. This is what
-makes the file usable for deriving `workspace_aabb` bounds.
+Between the end of segment N and the start of segment N+1 sit that boundary's
+resets. Both sides are recorded, because they answer different questions:
+
+| `phase` | Recorded | Use it for |
+|---|---|---|
+| `end` | **before** HSR's respawn and EER's `reset_robot()` | the steady state the policy produced — what `workspace_aabb` bounds should be anchored from |
+| `start` | **after** them, and after the full `env.reset()` at an episode boundary | the initial-state distribution each segment actually begins from — what `--backward-goal` (perturbation) is meant to widen |
+
+They are not interchangeable. `--reset-robot` is on by default in *every* reset
+mode, so the gripper always differs between the two, and `reset_robot()`'s
+`_settle(0.5)` nudges objects as well. Under `--reset-unsuitable` any respawned
+actor differs outright.
+
+Row counts per episode: `K` segments produce `K` `start` rows and `K` `end` rows
+per (env, actor). The first `start` is taken before the step loop, right after
+the episode's `env.reset()`; the last boundary writes no `start` because there is
+no segment `K+1` — the same guard `buffer.warmup` uses.
+
+`--segment-pose-phase start|end|both` selects which are written (default `both`).
+CSVs written before this column existed contain `end` rows only;
+`tools/plot_segment_positions.py` backfills `phase="end"` when the column is
+absent.
 
 ### Note on the predecessor
 
