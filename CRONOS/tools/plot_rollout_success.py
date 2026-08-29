@@ -24,6 +24,15 @@ alternation. `--direction forward` is therefore the default; `--direction all`
 plots each direction as its own series so the alternation is visible rather than
 silently folded in.
 
+Comparing several experiments
+-----------------------------
+`--config plot_runs.json` plots one curve per group, aggregating that group's
+series into a mean ± spread band. A series may be a **resume chain** — several
+run dirs stitched into one continuous line. See `tools/plot_common.py` for the
+schema.
+
+    python tools/plot_rollout_success.py --config scripts/plot_runs_example.json
+
 Companion to `tools/plot_run_trends.py`, which plots the *eval* points and the
 PPO health scalars. This one is the training-side view and needs no wandb access
 — it reads only the local CSV.
@@ -40,6 +49,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_common import concat_chain, default_colors, load_plot_config  # noqa: E402
 
 # Columns whose empty-string cells mean "this env did not report at this
 # boundary" rather than zero. `training/metrics.py` writes "" for those.
@@ -179,6 +191,68 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
     return out_path
 
 
+def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
+                  smooth: int, metric: str) -> Path:
+    """One curve per config group; mean ± spread across that group's series."""
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    colors = default_colors(len(cfg.groups))
+
+    for gi, group in enumerate(cfg.groups):
+        series = []
+        for chain in group.chains:
+            frames = []
+            for run_dir in chain:
+                df = load_rollout(Path(run_dir) / "rollout_success.csv")
+                if direction != "all":
+                    df = df[df["direction"] == direction]
+                if len(df):
+                    frames.append(segment_means(df, "total_steps"))
+            merged = concat_chain(frames, "total_steps")
+            if len(merged):
+                series.append(merged)
+        if not series:
+            print(f"[warn] group '{group.label}' produced no rows", file=sys.stderr)
+            continue
+
+        # Align the series on their shared x values. Same-config seeds land on
+        # identical `total_steps`, so an inner align is exact; anything a series
+        # is missing simply does not contribute to that x.
+        wide = pd.concat(
+            [s.set_index("total_steps")[metric].rename(k) for k, s in enumerate(series)],
+            axis=1,
+        ).sort_index()
+        if smooth > 1:
+            wide = wide.rolling(smooth, min_periods=1).mean()
+        mean = wide.mean(axis=1)
+        std = wide.std(axis=1)
+        x = mean.index.to_numpy()
+
+        n = wide.shape[1]
+        ax.plot(x, mean.to_numpy(), linewidth=2.0, color=colors[gi],
+                label=f"{group.label}  (n={n})")
+        if n > 1:
+            lo = (mean - std).clip(lower=0.0).to_numpy()
+            hi = (mean + std).clip(upper=1.0).to_numpy()
+            ax.fill_between(x, lo, hi, color=colors[gi], alpha=0.16, linewidth=0)
+        print(f"[group] {group.label:<34s} {n} series, {len(x)} x-points, "
+              f"final {metric}={mean.to_numpy()[-1]:.4f}", file=sys.stderr)
+
+    ax.set_xlabel(_X_LABEL["total_steps"])
+    ax.set_ylabel(metric)
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8)
+    smooth_note = f", MA{smooth}" if smooth > 1 else ""
+    ax.set_title(f"per-segment {metric} (direction={direction}{smooth_note}); "
+                 f"band = ±1 std across series")
+    fig.suptitle(cfg.name, fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def summarize(df: pd.DataFrame, direction: str) -> None:
     sel = df if direction == "all" else df[df["direction"] == direction]
     n_seg = sel[["episode", "segment"]].drop_duplicates().shape[0]
@@ -200,8 +274,13 @@ def main():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--run-dir", help="the run's glob dir (…/wandb/run-<ts>-<id>/glob)")
     src.add_argument("--csv", help="path to rollout_success.csv directly")
+    src.add_argument("--config", help="JSON describing several groups of runs "
+                                      "(see tools/plot_common.py); one curve per group")
     p.add_argument("--out", default=None,
-                   help="output PNG (default: <run-dir>/rollout_success.png)")
+                   help="output PNG (default: <run-dir>/rollout_success.png, or "
+                        "<out_dir>/<name>_rollout_success.png in --config mode)")
+    p.add_argument("--metric", default="success", choices=list(_METRIC_COLS),
+                   help="--config mode: which column to curve")
     p.add_argument("--direction", default="forward",
                    choices=["forward", "backward", "backward_recep", "all"],
                    help="which segments to plot. Default 'forward' — reset segments "
@@ -214,6 +293,14 @@ def main():
     p.add_argument("--smooth", type=int, default=5,
                    help="rolling-mean window in segments (1 disables)")
     args = p.parse_args()
+
+    if args.config:
+        cfg = load_plot_config(args.config)
+        out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_rollout_success.png"
+        render_groups(cfg, out, direction=args.direction, x_key="total_steps",
+                      smooth=args.smooth, metric=args.metric)
+        print(f"[ok] wrote {out}", file=sys.stderr)
+        return
 
     csv_path = Path(args.csv) if args.csv else Path(args.run_dir) / "rollout_success.csv"
     df = load_rollout(csv_path)

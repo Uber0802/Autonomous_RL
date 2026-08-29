@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 import pprint
 
+from version import __version__ as CRONOS_VERSION
 from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
@@ -620,7 +621,7 @@ class CronosRunner:
         record of exactly what the user attempted."""
         cfg = dict(self.args.__dict__)
         cfg["start_time"] = datetime.datetime.utcnow().isoformat() + "Z"
-        cfg["cronos_version"] = "V0.3"
+        cfg["cronos_version"] = CRONOS_VERSION
         try:
             rev = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"],

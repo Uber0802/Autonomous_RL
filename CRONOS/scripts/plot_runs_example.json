@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Example config for tools/plot_rollout_success.py --config and",
+    "tools/plot_segment_positions.py --config. Schema: tools/plot_common.py.",
+    "",
+    "Each entry in `groups` becomes one curve (success plot) or one column",
+    "(position plot). Each entry in a group's `runs` is one series -- typically",
+    "one seed. A `runs` entry that is a LIST is a resume chain: those run dirs",
+    "are stitched into a single continuous series, with the child winning at any",
+    "overlapping total_steps.",
+    "",
+    "Paths point at a run's glob dir: <RUN_OUT_DIR>/wandb/run-<ts>-<id>/glob",
+    "",
+    "Any top-level key starting with '_' is ignored, so this block can stay."
+  ],
+
+  "out_dir": "reports/figures/2026-08-26",
+  "name": "perturb_ablation",
+
+  "groups": [
+    {
+      "label": "noep baseline",
+      "runs": [
+        [
+          "/data/runs/CRONOS-openvla-cfg-T320-noep-seed0/wandb/run-20260801_120000-aaaa1111/glob",
+          "/data/runs/CRONOS-openvla-cfg-T1280-noep-seed0/wandb/run-20260803_090000-bbbb2222/glob"
+        ],
+        "/data/runs/CRONOS-openvla-cfg-T320-noep-seed1/wandb/run-20260801_121500-cccc3333/glob",
+        "/data/runs/CRONOS-openvla-cfg-T320-noep-seed2/wandb/run-20260801_123000-dddd4444/glob"
+      ]
+    },
+    {
+      "label": "noep + PTBmixed",
+      "runs": [
+        "/data/runs/CRONOS-openvla-cfg-T320-noep-PTBmixed0.5-seed0/wandb/run-20260805_100000-eeee5555/glob",
+        "/data/runs/CRONOS-openvla-cfg-T320-noep-PTBmixed0.5-seed1/wandb/run-20260805_101500-ffff6666/glob"
+      ]
+    },
+    {
+      "label": "noep + PTBrecep",
+      "runs": [
+        "/data/runs/CRONOS-openvla-cfg-T320-noep-PTBrecep-seed0/wandb/run-20260806_100000-9999aaaa/glob"
+      ]
+    }
+  ]
+}

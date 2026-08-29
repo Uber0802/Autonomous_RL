@@ -1,9 +1,13 @@
 import itertools
 import numpy as np
-import torch
 from pathlib import Path
-from mani_skill.utils import io_utils
 from transforms3d.euler import euler2quat
+
+# NOTE: `mani_skill.utils.io_utils` is imported inside `TaskSuite.__init__`
+# rather than here, and the unused `torch` import was dropped, so that
+# `POSE_PRESETS` / `generate_pose_configs` can be imported without a GPU stack.
+# `tools/plot_segment_positions.py` relies on that to rebuild the initial-pose
+# table offline; keeping one source of truth beats vendoring a copy there.
 
 # Constants from AutoRL/RL4VLA
 CARROT_DATASET_DIR = Path(__file__).resolve().parents[2] / "ManiSkill" / "mani_skill" / "assets" / "carrot"
@@ -180,6 +184,8 @@ class TaskSuite:
     """Manages object/receptacle databases and initial pose configurations."""
 
     def __init__(self, device="cuda"):
+        from mani_skill.utils import io_utils  # deferred: see the module header
+
         self.device = device
         self.model_db_carrot = io_utils.load_json(CARROT_DATASET_DIR / "more_carrot" / "model_db.json")
         self.model_db_plate = io_utils.load_json(CARROT_DATASET_DIR / "more_plate" / "model_db.json")

@@ -8,9 +8,11 @@ CRONOS is a refactored robotic manipulation training benchmark designed for **no
 - **Per-env rotation eval** — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
 - **Per-group objects/backgrounds** — different groups can have different physical objects and visual overlays in the same training run.
 - **Dual VLA support** — `--policy openvla|spatialvla` switches between OpenVLA-7B and SpatialVLA-4B adapters (7-token vs 3-token action sequences).
-- **Modular Environment**: Decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
-- **Efficient Rollouts**: Multi-task execution with GPU-parallelized ManiSkill environments.
-- **Robust Training**: PPO implementation with memory-mapped replay buffers.
+- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in; grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
+- **Orthogonal reset dimensions** — LSR (learned reset policy), HSR (respawn fallen actors), EER (gripper re-home), and Perturbation (the reset goal is sometimes a *different receptacle* instead of the table), each toggled independently.
+- **Modular Environment** — decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
+- **Efficient Rollouts** — multi-task execution with GPU-parallelized ManiSkill environments, memory-mapped replay buffers.
+- **Analysis-ready outputs** — per-segment CSVs recording both sides of every segment boundary, plus plot tools that read them directly and compare several runs from one config.
 
 ## Installation
 
@@ -389,6 +391,7 @@ python tools/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
 | Flag | Default | Description |
 |---|---|---|
+| `--config` | — | JSON with several groups of runs; one curve per group, mean ± 1 std band across that group's series. See [Comparing runs](#comparing-several-runs) |
 | `--direction` | `forward` | `forward` \| `backward` \| `backward_recep` \| `all`. Reset segments score `success` against a different goal, so mixing them in reads as a ~50% collapse that is pure alternation artifact — see [`doc/data_schemas.md`](CRONOS/doc/data_schemas.md). `all` draws one series per direction. |
 | `--by` | `none` | Add a second panel split by `task` \| `group` \| `obj` \| `recep` |
 | `--x-axis` | `total_steps` | `total_steps` \| `segment` \| `episode` |
@@ -419,6 +422,7 @@ table.
 
 | Flag | Description |
 |---|---|
+| `--config` | JSON with several groups of runs; one column per group. See [Comparing runs](#comparing-several-runs) |
 | `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
 | `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
 | `--segment` / `--episode-range LO:HI` / `--last-episodes N` | Narrow in time |
@@ -428,6 +432,63 @@ table.
 
 Hidden slots (a group declaring fewer objects than the batch-wide N) are written
 as NaN by design and are dropped, with the count reported.
+
+#### Comparing several runs — `--config`
+
+Both per-segment tools take a `--config` JSON describing several experiment
+groups. A group is one curve (success) or one column (positions); each entry in
+its `runs` list is one series, typically a seed. **A `runs` entry that is itself
+a list is a resume chain** — those run dirs are stitched into one continuous
+series, with the child winning at any overlapping `total_steps`.
+
+```bash
+python tools/plot_rollout_success.py   --config scripts/plot_runs_example.json
+python tools/plot_segment_positions.py --config scripts/plot_runs_example.json --actor-kind obj
+```
+
+```json
+{
+  "out_dir": "reports/figures/2026-08-26",
+  "name": "perturb_ablation",
+  "groups": [
+    { "label": "noep baseline",
+      "runs": [ ["/data/runs/T320-seed0/.../glob", "/data/runs/T1280-seed0/.../glob"],
+                "/data/runs/T320-seed1/.../glob" ] },
+    { "label": "noep + PTBmixed",
+      "runs": [ "/data/runs/T320-PTBmixed0.5-seed0/.../glob" ] }
+  ]
+}
+```
+
+Schema and full docs in [`tools/plot_common.py`](CRONOS/tools/plot_common.py);
+a ready-to-edit copy is [`scripts/plot_runs_example.json`](CRONOS/scripts/plot_runs_example.json).
+Top-level keys starting with `_` are ignored, so the example carries its own notes.
+
+##### Runs recorded before the `phase` split
+
+An older run has no `phase=start` rows, and they cannot be recovered — the env
+draws initial poses with `torch.randint` on the global CUDA generator (which the
+VLA's action sampling also consumes) and HSR with `np.random.choice` (which the
+PPO minibatch shuffle also consumes), and neither index is logged. A same-seed
+replay would have to reproduce the whole training bit-for-bit.
+
+The *distribution* those draws came from is recoverable, though: the sampler is
+uniform over `xyz_configs`, a deterministic table `envs/suite.py` builds from the
+(N, M) preset with no randomness. `plot_segment_positions.py` therefore
+reconstructs the start cloud by drawing uniformly from that same table **as many
+times as the run actually reset** — `total_resets` counts exactly one draw per
+per-env respawn, so a T80 run (128 episodes × 64 envs = 8,192 draws) and a T2560
+one (4 × 64 = 256) produce clouds of the right relative density instead of a
+misleading uniform one.
+
+Synthetic points are drawn as black `×` and counted separately in the panel
+title; they are never merged into the recorded cloud. `--no-synth` skips such
+runs instead, `--synth-seed` makes the draw reproducible.
+
+For the shipped 2×2 preset that table is 432 ordered configs = 18 distinct
+four-point geometries × 4! slot permutations, occupying just 16 xy positions
+(a 4×4 corner sub-grid) — the workspace is 0.15 × 0.15 m and the spacing
+constraint is 0.12 m, so the points are pushed into the corners.
 
 #### Cross-run aggregator — `scripts/plot.py`
 
@@ -500,7 +561,7 @@ Configs live in `configs/`. A single YAML file fully describes an experiment.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `cronos_version` | string | — | Config format version (e.g. `V0.4`) |
+| `cronos_version` | string | — | Human annotation only. The loader accepts the key but never reads or validates it, so it is not a compatibility gate. The *code* version is stamped into each run's `run_config.json` from [`version.py`](CRONOS/version.py). |
 | `task_order` | string | `sequential` | `sequential`, `pure_random`, or `sequence_random` |
 | `fan_out` | bool | `true` | All tasks run simultaneously within each group (AutoRL default) |
 
@@ -712,9 +773,10 @@ python tools/bench_rollout.py \
 - `main.py` — Training entry point (train + eval)
 - `eval_only.py` — Standalone eval script (no training)
 - `run_paths.py` — Run output directory resolution, shared by both entry points
+- `version.py` — Single source for the version stamped into every `run_config.json`
 - `configs/` — YAML training configs
 - `configs/eval/` — Per-training eval configs (smaller `num_envs`, `task_order: sequence_random`)
 - `scripts/` — Shell scripts for training and eval
 - `tools/` — Analysis, plotting, benchmarking and AutoRL-interop utilities
-- `doc/` — Design documents: [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs), [`grpo_autorl.md`](CRONOS/doc/grpo_autorl.md) (AutoRL GRPO review + CRONOS's grouping / std choices)
+- `doc/` — Design documents, indexed by [`doc/README.md`](CRONOS/doc/README.md): [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs), [`grpo_autorl.md`](CRONOS/doc/grpo_autorl.md) (AutoRL GRPO review + CRONOS's grouping / std choices)
 
