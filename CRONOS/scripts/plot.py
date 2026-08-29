@@ -10,9 +10,10 @@ Workflow
 --------
 1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
 2. Run: `python scripts/plot.py --config plot_config.json`.
-3. Outputs land under `<out_dir>/`:
-   - `aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
-   - `summary.csv` (final-value mean ± std per group × eval_kind)
+3. Outputs land under `<out_dir>/`, all prefixed `<name>_` so configs can share
+   a directory (`out_dir` empty/absent = the config file's own directory):
+   - `<name>_aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
+   - `<name>_summary.csv` (final-value mean ± std per group × eval_kind)
    - 4 main PNGs: `<name>_<eval_kind>_<x_axis>.png`
    - 2 gap PNGs: `<name>_gap_<eval_kind>.png` (success vs grasp overlaid)
 
@@ -35,6 +36,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from plot_common import resolve_out_dir  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -81,19 +85,53 @@ class PlotConfig:
     )
 
 
+def _runs_to_csv_paths(entries: List) -> List:
+    """Map the shared `runs` key (glob dirs) onto this script's `csv_paths`.
+
+    `runs` is the format `tools/plot_common.py` uses, and it points at a run's
+    `glob/` DIRECTORY rather than at one CSV inside it. A directory is the more
+    useful unit — it holds `eval_success.csv`, `rollout_success.csv` and
+    `segment_pose.csv` — so one config can drive this script and the two
+    per-segment plot tools. Here each run dir simply resolves to its
+    `eval_success.csv`; nesting (a resume chain) is preserved.
+    """
+    out = []
+    for e in entries:
+        if isinstance(e, str):
+            out.append(str(Path(e) / "eval_success.csv"))
+        elif isinstance(e, list):
+            out.append([str(Path(x) / "eval_success.csv") for x in e])
+        else:
+            raise ValueError(
+                f"`runs` entries must be a run-dir string or a list of them "
+                f"(a resume chain), got {type(e).__name__}")
+    return out
+
+
 def load_config(path: str) -> PlotConfig:
     raw = json.loads(Path(path).read_text())
     groups = []
     for g in raw.get("groups", []):
+        # `runs` (glob dirs, shared with the per-segment tools) or the original
+        # `csv_paths` (direct eval_success.csv paths). Both accepted so a single
+        # config file drives every plot tool; `runs` is the preferred spelling.
+        if "runs" in g and "csv_paths" in g:
+            raise ValueError(
+                f"group '{g.get('label')}' sets both `runs` and `csv_paths`; "
+                f"use one (prefer `runs`, which points at the glob dir)")
+        if "runs" in g:
+            csv_paths = _runs_to_csv_paths(g["runs"])
+        else:
+            csv_paths = g["csv_paths"]
         groups.append(GroupSpec(
             label=g["label"],
-            csv_paths=g["csv_paths"],
+            csv_paths=csv_paths,
             color=g.get("color"),
             cronos_group_filter=g.get("cronos_group_filter"),
             task_filter=g.get("task_filter"),
         ))
     cfg = PlotConfig(
-        out_dir=raw["out_dir"],
+        out_dir=raw.get("out_dir") or "",
         name=raw.get("name", "v04"),
         groups=groups,
         end_steps=raw.get("end_steps"),
@@ -433,7 +471,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    out_dir = Path(cfg.out_dir).resolve()
+    out_dir = resolve_out_dir(cfg.out_dir, args.config)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[plot] config={args.config}")
@@ -452,10 +490,14 @@ def main() -> int:
 
     print("[plot] aggregating...")
     long_df, summary_df = aggregate_all(cfg)
-    long_df.to_csv(out_dir / "aggregated.csv", index=False)
-    summary_df.to_csv(out_dir / "summary.csv", index=False)
-    print(f"[plot] wrote aggregated.csv ({len(long_df)} rows)")
-    print(f"[plot] wrote summary.csv ({len(summary_df)} rows)")
+    # `<name>_` prefixed like every PNG below: without it two configs sharing an
+    # out_dir silently overwrite each other's aggregates.
+    agg_csv = out_dir / f"{cfg.name}_aggregated.csv"
+    sum_csv = out_dir / f"{cfg.name}_summary.csv"
+    long_df.to_csv(agg_csv, index=False)
+    summary_df.to_csv(sum_csv, index=False)
+    print(f"[plot] wrote {agg_csv.name} ({len(long_df)} rows)")
+    print(f"[plot] wrote {sum_csv.name} ({len(summary_df)} rows)")
 
     # Pretty-print final values per group / eval_kind.
     if not summary_df.empty:

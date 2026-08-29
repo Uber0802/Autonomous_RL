@@ -39,6 +39,15 @@ from typing import List, Optional
 import pandas as pd
 
 
+# Keys that only `scripts/plot.py` acts on. Accepted and ignored here so ONE
+# config file drives all three plot tools instead of each needing its own.
+_PLOT_PY_TOP_KEYS = {
+    "smoothing_window", "n_interp_points", "end_steps", "end_resets",
+    "figsize", "eval_kinds", "x_axes",
+}
+_PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
+
+
 @dataclass
 class Group:
     label: str
@@ -54,6 +63,26 @@ class PlotConfig:
     groups: List[Group] = field(default_factory=list)
 
 
+def resolve_out_dir(raw_value, config_path) -> Path:
+    """Where a config's outputs go — one rule for every plot tool.
+
+    - set        -> resolved to an absolute path, so the result does not depend
+                    on the directory the tool happened to be launched from.
+    - empty/absent -> **next to the config file**, not the CWD. `scripts/plot.py`
+                    used `Path("").resolve()`, i.e. the CWD, and the shipped
+                    `plot_config.json` ships `"out_dir": ""` — so figures landed
+                    wherever the shell was, which is neither predictable nor
+                    discoverable. The config's own directory is both.
+
+    Every caller writes `<out_dir>/<name>_*`, so several configs can share one
+    directory without colliding.
+    """
+    config_path = Path(config_path)
+    if raw_value:
+        return Path(raw_value).expanduser().resolve()
+    return config_path.resolve().parent
+
+
 def load_plot_config(path) -> PlotConfig:
     path = Path(path)
     if not path.exists():
@@ -66,40 +95,52 @@ def load_plot_config(path) -> PlotConfig:
     # JSON has no comment syntax, so any key starting with "_" is treated as one
     # and ignored — that is what `scripts/plot_runs_example.json` uses to carry
     # its own documentation.
-    unknown = {k for k in raw if not k.startswith("_")} - known
+    unknown = {k for k in raw if not k.startswith("_")} - known - _PLOT_PY_TOP_KEYS
     if unknown:
-        raise ValueError(f"unknown config keys: {sorted(unknown)}; valid: {sorted(known)} "
+        raise ValueError(f"unknown config keys: {sorted(unknown)}; valid: "
+                         f"{sorted(known | _PLOT_PY_TOP_KEYS)} "
                          f"(keys starting with '_' are ignored as comments)")
 
     groups = []
     for i, g in enumerate(raw.get("groups", [])):
         if not isinstance(g, dict):
             raise ValueError(f"groups[{i}] must be an object")
-        g_unknown = set(g) - {"label", "runs"}
+        g_unknown = set(g) - {"label", "runs", "csv_paths"} - _PLOT_PY_GROUP_KEYS
         if g_unknown:
             raise ValueError(f"groups[{i}] has unknown keys: {sorted(g_unknown)}")
         label = g.get("label") or f"group_{i}"
-        entries = g.get("runs", [])
+        if "runs" in g and "csv_paths" in g:
+            raise ValueError(
+                f"groups[{i}] ('{label}') sets both `runs` and `csv_paths`; use "
+                f"one (prefer `runs`, which points at the glob dir)")
+        # `csv_paths` is `scripts/plot.py`'s original spelling: paths to
+        # individual `eval_success.csv` files. A CSV only names one of the three
+        # files these tools read, so it is resolved back to its containing glob
+        # dir — which is what `runs` states directly, and why `runs` is the
+        # preferred form.
+        key = "runs" if "runs" in g else "csv_paths"
+        to_dir = (lambda s: Path(s)) if key == "runs" else (lambda s: Path(s).parent)
+        entries = g.get(key, [])
         if not entries:
-            raise ValueError(f"groups[{i}] ('{label}') has no runs")
+            raise ValueError(f"groups[{i}] ('{label}') has no {key}")
         chains = []
         for j, entry in enumerate(entries):
             if isinstance(entry, str):
-                chains.append([Path(entry)])
+                chains.append([to_dir(entry)])
             elif isinstance(entry, list) and all(isinstance(x, str) for x in entry):
                 if not entry:
-                    raise ValueError(f"groups[{i}].runs[{j}] is an empty chain")
-                chains.append([Path(x) for x in entry])
+                    raise ValueError(f"groups[{i}].{key}[{j}] is an empty chain")
+                chains.append([to_dir(x) for x in entry])
             else:
                 raise ValueError(
-                    f"groups[{i}].runs[{j}] must be a run-dir string or a list of "
+                    f"groups[{i}].{key}[{j}] must be a path string or a list of "
                     f"them (a resume chain), got {type(entry).__name__}")
         groups.append(Group(label=label, chains=chains))
 
     if not groups:
         raise ValueError("config has no groups")
     return PlotConfig(name=raw.get("name", path.stem),
-                      out_dir=Path(raw.get("out_dir") or path.parent),
+                      out_dir=resolve_out_dir(raw.get("out_dir"), path),
                       groups=groups)
 
 
