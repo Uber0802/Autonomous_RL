@@ -279,29 +279,37 @@ def main():
     p.add_argument("--out", default=None,
                    help="output PNG (default: <run-dir>/rollout_success.png, or "
                         "<out_dir>/<name>_rollout_success.png in --config mode)")
-    p.add_argument("--metric", default="success", choices=list(_METRIC_COLS),
+    p.add_argument("--metric", default=None, choices=list(_METRIC_COLS),
                    help="--config mode: which column to curve")
-    p.add_argument("--direction", default="forward",
+    p.add_argument("--direction", default=None,
                    choices=["forward", "backward", "backward_recep", "all"],
                    help="which segments to plot. Default 'forward' — reset segments "
                         "score `success` against a different goal, see the module "
                         "docstring. 'all' draws one series per direction.")
-    p.add_argument("--by", default="none", choices=["none", "task", "group", "obj", "recep"],
+    p.add_argument("--by", default=None, choices=["none", "task", "group", "obj", "recep"],
                    help="add a second panel broken down by this column")
     p.add_argument("--x-axis", default="total_steps",
                    choices=["total_steps", "segment", "episode"])
-    p.add_argument("--smooth", type=int, default=5,
+    p.add_argument("--smooth", type=int, default=None,
                    help="rolling-mean window in segments (1 disables)")
     args = p.parse_args()
 
     if args.config:
         cfg = load_plot_config(args.config)
+        args.direction = cfg.option("direction", args.direction, "forward")
+        args.by = cfg.option("by", args.by, "none")
+        args.metric = cfg.option("metric", args.metric, "success")
+        args.smooth = int(cfg.option("smooth", args.smooth, 5))
         out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_rollout_success.png"
         render_groups(cfg, out, direction=args.direction, x_key="total_steps",
                       smooth=args.smooth, metric=args.metric)
         print(f"[ok] wrote {out}", file=sys.stderr)
         return
 
+    args.direction = args.direction or "forward"
+    args.by = args.by or "none"
+    args.metric = args.metric or "success"
+    args.smooth = 5 if args.smooth is None else args.smooth
     csv_path = Path(args.csv) if args.csv else Path(args.run_dir) / "rollout_success.csv"
     df = load_rollout(csv_path)
     summarize(df, args.direction)

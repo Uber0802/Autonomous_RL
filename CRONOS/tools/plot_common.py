@@ -47,6 +47,16 @@ _PLOT_PY_TOP_KEYS = {
 }
 _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 
+# Tool options that may be set in the config instead of on the command line, so
+# a comparison is reproducible from one file. Each is the snake_case form of the
+# matching CLI flag, and the CLI always wins when both are given. Keys a given
+# tool does not understand are simply ignored, exactly like the `scripts/plot.py`
+# keys above — one config can carry settings for all three tools.
+TOOL_OPTION_KEYS = {
+    "actor_kind", "phase", "workspace_scale",   # plot_segment_positions.py
+    "direction", "by", "metric", "smooth",      # plot_rollout_success.py
+}
+
 
 @dataclass
 class Group:
@@ -61,6 +71,15 @@ class PlotConfig:
     name: str
     out_dir: Path
     groups: List[Group] = field(default_factory=list)
+    # Tool options carried in the config (see TOOL_OPTION_KEYS). Read via
+    # `option()`, which lets the CLI override.
+    options: dict = field(default_factory=dict)
+
+    def option(self, key, cli_value, default=None):
+        """CLI value if given, else the config's, else `default`."""
+        if cli_value is not None:
+            return cli_value
+        return self.options.get(key, default)
 
 
 def resolve_out_dir(raw_value, config_path) -> Path:
@@ -95,10 +114,11 @@ def load_plot_config(path) -> PlotConfig:
     # JSON has no comment syntax, so any key starting with "_" is treated as one
     # and ignored — that is what `scripts/plot_runs_example.json` uses to carry
     # its own documentation.
-    unknown = {k for k in raw if not k.startswith("_")} - known - _PLOT_PY_TOP_KEYS
+    unknown = ({k for k in raw if not k.startswith("_")}
+               - known - _PLOT_PY_TOP_KEYS - TOOL_OPTION_KEYS)
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}; valid: "
-                         f"{sorted(known | _PLOT_PY_TOP_KEYS)} "
+                         f"{sorted(known | _PLOT_PY_TOP_KEYS | TOOL_OPTION_KEYS)} "
                          f"(keys starting with '_' are ignored as comments)")
 
     groups = []
@@ -141,7 +161,8 @@ def load_plot_config(path) -> PlotConfig:
         raise ValueError("config has no groups")
     return PlotConfig(name=raw.get("name", path.stem),
                       out_dir=resolve_out_dir(raw.get("out_dir"), path),
-                      groups=groups)
+                      groups=groups,
+                      options={k: raw[k] for k in TOOL_OPTION_KEYS if k in raw})
 
 
 def concat_chain(frames: List[pd.DataFrame], x_col: str = "total_steps") -> pd.DataFrame:
