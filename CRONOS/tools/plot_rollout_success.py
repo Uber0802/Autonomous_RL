@@ -51,16 +51,13 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import concat_chain, default_colors, load_plot_config  # noqa: E402
+from plot_common import (X_LABEL, concat_chain, default_colors,  # noqa: E402
+                         load_plot_config, new_curve_figure, plot_group_curve,
+                         prepend_origin, save_curve_figure, style_curve_axes)
 
 # Columns whose empty-string cells mean "this env did not report at this
 # boundary" rather than zero. `training/metrics.py` writes "" for those.
 _METRIC_COLS = ("success", "consecutive_grasp", "is_src_obj_grasped")
-_X_LABEL = {
-    "total_steps": "environment steps",
-    "segment": "segment index (80 steps each)",
-    "episode": "episode",
-}
 
 
 def load_rollout(csv_path: Path) -> pd.DataFrame:
@@ -182,7 +179,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         ax1.legend(loc="upper left", fontsize=7, ncol=2)
         ax1.set_title(f"per-segment success by {by}")
 
-    axes[-1][0].set_xlabel(_X_LABEL[x_key])
+    axes[-1][0].set_xlabel(X_LABEL[x_key])
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,8 +191,9 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
 def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
                   smooth: int, metric: str) -> Path:
     """One curve per config group; mean ± spread across that group's series."""
-    fig, ax = plt.subplots(figsize=(11, 5.2))
+    fig, ax = new_curve_figure()
     colors = default_colors(len(cfg.groups))
+    x_max = 0.0
 
     for gi, group in enumerate(cfg.groups):
         series = []
@@ -228,29 +226,22 @@ def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
         x = mean.index.to_numpy()
 
         n = wide.shape[1]
-        ax.plot(x, mean.to_numpy(), linewidth=2.0, color=colors[gi],
-                label=f"{group.label}  (n={n})")
-        if n > 1:
-            lo = (mean - std).clip(lower=0.0).to_numpy()
-            hi = (mean + std).clip(upper=1.0).to_numpy()
-            ax.fill_between(x, lo, hi, color=colors[gi], alpha=0.16, linewidth=0)
         print(f"[group] {group.label:<34s} {n} series, {len(x)} x-points, "
               f"final {metric}={mean.to_numpy()[-1]:.4f}", file=sys.stderr)
 
-    ax.set_xlabel(_X_LABEL["total_steps"])
-    ax.set_ylabel(metric)
-    ax.set_ylim(-0.02, 1.02)
-    ax.grid(alpha=0.3)
-    ax.legend(loc="upper left", fontsize=8)
+        # The first boundary is 80 steps in, so without this the curve starts
+        # hanging in mid-air; every panel of both success-rate tools begins at
+        # the untrained policy's (0, 0) instead.
+        x, mean_y, std_y = prepend_origin(x, mean.to_numpy(), std.to_numpy())
+        plot_group_curve(ax, x, mean_y, std_y, color=colors[gi],
+                         label=group.label, n_series=n)
+        x_max = max(x_max, float(x.max()) if len(x) else 0.0)
+
+    style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
     smooth_note = f", MA{smooth}" if smooth > 1 else ""
     ax.set_title(f"per-segment {metric} (direction={direction}{smooth_note}); "
                  f"band = ±1 std across series")
-    fig.suptitle(cfg.name, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+    return save_curve_figure(fig, out_path, suptitle=cfg.name)
 
 
 def summarize(df: pd.DataFrame, direction: str) -> None:

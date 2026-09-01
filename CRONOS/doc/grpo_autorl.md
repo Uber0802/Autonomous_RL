@@ -1,5 +1,7 @@
 # AutoRL GRPO — 現有實作整理 / Existing implementation review
 
+Index of these documents: [`README.md`](README.md).
+
 **範圍 / Scope:** `AutoRL/SimplerEnv/simpler_env/` 的 GRPO 路徑，唯讀盤點，為「CRONOS 沿用 AutoRL
 GRPO」做準備。AutoRL 未被修改。
 The GRPO path in `AutoRL/SimplerEnv/simpler_env/`, read-only, in preparation for reusing it in

@@ -1,6 +1,7 @@
 # CSV output schemas
 
-**Version:** V0.91
+Describes the current tree; the code version is in [`../version.py`](../version.py).
+Index of these documents: [`README.md`](README.md).
 
 Every file lands in the run's `glob/` directory. All of them are append-only,
 written with stdlib `csv`, and carry both x-axes (`total_steps` and

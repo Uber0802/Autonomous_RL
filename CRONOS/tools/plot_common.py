@@ -39,8 +39,8 @@ from typing import List, Optional
 import pandas as pd
 
 
-# Keys that only `scripts/plot.py` acts on. Accepted and ignored here so ONE
-# config file drives all three plot tools instead of each needing its own.
+# Keys that only `plot_eval_success.py` acts on. Accepted and ignored here so
+# ONE config file drives all three plot tools instead of each needing its own.
 _PLOT_PY_TOP_KEYS = {
     "smoothing_window", "n_interp_points", "end_steps", "end_resets",
     "figsize", "eval_kinds", "x_axes",
@@ -50,8 +50,8 @@ _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 # Tool options that may be set in the config instead of on the command line, so
 # a comparison is reproducible from one file. Each is the snake_case form of the
 # matching CLI flag, and the CLI always wins when both are given. Keys a given
-# tool does not understand are simply ignored, exactly like the `scripts/plot.py`
-# keys above — one config can carry settings for all three tools.
+# tool does not understand are simply ignored, exactly like the eval-SR keys
+# above — one config can carry settings for all three tools.
 TOOL_OPTION_KEYS = {
     "actor_kind", "phase", "workspace_scale",   # plot_segment_positions.py
     "direction", "by", "metric", "smooth",      # plot_rollout_success.py
@@ -87,14 +87,16 @@ def resolve_out_dir(raw_value, config_path) -> Path:
 
     - set        -> resolved to an absolute path, so the result does not depend
                     on the directory the tool happened to be launched from.
-    - empty/absent -> **next to the config file**, not the CWD. `scripts/plot.py`
-                    used `Path("").resolve()`, i.e. the CWD, and the shipped
-                    `plot_config.json` ships `"out_dir": ""` — so figures landed
-                    wherever the shell was, which is neither predictable nor
-                    discoverable. The config's own directory is both.
+    - empty/absent -> **next to the config file**, not the CWD. The eval-SR
+                    tool used `Path("").resolve()`, i.e. the CWD, and the
+                    shipped `plot_config.json` ships `"out_dir": ""` — so
+                    figures landed wherever the shell was, which is neither
+                    predictable nor discoverable. The config's own directory is
+                    both.
 
-    Every caller writes `<out_dir>/<name>_*`, so several configs can share one
-    directory without colliding.
+    Every caller writes `<out_dir>/<name>_*`, so all three tools' figures for
+    one comparison land together and several configs can share one directory
+    without colliding.
     """
     config_path = Path(config_path)
     if raw_value:
@@ -133,7 +135,7 @@ def load_plot_config(path) -> PlotConfig:
             raise ValueError(
                 f"groups[{i}] ('{label}') sets both `runs` and `csv_paths`; use "
                 f"one (prefer `runs`, which points at the glob dir)")
-        # `csv_paths` is `scripts/plot.py`'s original spelling: paths to
+        # `csv_paths` is `plot_eval_success.py`'s original spelling: paths to
         # individual `eval_success.csv` files. A CSV only names one of the three
         # files these tools read, so it is resolved back to its containing glob
         # dir — which is what `runs` states directly, and why `runs` is the
@@ -171,7 +173,7 @@ def concat_chain(frames: List[pd.DataFrame], x_col: str = "total_steps") -> pd.D
     A resumed run restates the parent's counters, so the child's x values can
     overlap the parent's. At the seam the CHILD wins — it is the run that
     actually produced those steps under the resumed configuration. Same rule
-    `scripts/plot.py` applies to its `csv_paths` chains.
+    `plot_eval_success.py` applies to its `csv_paths` chains.
     """
     frames = [f for f in frames if f is not None and len(f)]
     if not frames:
@@ -193,6 +195,103 @@ def default_colors(n: int):
     import matplotlib.pyplot as plt
     cmap = plt.get_cmap("tab10" if n <= 10 else "tab20")
     return [cmap(i % cmap.N) for i in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Shared look for the two success-rate figures
+# ---------------------------------------------------------------------------
+#
+# `plot_eval_success.py` (eval SR) and `plot_rollout_success.py` (rollout SR)
+# measure the same quantity on the same x axis, one at eval points and one at
+# segment boundaries, so they are read side by side and must be drawn to the
+# same parameters. These are `plot_rollout_success.py`'s, which is the version
+# both now use; the one thing added on top is that every curve is extended back
+# to the origin (see `prepend_origin`).
+
+CURVE_FIGSIZE = (11.0, 5.2)
+CURVE_DPI = 120
+CURVE_YLIM = (-0.02, 1.02)
+CURVE_LINEWIDTH = 2.0
+CURVE_BAND_ALPHA = 0.16
+CURVE_GRID_ALPHA = 0.3
+CURVE_LEGEND = {"loc": "upper left", "fontsize": 8}
+CURVE_TITLE_SIZE = 11
+
+X_LABEL = {
+    "total_steps": "environment steps",
+    "total_resets": "number of resets",
+    "segment": "segment index (80 steps each)",
+    "episode": "episode",
+}
+
+
+def new_curve_figure(figsize=None):
+    import matplotlib.pyplot as plt
+    return plt.subplots(figsize=tuple(figsize or CURVE_FIGSIZE))
+
+
+def prepend_origin(x, mean, std=None):
+    """Extend a curve back to (0, 0).
+
+    Both figures start from an untrained policy, so the origin is a measured
+    fact and not an extrapolation — but neither file records it. `eval_success.
+    csv`'s first row is the first eval round and `rollout_success.csv`'s is the
+    first 80-step boundary, so a curve drawn from the data alone begins hanging
+    in mid-air at whatever success rate that first point happened to hit, and
+    two runs whose first point sits at different x are not comparable at the
+    left edge. Anchoring at (0, 0) makes the left edge mean the same thing in
+    every panel of both tools.
+
+    Nothing is prepended when the series already starts at or before 0.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    mean = np.asarray(mean, dtype=float)
+    std = None if std is None else np.asarray(std, dtype=float)
+    if x.size == 0 or x[0] <= 0.0:
+        return (x, mean) if std is None else (x, mean, std)
+    x = np.concatenate(([0.0], x))
+    mean = np.concatenate(([0.0], mean))
+    if std is None:
+        return x, mean
+    return x, mean, np.concatenate(([0.0], std))
+
+
+def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
+    """One group's mean curve plus its ±1 std band, drawn identically in both
+    tools. The band is omitted for a single series, where std is 0 everywhere
+    and a zero-width ribbon only suggests a spread that was never measured."""
+    import numpy as np
+    text = label if n_series is None else f"{label}  (n={n_series})"
+    ax.plot(x, mean, linewidth=CURVE_LINEWIDTH, color=color, label=text)
+    if std is not None and (n_series is None or n_series > 1):
+        lo = np.clip(np.asarray(mean) - std, CURVE_YLIM[0], 1.0)
+        hi = np.clip(np.asarray(mean) + std, 0.0, 1.0)
+        ax.fill_between(x, lo, hi, color=color, alpha=CURVE_BAND_ALPHA, linewidth=0)
+
+
+def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None):
+    ax.set_xlabel(X_LABEL.get(x_axis, x_axis))
+    ax.set_ylabel(y_label)
+    ax.set_ylim(*CURVE_YLIM)
+    # Left edge pinned to 0 so the anchored origin is actually visible.
+    ax.set_xlim(0.0, None if not x_max else float(x_max))
+    ax.grid(alpha=CURVE_GRID_ALPHA)
+    ax.legend(**CURVE_LEGEND)
+
+
+def save_curve_figure(fig, out_path, *, suptitle=None) -> Path:
+    import matplotlib.pyplot as plt
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=CURVE_TITLE_SIZE)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+    else:
+        fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=CURVE_DPI, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 def read_run_config(run_dir: Path) -> Optional[dict]:

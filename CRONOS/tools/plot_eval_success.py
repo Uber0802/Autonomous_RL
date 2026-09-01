@@ -9,7 +9,7 @@ Input CSV schema (written by `main.py`'s `SuccessRecorder`):
 Workflow
 --------
 1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
-2. Run: `python scripts/plot.py --config plot_config.json`.
+2. Run: `python tools/plot_eval_success.py --config scripts/plot_config.json`.
 3. Outputs land under `<out_dir>/`, all prefixed `<name>_` so configs can share
    a directory (`out_dir` empty/absent = the config file's own directory):
    - `<name>_aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
@@ -19,6 +19,12 @@ Workflow
 
 Adding a new run = append its `eval_success.csv` path to the right group's
 `csv_paths` list, then rerun. No code changes.
+
+The figures are drawn to the parameters in `tools/plot_common.py`, shared with
+`tools/plot_rollout_success.py`: the two tools measure the same rate at
+different sampling points (eval rounds vs 80-step boundaries) and are read side
+by side, so they use one look, one x label vocabulary and one (0, 0) anchor
+rather than each inventing its own.
 
 Requires: pandas, numpy, matplotlib.
 """
@@ -32,13 +38,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from plot_common import resolve_out_dir  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_common import (CURVE_FIGSIZE, default_colors,  # noqa: E402
+                         new_curve_figure, plot_group_curve, prepend_origin,
+                         resolve_out_dir, save_curve_figure, style_curve_axes)
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +83,11 @@ class PlotConfig:
     end_resets: Optional[float] = None      # crop x-axis (total_resets)
     smoothing_window: int = 5
     n_interp_points: int = 500
-    figsize: Tuple[float, float] = (8.0, 8.0)
+    # Shared with plot_rollout_success.py; a group's `color` still overrides the
+    # per-group colour, and `figsize` the panel size.
+    figsize: Tuple[float, float] = CURVE_FIGSIZE
     eval_kinds: Tuple[str, ...] = ("in_domain", "out_of_domain")
     x_axes: Tuple[str, ...] = ("total_steps", "total_resets")
-    # Default color palette (cycled through when group spec doesn't set color).
-    default_colors: Tuple[str, ...] = (
-        "#97bb8f", "#5a5a5a", "#02bfbf", "#c109c1",
-        "#d62728", "#c1c10b", "#6666cc",
-    )
 
 
 def _runs_to_csv_paths(entries: List) -> List:
@@ -138,7 +143,7 @@ def load_config(path: str) -> PlotConfig:
         end_resets=raw.get("end_resets"),
         smoothing_window=int(raw.get("smoothing_window", 5)),
         n_interp_points=int(raw.get("n_interp_points", 500)),
-        figsize=tuple(raw.get("figsize", [8.0, 8.0])),
+        figsize=tuple(raw.get("figsize", CURVE_FIGSIZE)),
         eval_kinds=tuple(raw.get("eval_kinds", ("in_domain", "out_of_domain"))),
         x_axes=tuple(raw.get("x_axes", ("total_steps", "total_resets"))),
     )
@@ -372,20 +377,10 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
 # ---------------------------------------------------------------------------
 
 
-def _format_axis(ax, x_axis: str, y_label: str = "Success Rate") -> None:
-    ax.set_ylim(0, 1.0)
-    if x_axis == "total_steps":
-        ax.set_xlabel("Interaction Step", fontsize=18, fontweight="bold")
-    elif x_axis == "total_resets":
-        ax.set_xlabel("Number of Reset", fontsize=18, fontweight="bold")
-    else:
-        ax.set_xlabel(x_axis, fontsize=18, fontweight="bold")
-    ax.set_ylabel(y_label, fontsize=18, fontweight="bold")
-    ax.minorticks_on()
-    ax.grid(which="major", alpha=0.4)
-    ax.grid(which="minor", alpha=0.2)
-    ax.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
-    ax.tick_params(axis="both", labelsize=14)
+def _group_color(cfg: PlotConfig, index: int, palette) -> object:
+    """A group's colour: its own `color` if the config set one, else the shared
+    palette `plot_rollout_success.py` also draws from."""
+    return cfg.groups[index].color or palette[index]
 
 
 def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
@@ -397,32 +392,25 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
                   (long_df["metric"] == "success")]
     if sub.empty:
         return
-    fig, ax = plt.subplots(figsize=cfg.figsize)
-    used_labels = []
+    fig, ax = new_curve_figure(cfg.figsize)
+    palette = default_colors(len(cfg.groups))
     x_max = 0.0
     for i, spec in enumerate(cfg.groups):
         g_sub = sub[sub["group"] == spec.label].sort_values("x_value")
         if g_sub.empty:
             continue
-        color = spec.color or cfg.default_colors[i % len(cfg.default_colors)]
         x = g_sub["x_value"].to_numpy()
         m = moving_average(g_sub["mean"].to_numpy(), cfg.smoothing_window)
         s = moving_average(g_sub["std"].to_numpy(), cfg.smoothing_window)
-        ax.plot(x, m, label=spec.label, color=color, lw=2, zorder=3)
-        ax.plot(x, m - s, color=color, ls="--", lw=1, alpha=0.4, zorder=2)
-        ax.plot(x, m + s, color=color, ls="--", lw=1, alpha=0.4, zorder=2)
-        ax.fill_between(x, m - s, m + s, color=color, alpha=0.2, zorder=1)
-        used_labels.append((color, spec.label))
+        n = int(g_sub["n_runs"].iloc[0])
+        x, m, s = prepend_origin(x, m, s)
+        plot_group_curve(ax, x, m, s, color=_group_color(cfg, i, palette),
+                         label=spec.label, n_series=n)
         x_max = max(x_max, float(x.max()) if len(x) else 0.0)
-    ax.set_xlim(0, x_max)
-    _format_axis(ax, x_axis)
-    handles = [Patch(facecolor=c, label=l) for c, l in used_labels]
-    ax.legend(handles=handles, prop={"weight": "bold", "size": 14},
-              loc="lower right", ncol=1,
-              handleheight=0.7, handlelength=0.7, handletextpad=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    style_curve_axes(ax, x_axis=x_axis, y_label="success", x_max=x_max)
+    ax.set_title(f"eval success ({eval_kind}, MA{cfg.smoothing_window}); "
+                 f"band = ±1 std across series")
+    save_curve_figure(fig, out_path, suptitle=cfg.name)
 
 
 def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
@@ -433,31 +421,29 @@ def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
                   (long_df["x_axis"] == "total_steps")]
     if sub.empty:
         return
-    fig, ax = plt.subplots(figsize=cfg.figsize)
-    used_labels = []
+    fig, ax = new_curve_figure(cfg.figsize)
+    palette = default_colors(len(cfg.groups))
     x_max = 0.0
     for i, spec in enumerate(cfg.groups):
-        color = spec.color or cfg.default_colors[i % len(cfg.default_colors)]
-        for metric, ls, alpha in (("success", "-", 1.0), ("grasp", ":", 0.7)):
+        color = _group_color(cfg, i, palette)
+        for metric, ls in (("success", "-"), ("grasp", ":")):
             g_sub = sub[(sub["group"] == spec.label) & (sub["metric"] == metric)] \
                 .sort_values("x_value")
             if g_sub.empty:
                 continue
             x = g_sub["x_value"].to_numpy()
             m = moving_average(g_sub["mean"].to_numpy(), cfg.smoothing_window)
-            ax.plot(x, m, label=f"{spec.label} ({metric})",
-                    color=color, ls=ls, lw=2, alpha=alpha, zorder=3)
+            x, m = prepend_origin(x, m)
+            # No band here: two overlaid metrics per group already crowd the
+            # panel, and the gap between the lines is what this figure is for.
+            ax.plot(x, m, label=f"{spec.label} ({metric})", color=color, ls=ls,
+                    linewidth=2.0)
             x_max = max(x_max, float(x.max()) if len(x) else 0.0)
-        used_labels.append((color, spec.label))
-    ax.set_xlim(0, x_max)
-    _format_axis(ax, "total_steps", y_label="Success / Grasp")
-    ax.legend(prop={"weight": "bold", "size": 11},
-              loc="lower right", ncol=1)
-    ax.set_title(f"Success vs Grasp ({eval_kind}) — gap = placement collapse early warning",
-                 fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    style_curve_axes(ax, x_axis="total_steps", y_label="success / grasp",
+                     x_max=x_max)
+    ax.set_title(f"eval success vs grasp ({eval_kind}, MA{cfg.smoothing_window}); "
+                 f"gap = placement-collapse early warning")
+    save_curve_figure(fig, out_path, suptitle=cfg.name)
 
 
 # ---------------------------------------------------------------------------

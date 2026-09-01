@@ -20,17 +20,27 @@ and the objects often do.
 
     python tools/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
-Layout: one column per `actor_kind` present (`obj`, `recep`, `gripper`).
+Layout: **one PNG per figure, never a grid.** Each figure is a single xy scatter
+of one `actor_kind` (`obj` or `recep`) for one experiment, so a run of the tool
+writes `<...>_obj.png` and `<...>_recep.png`, and in `--config` mode one such
+pair per group. Overlaying kinds or groups in one image made every panel small
+and forced a shared colour scale onto distributions that are read one at a time;
+the xy view range is still shared across every figure a single invocation
+writes, which is what actually makes them comparable.
 
-    row 1   xy scatter, coloured by episode, so drift over training is visible
-    row 2   pz histogram, with the `low_z` detector threshold marked — points
-            left of it are what HSR would flag as fallen off the table
+    obj     the objects the task asks to move
+    recep   the receptacles they are moved onto
+
+The scatter is coloured by episode, so drift over training is visible.
 
 Notes on the data
 -----------------
 - Hidden slots (a YAML group declaring fewer objects than the batch-wide N)
   write NaN, deliberately, so the row count per segment stays fixed. They are
   dropped here.
+- The gripper is recorded in `segment_pose.csv` but is not plotted: with EER on
+  every `phase=start` gripper row is the identical homed pose, so its panel was
+  a single dot. `summarize()` still reports its extent on stderr.
 - `actor_kind` covers **every** object and receptacle slot, not just the pair
   the current task selected — so distractor objects the policy was supposed to
   leave alone are included. Use `--slot` / `--model` to narrow.
@@ -45,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -61,9 +72,15 @@ from plot_common import (concat_chain, default_colors, load_plot_config,  # noqa
                          read_run_config)
 
 # `envs/unsuitable.py::LowZDetector.z_threshold` — the height below which HSR
-# treats an actor as fallen. Drawn as a reference line, not applied as a filter.
+# treats an actor as fallen. Reported by `summarize()`; there is no pz figure.
 LOW_Z_THRESHOLD = 0.7
-_KIND_ORDER = ("obj", "recep", "gripper")
+
+# Only the task-relevant kinds are plotted. `phase=start` pz is the preset's
+# fixed `slot_heights`, so a height histogram of the initial-state distribution
+# is one bar by construction and the pz question is answered by the
+# below-threshold counts `summarize()` prints. The gripper's xy is likewise a
+# single pinned pose under EER.
+_KIND_ORDER = ("obj", "recep")
 
 # (N, M) -> (POSE_PRESET, SLOT_ORDER). Mirrors `_NxM_PRESETS` in
 # `envs/bridge_multi.py`, which cannot be imported here because it pulls in
@@ -82,7 +99,7 @@ _NXM_PRESET = {
 }
 
 
-_VALID_KINDS = ("obj", "recep", "gripper")
+_VALID_KINDS = _KIND_ORDER
 
 
 def parse_actor_kinds(value) -> list:
@@ -97,12 +114,42 @@ def parse_actor_kinds(value) -> list:
     parts = [p for p in parts if p]
     if "all" in parts:
         return list(_VALID_KINDS)
+    if "gripper" in parts:
+        raise SystemExit("actor kind 'gripper' is no longer plotted (its pose is "
+                         "pinned by EER); choose from ['obj', 'recep'] or 'all'")
     bad = [p for p in parts if p not in _VALID_KINDS]
     if bad:
         raise SystemExit(f"unknown actor kind(s) {bad}; choose from "
                          f"{list(_VALID_KINDS)} or 'all', comma-separated")
-    # De-duplicate while keeping _KIND_ORDER for a stable panel order.
+    # De-duplicate while keeping _KIND_ORDER for a stable figure order.
     return [k for k in _VALID_KINDS if k in parts]
+
+
+def _slug(text: str) -> str:
+    """A group label as a filename fragment (labels carry spaces and '+')."""
+    s = re.sub(r"[^0-9A-Za-z._-]+", "-", str(text)).strip("-._")
+    return s or "group"
+
+
+def unique_slugs(labels) -> dict:
+    """label -> distinct filename fragment. Two labels can slugify the same
+    way ("noep +PTB" and "noep-PTB"), and the second figure would silently
+    overwrite the first, so collisions get a numeric suffix."""
+    out, used = {}, set()
+    for label in labels:
+        base = _slug(label)
+        slug, i = base, 2
+        while slug in used:
+            slug, i = f"{base}-{i}", i + 1
+        used.add(slug)
+        out[label] = slug
+    return out
+
+
+def out_variant(base: Path, *parts: str) -> Path:
+    """`fig.png` + ("noep", "obj") -> `fig_noep_obj.png`."""
+    base = Path(base)
+    return base.with_name("_".join([base.stem, *parts]) + (base.suffix or ".png"))
 
 
 def load_pose(csv_path: Path) -> pd.DataFrame:
@@ -123,40 +170,6 @@ def load_pose(csv_path: Path) -> pd.DataFrame:
         # CSVs written before the phase split recorded end-of-segment only.
         df["phase"] = "end"
     return df
-
-
-def _z_bins(z, n_bins: int = 60, ref: float = None, robust: bool = True,
-            ws=None, scale: float = 3.0):
-    """Histogram edges for `pz` that survive a constant column.
-
-    `phase=start` poses come straight out of `xyz_configs`, whose z is the
-    preset's fixed `slot_heights` (1.0 for objects, 0.95 for receptacles). So for
-    a single `actor_kind` the start-side `pz` is genuinely one value, and
-    `np.linspace(c, c, n)` returns n identical edges — every bin has zero width
-    and the histogram renders completely empty, which reads as missing data
-    rather than as zero spread.
-
-    `ref` is the reference line the caller will draw (the `low_z` threshold).
-    It is not binned, but it stretches the axis, so the degenerate case sizes its
-    single bar against that span — otherwise the bar is drawn correctly and is
-    still one pixel wide next to a threshold 0.3 m away.
-    """
-    z = np.asarray(z, dtype=float)
-    if ws is not None:
-        lo, hi = _scale_box(*ws[2], scale)
-    else:
-        lo, hi = _robust_range(z, pad=0.0, enabled=robust)
-    if not (np.isfinite(lo) and np.isfinite(hi)):
-        return np.linspace(0.0, 1.0, n_bins)
-    if ref is not None:
-        # Always show the threshold line's neighbourhood: "how many are below
-        # low_z" is the question this panel exists to answer.
-        lo, hi = min(lo, ref), max(hi, ref)
-    if hi - lo < 1e-9:
-        span = max(abs(hi - ref), 0.05) if ref is not None else 0.05
-        half = span * 0.02
-        return np.array([lo - half, hi + half])
-    return np.linspace(lo, hi, n_bins)
 
 
 @lru_cache(maxsize=None)
@@ -250,12 +263,13 @@ def _robust_range(v, k: float = 6.0, pad: float = 0.01, enabled: bool = True):
 
 def _shared_limits(df: pd.DataFrame, pad: float = 0.01, robust: bool = True,
                    ws=None, scale: float = 3.0):
-    """xy limits shared by every panel of a figure, robust to runaway actors.
+    """xy limits shared by every figure one invocation writes, robust to
+    runaway actors.
 
-    Shared, because otherwise each panel auto-scales to its own spread and a
-    tight cluster looks like a wide one — and because a degenerate panel (with
-    EER on, every `phase=start` gripper row is the identical homed pose) would
-    zoom into millimetres of float noise.
+    Shared, because otherwise each figure auto-scales to its own spread and a
+    tight cluster looks like a wide one — and because a degenerate one (a kind
+    whose pose is pinned) would zoom into millimetres of float noise. This is
+    what keeps separate PNGs comparable now that nothing is drawn side by side.
 
     Robust, because actors do escape. The `low_z` detector only tests height, so
     an object flung sideways at table height is never flagged and never
@@ -273,17 +287,15 @@ def _shared_limits(df: pd.DataFrame, pad: float = 0.01, robust: bool = True,
             _robust_range(df["py"], pad=pad, enabled=robust))
 
 
-def _report_offscreen(df: pd.DataFrame, xlim, ylim, zbins, label: str = "") -> int:
+def _report_offscreen(df: pd.DataFrame, xlim, ylim, label: str = "") -> int:
     """Count and announce points the clipped view cannot show."""
-    off = (~df["px"].between(*xlim) | ~df["py"].between(*ylim)
-           | ~df["pz"].between(zbins[0], zbins[-1])).sum()
+    off = (~df["px"].between(*xlim) | ~df["py"].between(*ylim)).sum()
     if off:
         tag = f"{label}: " if label else ""
         print(f"[pose] {tag}{off}/{len(df)} points ({off / len(df):.2%}) lie outside "
               f"the plotted range and are not drawn — px {df['px'].min():.3f}…"
-              f"{df['px'].max():.3f}, py {df['py'].min():.3f}…{df['py'].max():.3f}, "
-              f"pz {df['pz'].min():.3f}…{df['pz'].max():.3f}. Use --no-clip to "
-              f"include them.", file=sys.stderr)
+              f"{df['px'].max():.3f}, py {df['py'].min():.3f}…{df['py'].max():.3f}. "
+              f"Use --no-clip to include them.", file=sys.stderr)
     return int(off)
 
 
@@ -454,26 +466,76 @@ def _keep_forward(df: pd.DataFrame, pose_csv: Path) -> pd.DataFrame:
     return df
 
 
-def render(df: pd.DataFrame, out_path: Path, *, hexbin: bool, workspace, title: str,
-           robust: bool = True, ws=None, scale: float = 3.0) -> Path:
-    kinds = [k for k in _KIND_ORDER if k in set(df["actor_kind"])]
-    kinds += sorted(set(df["actor_kind"]) - set(_KIND_ORDER))
-    n = len(kinds)
-    fig, axes = plt.subplots(2, n, figsize=(4.6 * n, 8.4), squeeze=False)
+def _new_panel():
+    """One figure, one xy scatter. Square, because the axes are equal-aspect."""
+    return plt.subplots(figsize=(5.8, 5.8))
 
-    ep_lo, ep_hi = int(df["episode"].min()), int(df["episode"].max())
-    xlim, ylim = _shared_limits(df, robust=robust, ws=ws, scale=scale)
-    zbins = _z_bins(df["pz"], ref=LOW_Z_THRESHOLD, robust=robust, ws=ws, scale=scale)
+
+def _low_z_note(sub: pd.DataFrame) -> str:
+    """What the removed pz histogram was for, as one line of title.
+
+    The histogram's only real question was "how many actors fell off the
+    table", and the answer is a count, so it costs a line of text rather than
+    half a figure.
+    """
+    below = int((sub["pz"] < LOW_Z_THRESHOLD).sum())
+    return (f"{below}/{len(sub)} below low_z={LOW_Z_THRESHOLD} "
+            f"({below / max(1, len(sub)):.1%})")
+
+
+def _finish_panel(ax, *, xlim, ylim, workspace, title: str) -> None:
+    if workspace:
+        x0, x1, y0, y1 = workspace
+        ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
+                                   edgecolor="crimson", linestyle="--",
+                                   linewidth=1.2, label="workspace"))
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("px")
+    ax.set_ylabel("py")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(alpha=0.25)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="upper right", fontsize=7)
+
+
+def _save_panel(fig, out_path: Path, suptitle: str) -> Path:
+    fig.suptitle(suptitle, fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _announce_view(ws, scale: float, xlim, ylim) -> None:
     if ws is not None:
         print(f"[pose] view from the pose preset's workspace x{scale:g}: "
               f"px {xlim[0]:.3f}…{xlim[1]:.3f}  py {ylim[0]:.3f}…{ylim[1]:.3f}",
               file=sys.stderr)
-    _report_offscreen(df, xlim, ylim, zbins)
 
-    for col, kind in enumerate(kinds):
+
+def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace, title: str,
+           robust: bool = True, ws=None, scale: float = 3.0) -> list:
+    """One PNG per actor kind: `<out_base stem>_obj.png`, `..._recep.png`."""
+    kinds = [k for k in _KIND_ORDER if k in set(df["actor_kind"])]
+    if not kinds:
+        raise SystemExit(f"no rows for the plotted kinds {list(_KIND_ORDER)}; "
+                         f"present: {sorted(set(df['actor_kind']))}")
+    df = df[df["actor_kind"].isin(kinds)]
+
+    ep_lo, ep_hi = int(df["episode"].min()), int(df["episode"].max())
+    # One view range for every figure this call writes: separate figures are
+    # only comparable if the same cluster comes out the same size in each.
+    xlim, ylim = _shared_limits(df, robust=robust, ws=ws, scale=scale)
+    _announce_view(ws, scale, xlim, ylim)
+
+    written = []
+    for kind in kinds:
         sub = df[df["actor_kind"] == kind]
-        ax = axes[0][col]
-
+        _report_offscreen(sub, xlim, ylim, kind)
+        fig, ax = _new_panel()
         if hexbin:
             hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
                            mincnt=1, linewidths=0, extent=(*xlim, *ylim))
@@ -484,93 +546,58 @@ def render(df: pd.DataFrame, out_path: Path, *, hexbin: bool, workspace, title: 
                             vmin=ep_lo, vmax=max(ep_hi, ep_lo + 1))
             if ep_hi > ep_lo:
                 fig.colorbar(sc, ax=ax, label="episode", shrink=0.85)
-
-        if workspace:
-            x0, x1, y0, y1 = workspace
-            ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
-                                       edgecolor="crimson", linestyle="--",
-                                       linewidth=1.2, label="workspace"))
-            ax.legend(loc="upper right", fontsize=7)
-
         # A single distinct xy means the pose is pinned rather than sparsely
-        # sampled — the homed gripper. Say so; a lone dot on a shared axis is
-        # otherwise easy to misread as missing data.
+        # sampled. Say so; a lone dot on a clipped axis is otherwise easy to
+        # misread as missing data.
         spread = max(sub["px"].max() - sub["px"].min(),
                      sub["py"].max() - sub["py"].min())
         pinned = "  (fixed pose)" if spread < 1e-9 else ""
-        ax.set_title(f"{kind}  (n={len(sub)}){pinned}")
-        ax.set_xlabel("px")
-        ax.set_ylabel("py" if col == 0 else "")
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(alpha=0.25)
-
-        axz = axes[1][col]
-        axz.hist(sub["pz"], bins=zbins, color="tab:blue", alpha=0.8)
-        axz.axvline(LOW_Z_THRESHOLD, color="crimson", linestyle="--", linewidth=1.2,
-                    label=f"low_z = {LOW_Z_THRESHOLD}")
-        below = int((sub["pz"] < LOW_Z_THRESHOLD).sum())
-        axz.set_title(f"{kind} pz — {below}/{len(sub)} below threshold "
-                      f"({below / max(1, len(sub)):.1%})")
-        axz.set_xlabel("pz")
-        axz.set_ylabel("count" if col == 0 else "")
-        axz.legend(fontsize=7)
-        axz.grid(alpha=0.25)
-
-    fig.suptitle(title, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace,
+                      title=f"{kind}  (n={len(sub)}){pinned}\n{_low_z_note(sub)}")
+        written.append(_save_panel(fig, out_variant(out_base, kind), title))
+    return written
 
 
-def render_groups(cfg, out_path: Path, *, args) -> Path:
-    kinds_sel = parse_actor_kinds(args.actor_kind)
+def render_groups(cfg, out_base: Path, *, args) -> list:
+    """One PNG per (config group × actor kind).
+
+    Each experiment gets its own figure rather than a column of a grid: a group
+    is read on its own — "where did this condition's objects end up" — and the
+    grid made every cloud small while forcing obj and recep, which sit in
+    different parts of the table, to share an axis. The view range is still
+    computed across every figure written here, so they remain comparable.
+    """
     robust = not args.no_clip
     scale = args.workspace_scale
     ws = None if args.no_clip else workspace_extent(
         [d for g in cfg.groups for ch in g.chains for d in ch])
-    """One column per config group: xy scatter on top, pz histogram below."""
-    frames = []
-    for group in cfg.groups:
+    colors = default_colors(len(cfg.groups))
+    slugs = unique_slugs([g.label for g in cfg.groups])
+
+    panels = []   # (label, color, kind, rows)
+    for gi, group in enumerate(cfg.groups):
         runs = [d for chain in group.chains for d in chain]
         df = load_group_poses(runs, args)
         if df.empty:
             print(f"[warn] group '{group.label}' produced no rows", file=sys.stderr)
             continue
         df = apply_filters(df, args, Path(runs[0]) / "segment_pose.csv")
-        # One panel per (group, actor_kind), never a pooled cloud: obj / recep /
-        # gripper sit at different heights, so mixing them makes the xy scatter
-        # ambiguous and the pz histogram meaningless.
         for kind in [k for k in _KIND_ORDER if k in set(df["actor_kind"])]:
-            sub = df[df["actor_kind"] == kind].copy()
-            sub["__group"] = (group.label if len(kinds_sel) == 1
-                              else f"{group.label}\n{kind}")
-            frames.append(sub)
-    if not frames:
+            panels.append((group.label, colors[gi], kind,
+                           df[df["actor_kind"] == kind]))
+    if not panels:
         raise SystemExit("no group produced any rows")
 
-    n = len(frames)
-    fig, axes = plt.subplots(2, n, figsize=(4.8 * n, 8.6), squeeze=False)
-    # A shared range makes the columns visually comparable — the whole point of
-    # putting them side by side.
-    allx = pd.concat(frames)
-    xlim, ylim = _shared_limits(allx, robust=robust, ws=ws, scale=scale)
-    zbins = _z_bins(allx["pz"], ref=LOW_Z_THRESHOLD, robust=robust, ws=ws, scale=scale)
-    if ws is not None:
-        print(f"[pose] view from the pose preset's workspace x{scale:g}: "
-              f"px {xlim[0]:.3f}…{xlim[1]:.3f}  py {ylim[0]:.3f}…{ylim[1]:.3f}",
-              file=sys.stderr)
-    for sub in frames:
-        _report_offscreen(sub, xlim, ylim, zbins, sub["__group"].iloc[0])
+    xlim, ylim = _shared_limits(pd.concat([p[3] for p in panels]),
+                                robust=robust, ws=ws, scale=scale)
+    _announce_view(ws, scale, xlim, ylim)
 
-    for col, sub in enumerate(frames):
-        label = sub["__group"].iloc[0]
+    written = []
+    for label, color, kind, sub in panels:
+        _report_offscreen(sub, xlim, ylim, f"{label} / {kind}")
         real = sub[~sub["synthetic"]]
         synth = sub[sub["synthetic"]]
-        ax = axes[0][col]
+        fig, ax = _new_panel()
         if args.hexbin:
             hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
                            mincnt=1, linewidths=0, extent=(*xlim, *ylim))
@@ -582,42 +609,18 @@ def render_groups(cfg, out_path: Path, *, args) -> Path:
             # distribution and pooling them silently would misrepresent both.
             if len(real):
                 ax.scatter(real["px"], real["py"], s=6, alpha=0.35, linewidths=0,
-                           color=default_colors(n)[col], label=f"recorded ({len(real)})")
+                           color=color, label=f"recorded ({len(real)})")
             if len(synth):
                 ax.scatter(synth["px"], synth["py"], s=26, alpha=0.75, marker="x",
                            linewidths=0.9, color="black",
                            label=f"synthetic ({len(synth)})")
-            if len(real) and len(synth):
-                ax.legend(loc="upper right", fontsize=7)
-        if args.workspace:
-            x0, x1, y0, y1 = args.workspace
-            ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
-                                       edgecolor="crimson", linestyle="--", linewidth=1.2))
         tag = f"  [{len(synth)}/{len(sub)} synthetic]" if len(synth) else ""
-        ax.set_title(f"{label}{tag}\nn={len(sub)}", fontsize=10)
-        ax.set_xlim(*xlim); ax.set_ylim(*ylim)
-        ax.set_xlabel("px"); ax.set_ylabel("py" if col == 0 else "")
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(alpha=0.25)
-
-        axz = axes[1][col]
-        axz.hist(sub["pz"], bins=zbins, color=default_colors(n)[col], alpha=0.85)
-        axz.axvline(LOW_Z_THRESHOLD, color="crimson", linestyle="--", linewidth=1.2,
-                    label=f"low_z = {LOW_Z_THRESHOLD}")
-        below = int((sub["pz"] < LOW_Z_THRESHOLD).sum())
-        axz.set_title(f"pz — {below}/{len(sub)} below ({below / max(1, len(sub)):.1%})",
-                      fontsize=10)
-        axz.set_xlabel("pz"); axz.set_ylabel("count" if col == 0 else "")
-        axz.legend(fontsize=7); axz.grid(alpha=0.25)
-
-    ks = parse_actor_kinds(args.actor_kind)
-    kind = "all actors" if len(ks) == len(_VALID_KINDS) else ",".join(ks)
-    fig.suptitle(f"{cfg.name} — segment-{args.phase} positions ({kind})", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace,
+                      title=f"{label} — {kind}  (n={len(sub)}){tag}\n{_low_z_note(sub)}")
+        out = out_variant(out_base, slugs[label], kind)
+        written.append(_save_panel(
+            fig, out, f"{cfg.name} — segment-{args.phase} {kind} positions"))
+    return written
 
 
 def summarize(df: pd.DataFrame) -> None:
@@ -645,8 +648,11 @@ def main():
     src.add_argument("--config", help="JSON describing several groups of runs "
                                       "(see tools/plot_common.py); one column per group")
     p.add_argument("--out", default=None,
-                   help="output PNG (default: <run-dir>/segment_positions.png, or "
-                        "<out_dir>/<name>_segment_positions.png in --config mode)")
+                   help="output PNG BASE path; each figure appends its own "
+                        "suffix, e.g. `--out fig.png` writes fig_obj.png and "
+                        "fig_recep.png (in --config mode, fig_<group>_<kind>.png). "
+                        "Default: <run-dir>/segment_positions.png, or "
+                        "<out_dir>/<name>_segment_positions.png in --config mode")
     p.add_argument("--no-synth", action="store_true",
                    help="--config mode: skip runs that lack phase=start rows instead "
                         "of reconstructing their start distribution by drawing "
@@ -662,10 +668,10 @@ def main():
                         "faces. 'end' is the steady state the policy produced, "
                         "before any reset; use it to anchor workspace_aabb bounds.")
     p.add_argument("--actor-kind", default=None,
-                   help="'all' (default), one kind, or a comma-separated list "
-                        "such as obj,recep. In --config mode each kind gets its "
-                        "own column so its pz histogram stays meaningful. Can "
-                        "also be set in the config as `actor_kind`.")
+                   help="'all' (default = obj,recep), one of them, or a "
+                        "comma-separated list. Each kind gets its own PNG. The "
+                        "gripper is not plotted. Can also be set in the config "
+                        "as `actor_kind`.")
     p.add_argument("--slot", type=int, default=None, help="keep only this logical slot")
     p.add_argument("--model", default=None, help="substring match on model_name")
     p.add_argument("--task", default=None, help="substring match on the task string")
@@ -715,8 +721,8 @@ def main():
         args.workspace_scale = float(cfg.option("workspace_scale",
                                                 args.workspace_scale, 3.0))
         out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_segment_positions.png"
-        render_groups(cfg, out, args=args)
-        print(f"[ok] wrote {out}", file=sys.stderr)
+        for path in render_groups(cfg, out, args=args):
+            print(f"[ok] wrote {path}", file=sys.stderr)
         return
 
     if args.phase is None:
@@ -732,10 +738,10 @@ def main():
 
     out = Path(args.out) if args.out else csv_path.with_name("segment_positions.png")
     label = {"start": "segment-start", "end": "segment-end", "all": "segment-boundary"}[args.phase]
-    render(df, out, hexbin=args.hexbin, workspace=workspace,
-           title=f"{label} positions — {csv_path.parent}",
-           robust=not args.no_clip, ws=ws, scale=args.workspace_scale)
-    print(f"[ok] wrote {out}", file=sys.stderr)
+    for path in render(df, out, hexbin=args.hexbin, workspace=workspace,
+                       title=f"{label} positions — {csv_path.parent}",
+                       robust=not args.no_clip, ws=ws, scale=args.workspace_scale):
+        print(f"[ok] wrote {path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

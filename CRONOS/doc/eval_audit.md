@@ -1,6 +1,7 @@
 # Eval / sequential-eval audit
 
-**Version:** V0.91
+Describes the current tree; the code version is in [`../version.py`](../version.py).
+Index of these documents: [`README.md`](README.md).
 
 Scope: `main.py` (training-time eval, `--eval-single`, `--eval-sequential`) and
 `eval_only.py`, compared against `AutoRL/SimplerEnv/simpler_env/train_ms3_ppo.py`.
