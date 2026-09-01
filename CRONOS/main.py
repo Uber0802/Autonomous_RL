@@ -800,8 +800,28 @@ class CronosRunner:
                 f"--backward-goal {args.backward_goal} perturbs the LSR reset goal, "
                 f"but --enable-backward is off so no reset segment ever runs. "
                 f"Add --enable-backward (or use a reset mode that includes LSR: "
-                f"LSR, LSR+HSR, noep)."
+                f"LSR, HSR+LSR, noep+LSR — plain `noep` has no LSR segment)."
             )
+        if (args.reset_mode == "none" and args.reset_unsuitable
+                and not args.enable_backward):
+            # `noep` without LSR. HSR respawns only what its detector flags as
+            # fallen or out of bounds, so an object resting on its TARGET
+            # receptacle is never respawned, and `reset_mode=none` means no
+            # env.reset() ever puts it back either. Nothing in the system
+            # returns a successfully placed object to its initial state, so the
+            # start-state distribution drifts one way: toward tasks that are
+            # already satisfied when the segment opens. `reward_old` is zeroed
+            # at every task switch, so such a segment pays the full +1.0
+            # potential term as soon as the object is grasped, and its
+            # `rollout_success.csv` row reads success=1.0 for a segment in which
+            # the policy did nothing. See doc/reset_modes.md.
+            print("[WARN] reset_mode=none + reset_unsuitable + no LSR (`noep`) — "
+                  "HSR never respawns a successfully PLACED object, so start "
+                  "states drift toward already-satisfied tasks and both reward "
+                  "and rollout success rate become optimistic over training. "
+                  "Compare against noep+LSR (--enable-backward), whose reset "
+                  "segment is the only mechanism that restores the initial "
+                  "condition; see doc/reset_modes.md.")
         if args.reset_mode == "none" and not args.reset_unsuitable:
             # user opts in to non-episodic without HSR
             # (object respawn). The original constraint was that under

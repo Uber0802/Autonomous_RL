@@ -9,6 +9,7 @@ Reference material that is too long or too load-bearing for the top-level
 | [`data_schemas.md`](data_schemas.md) | You are reading a CSV out of a run's `glob/` and need to know what a column means — especially `direction`, `phase`, and the three value columns, all of which change meaning with the reset mode or the algorithm. |
 | [`eval_audit.md`](eval_audit.md) | You are comparing eval numbers across CRONOS versions or against AutoRL. Documents an accounting defect in sequential eval, its fix, and which historical numbers stayed comparable. |
 | [`grpo_autorl.md`](grpo_autorl.md) | You are running or interpreting `--alg-name grpo`. Reviews AutoRL's implementation, records where CRONOS matches it bit-for-bit and where it deliberately does not, and gives the grouping / `std` trade-off with measured numbers. |
+| [`reset_modes.md`](reset_modes.md) | You are choosing `train.sh`'s reset argument, comparing two reset modes, or wondering why a `-noep-` run directory does not mean what its name suggests. Gives the four orthogonal flags, what each mode preset expands to, the `RUN_TAG` rename and what it invalidates, and the start-state drift that makes bare `noep` metrics optimistic. |
 
 ## Conventions these documents follow
 

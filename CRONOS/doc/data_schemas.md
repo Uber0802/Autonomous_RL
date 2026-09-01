@@ -51,11 +51,12 @@ and the grasp latches every segment; sequential eval now matches via
 `eval_per_trial.csv` can be compared column to column — same measurement, taken
 at different points in the loop.
 
-### `direction` is load-bearing under LSR / noep
+### `direction` is load-bearing whenever LSR is on
 
-With `--enable-backward`, segments alternate between the forward goal and a
-**reset goal**. Three values, because `success` means something different in
-each:
+With `--enable-backward` — reset modes `LSR`, `HSR+LSR` and `noep+LSR`, see
+[`reset_modes.md`](reset_modes.md) — segments alternate between the forward goal
+and a **reset goal**. Three values, because `success` means something different
+in each:
 
 | `direction` | Goal | What `success` measures |
 |---|---|---|

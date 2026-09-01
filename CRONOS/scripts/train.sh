@@ -6,7 +6,7 @@
 #   mode:   t80a|t80b|t80c | t320a|t320b|t320c | t1280a|t1280b|t1280c | t2560a|t2560b|t2560c
 #   seed:   random seed (default: 0)
 #   cuda:   GPU device (default: 3)
-#   reset:  normal|LSR|HSR|LSR+HSR|noep (default: normal)
+#   reset:  normal|LSR|HSR|HSR+LSR|noep|noep+LSR (default: normal)
 #   config: YAML experiment config (default: configs/one_group_seq_random_2x2.yaml)
 #   vla:    openvla|spatialvla (default: openvla)
 #   eer:    on|off — End-Effector Reset (default: on)
@@ -18,17 +18,33 @@
 #             grpo-task   critic-free, one group per (segment, fan-out sub-block)
 #           Fine-tune the std term with GRPO_STD_SCOPE=group|global|none; see the
 #           algorithm block below for the per-mode defaults and why they differ.
-#   perturb: off|recep|mixed (default: off) — needs reset ∈ {LSR, LSR+HSR, noep}
+#   perturb: off|recep|mixed (default: off) — needs a reset mode that includes
+#            LSR, i.e. reset ∈ {LSR, HSR+LSR, noep+LSR}
 #             off    LSR reset goal is always "put X on table" (unchanged)
 #             recep  reset goal is another receptacle, != the forward task's
 #             mixed  per-env draw between the two; ratio via PERTURB_RECEP_PROB
 #
-# Reset modes:
-#   normal   — standard episodic training (hard reset every episode)
-#   LSR      — Low-level State Reset: learn the backward policy
-#   HSR      — High-level State Reset: respawn fallen objects every task boundary
-#   LSR+HSR  — both backward + reset_unsuitable
-#   noep     — LSR+HSR without episodic reset (reset_mode=none)
+# Reset modes (see doc/reset_modes.md for the full account):
+#   normal    — standard episodic training (hard reset every episode)
+#   LSR       — Low-level State Reset: learn the backward policy
+#   HSR       — High-level State Reset: respawn fallen objects every task boundary
+#   HSR+LSR   — both respawn + backward learning
+#   noep      — HSR without episodic reset (reset_mode=none). NO LSR.
+#   noep+LSR  — HSR + LSR without episodic reset
+#
+# `noep` means "HSR but no episodic reset". It does NOT include LSR — that is
+# `noep+LSR`. The three-way HSR+LSR / noep / noep+LSR comparison separates "does
+# removing the episodic reset hurt" from "does learning a reset policy pay for
+# it", which is the whole reason both exist.
+#
+# IMPORTANT — `noep` changed meaning. It used to expand to LSR+HSR+reset_mode=none,
+# i.e. what is now `noep+LSR`. Every run directory containing `-noep-` predates
+# that change and is a `noep+LSR` run under the current definition. The RUN_TAG
+# fragments of all three affected modes were renamed so no new run can collide
+# with a historical one:
+#       HSR+LSR -> HSRLSR      noep -> HSRnoep      noep+LSR -> HSRLSRnoep
+# `LSR+HSR` is still accepted as an input spelling of `HSR+LSR`, so existing
+# launch scripts keep working, but nothing emits it into a tag any more.
 #
 # EER (End-Effector Reset) is orthogonal to all five reset modes: it controls
 # whether the gripper is returned to its initial pose at every segment boundary
@@ -59,8 +75,10 @@
 # --config-path, PYTHONPATH and the default output dir); it checks and exits
 # with a clear message otherwise.
 #
-# All values are PER-RUN (relative). max_reset = episodes x 64 (exact for non-HSR,
-# ×5 headroom for HSR/LSR+HSR/noep which add soft resets).
+# All values are PER-RUN (relative). max_reset = episodes × num_envs without HSR;
+# with HSR (HSR, HSR+LSR, noep, noep+LSR) it is episodes × segments_per_episode ×
+# num_envs, the worst case where every env is flagged at every boundary. The
+# "Resets (HSR)" column below is that bound for a 64-env config.
 #
 # ┌──────────┬──────────┬───────────────┬─────────────────┬─────────────┬──────────────┐
 # │ Segment  │ Episodes │ Steps (this)  │ Steps (cumul.)  │ Resets (ex) │ Resets (HSR) │
@@ -138,6 +156,17 @@ case $MODE in
 esac
 
 # --- Reset mode → CLI flags ---
+# Each branch sets three things: the flags, the tag, and the two booleans
+# `_hsr_on` / `_lsr_on`. Everything downstream that depends on the mode
+# (max_reset budget, the perturbation precondition) is derived from those
+# booleans rather than from another list of mode names. Three such lists used to
+# exist and had already drifted apart from each other; a new mode now cannot be
+# added to one and forgotten in the others.
+_LSR_ARGS="--enable-backward --backward-interval 1"
+_HSR_ARGS="--reset-unsuitable"
+_NOEP_ARGS="--reset-mode none"
+_hsr_on=0
+_lsr_on=0
 case $RESET in
   normal)
     RESET_TAG="normal"
@@ -150,29 +179,52 @@ case $RESET in
     # lift-X-off-Y at each task switch (backward_interval=1 ≈ AutoRL paper
     # default). Gripper reset per segment is a separate knob (--reset-robot)
     # that's on by default in main.py Args and stays on across all modes.
-    RESET_ARGS="--enable-backward --backward-interval 1"
+    RESET_ARGS="$_LSR_ARGS"
+    _lsr_on=1
     ;;
   HSR)
     RESET_TAG="HSR"
     # HSR = High-level State Reset = respawn fallen objects at every task
     # boundary. Orthogonal to LSR (backward learning) and to --reset-robot
     # (gripper reset, default on).
-    RESET_ARGS="--reset-unsuitable"
+    RESET_ARGS="$_HSR_ARGS"
+    _hsr_on=1
     ;;
-  LSR+HSR)
-    RESET_TAG="LSR+HSR"
-    # LSR (backward learning) + HSR (respawn fallen objects). --reset-robot
+  HSR+LSR|LSR+HSR)
+    # `LSR+HSR` is the historical spelling, still accepted. Both emit the
+    # `HSRLSR` tag; nothing emits `LSR+HSR` any more.
+    RESET_TAG="HSRLSR"
+    # HSR (respawn fallen objects) + LSR (backward learning). --reset-robot
     # stays at its Args default (True) so the gripper still resets per segment.
-    RESET_ARGS="--enable-backward --backward-interval 1 --reset-unsuitable"
+    RESET_ARGS="$_HSR_ARGS $_LSR_ARGS"
+    _hsr_on=1
+    _lsr_on=1
     ;;
   noep)
-    RESET_TAG="noep"
-    # noep = LSR + HSR + non-episodic continuity (no env.reset between
-    # episodes). Same backward + unsuitable-respawn knobs as LSR+HSR, plus
-    # --reset-mode none to skip the inter-episode hard reset.
-    RESET_ARGS="--enable-backward --backward-interval 1 --reset-unsuitable --reset-mode none"
+    RESET_TAG="HSRnoep"
+    # noep = HSR + non-episodic continuity (no env.reset between episodes), and
+    # deliberately NO LSR. Nothing here returns a successfully PLACED object to
+    # its initial state — HSR only respawns actors the detector flags as fallen
+    # or out of bounds — so the start-state distribution drifts toward
+    # already-satisfied tasks over training. main.py warns about this at
+    # startup; doc/reset_modes.md explains what it does to the metrics.
+    RESET_ARGS="$_HSR_ARGS $_NOEP_ARGS"
+    _hsr_on=1
     ;;
-  *) echo "Unknown reset mode: $RESET"; echo "Valid: normal|LSR|HSR|LSR+HSR|noep"; exit 1 ;;
+  noep+LSR)
+    RESET_TAG="HSRLSRnoep"
+    # noep + LSR: the backward segment's "put X on table" goal is the only
+    # mechanism in the system that restores the initial condition, so this is
+    # the mode `noep` should be compared against.
+    RESET_ARGS="$_HSR_ARGS $_LSR_ARGS $_NOEP_ARGS"
+    _hsr_on=1
+    _lsr_on=1
+    ;;
+  *) echo "Unknown reset mode: $RESET"
+     echo "Valid: normal|LSR|HSR|HSR+LSR|noep|noep+LSR  (LSR+HSR = HSR+LSR)"
+     echo "Note: noep means HSR without episodic reset and does NOT include"
+     echo "      LSR; use noep+LSR for that (see doc/reset_modes.md)."
+     exit 1 ;;
 esac
 
 # --- EER (End-Effector Reset) → --reset-robot toggle ---
@@ -265,9 +317,9 @@ esac
 #   recep  always another receptacle, chosen != the forward task's
 #   mixed  per-env, per-reset-segment draw between the two
 #
-# Requires LSR (--enable-backward), i.e. reset ∈ {LSR, LSR+HSR, noep}; main.py
-# errors out otherwise. Envs with only one receptacle fall back to the table
-# goal. Tune the mixed ratio with PERTURB_RECEP_PROB (default 0.5).
+# Requires LSR (--enable-backward), i.e. reset ∈ {LSR, HSR+LSR, noep+LSR};
+# main.py errors out otherwise. Envs with only one receptacle fall back to the
+# table goal. Tune the mixed ratio with PERTURB_RECEP_PROB (default 0.5).
 case $PERTURB in
   off)
     PTB_TAG=""
@@ -285,12 +337,15 @@ case $PERTURB in
   *) echo "Unknown perturb: $PERTURB"; echo "Valid: off|recep|mixed"; exit 1 ;;
 esac
 
-if [ "$PERTURB" != "off" ]; then
-  case $RESET in
-    LSR|LSR+HSR|noep) ;;
-    *) echo "perturb=$PERTURB needs LSR (the reset segment it perturbs)."
-       echo "Use reset = LSR | LSR+HSR | noep, got '$RESET'."; exit 1 ;;
-  esac
+# Keyed off `_lsr_on`, not off a list of mode names: main.py rejects
+# --backward-goal without --enable-backward, but only after the 7B VLA has
+# loaded, so the same condition is checked here from the same source of truth.
+if [ "$PERTURB" != "off" ] && [ "$_lsr_on" -eq 0 ]; then
+  echo "perturb=$PERTURB needs LSR (the reset segment it perturbs), and"
+  echo "reset='$RESET' does not include it."
+  echo "Use reset = LSR | HSR+LSR | noep+LSR."
+  echo "Note: plain 'noep' has no LSR segment to perturb — you want noep+LSR."
+  exit 1
 fi
 
 if [ -n "$_std_default" ]; then
@@ -331,12 +386,13 @@ mkdir -p "$RUN_OUT_DIR"
 echo "[train.sh] run output dir: $RUN_OUT_DIR"
 
 # --- Per-segment max_reset (relative, = max_episodes x num_envs) ---
-# Normal/LSR (no HSR): only hard resets at episode boundaries → ep × num_envs.
-# HSR/LSR+HSR/noep: HSR can fire at EVERY segment boundary on EVERY env, so the
-# worst-case upper bound is max_episodes × (episode_len / segment_len) × num_envs
-# — i.e. all segment boundaries × all envs flagged. Earlier code used a flat ×5
-# multiplier that was correct for T80 (1 segment / ep) but ~3× too small for
-# T1280 (16 segments / ep), causing premature "max_reset exceeded" stops.
+# Without HSR (normal / LSR): only hard resets at episode boundaries
+# → ep × num_envs. With HSR (`_hsr_on`): HSR can fire at EVERY segment boundary
+# on EVERY env, so the worst-case upper bound is
+# max_episodes × (episode_len / segment_len) × num_envs — i.e. all segment
+# boundaries × all envs flagged. Earlier code used a flat ×5 multiplier that was
+# correct for T80 (1 segment / ep) but ~3× too small for T1280 (16 segments /
+# ep), causing premature "max_reset exceeded" stops mid-training.
 # Extract total num_envs from config (sum of per-group num_envs).
 _num_envs=$(python3 -c "
 import yaml, sys
@@ -370,10 +426,11 @@ _exact_resets=$(( _max_ep * _num_envs ))
 # Worst-case HSR budget: every env flagged at every segment boundary.
 _worst_hsr_resets=$(( _max_ep * _segs_per_ep * _num_envs ))
 
-case $RESET in
-  HSR|LSR+HSR|noep) MAX_RESET=$_worst_hsr_resets ;;
-  *)                MAX_RESET=$_exact_resets ;;
-esac
+if [ "$_hsr_on" -eq 1 ]; then
+  MAX_RESET=$_worst_hsr_resets
+else
+  MAX_RESET=$_exact_resets
+fi
 
 _require_ckpt() {
   if [ -z "$CKPT" ] || [ ! -d "$CKPT" ]; then

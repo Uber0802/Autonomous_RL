@@ -2,7 +2,7 @@
 
 One JSON describes several experiment groups; each group holds several runs, and
 a run may itself be a **resume chain** — a list of run dirs that are stitched
-into a single continuous series. Same shape as `scripts/plot_config.json`'s
+into a single continuous series. Same shape as `tools/plot_config.json`'s
 `csv_paths`, so the two config styles stay recognisable.
 
     {
@@ -114,7 +114,7 @@ def load_plot_config(path) -> PlotConfig:
 
     known = {"out_dir", "name", "groups"}
     # JSON has no comment syntax, so any key starting with "_" is treated as one
-    # and ignored — that is what `scripts/plot_runs_example.json` uses to carry
+    # and ignored — that is what `tools/plot_runs_example.json` uses to carry
     # its own documentation.
     unknown = ({k for k in raw if not k.startswith("_")}
                - known - _PLOT_PY_TOP_KEYS - TOOL_OPTION_KEYS)

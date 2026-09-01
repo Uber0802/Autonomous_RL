@@ -9,9 +9,11 @@ the mean over the `num_envs` rows of one segment.
 
 Why the `direction` filter defaults to `forward`
 ------------------------------------------------
-Under LSR / noep the segments alternate between the forward task and a reset
-goal, and the env's `success` predicate means something different in each (see
-`doc/data_schemas.md`):
+Under a reset mode that includes LSR — `LSR`, `HSR+LSR`, `noep+LSR` — the
+segments alternate between the forward task and a reset goal, and the env's
+`success` predicate means something different in each (see
+`doc/data_schemas.md`). Modes without LSR, bare `noep` included, log every row
+as `forward`, so the default filter below costs them nothing:
 
     forward         success = the scheduler's task was completed
     backward        goal is "put X on table" but success still scores the
@@ -31,7 +33,7 @@ series into a mean ± spread band. A series may be a **resume chain** — severa
 run dirs stitched into one continuous line. See `tools/plot_common.py` for the
 schema.
 
-    python tools/plot_rollout_success.py --config scripts/plot_runs_example.json
+    python tools/plot_rollout_success.py --config tools/plot_runs_example.json
 
 Companion to `tools/plot_run_trends.py`, which plots the *eval* points and the
 PPO health scalars. This one is the training-side view and needs no wandb access

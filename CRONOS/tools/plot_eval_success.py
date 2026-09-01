@@ -9,7 +9,7 @@ Input CSV schema (written by `main.py`'s `SuccessRecorder`):
 Workflow
 --------
 1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
-2. Run: `python tools/plot_eval_success.py --config scripts/plot_config.json`.
+2. Run: `python tools/plot_eval_success.py --config tools/plot_config.json`.
 3. Outputs land under `<out_dir>/`, all prefixed `<name>_` so configs can share
    a directory (`out_dir` empty/absent = the config file's own directory):
    - `<name>_aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)

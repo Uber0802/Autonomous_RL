@@ -47,8 +47,10 @@ Notes on the data
 - There is no `group` column. Filter by `--model` (the per-env model name) or
   `--task` instead; under fan-out, slot 0 is a different model in different envs.
 - `--forward-only` joins against `rollout_success.csv` on (episode, segment,
-  env) and keeps only forward segments. Worth using under LSR / noep, where half
-  the segment ends are reset-goal states and would otherwise be mixed in.
+  env) and keeps only forward segments. Worth using under a reset mode that
+  includes LSR (`LSR`, `HSR+LSR`, `noep+LSR`), where half the segment ends are
+  reset-goal states and would otherwise be mixed in. Without LSR — bare `noep`
+  included — every row is already `forward`, so it is a no-op.
 """
 
 from __future__ import annotations

@@ -152,7 +152,7 @@ bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [
 #                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
 #                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
-#                      │      │      │      └─ normal | LSR | HSR | LSR+HSR | noep (default: normal)
+#                      │      │      │      └─ normal | LSR | HSR | HSR+LSR | noep | noep+LSR (default: normal)
 #                      │      │      └─ GPU id (default: 3)
 #                      │      └─ seed (default: 0)
 #                      └─ horizon tag: t80a..t2560c (12 horizons × 3 segment-len variants)
@@ -169,8 +169,11 @@ Examples:
 # OpenVLA, T320 segment 'a', seed 0, GPU 3, normal reset
 bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2
 
-# SpatialVLA, T1280 segment 'b', seed 1, GPU 2, non-episodic (LSR+HSR + reset_mode=none)
+# SpatialVLA, T1280 segment 'b', seed 1, GPU 2, non-episodic (HSR + reset_mode=none)
 bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
+
+# Same plus a learned reset policy — the mode `noep` should be compared against
+bash scripts/train.sh t1280b 1 2 noep+LSR four_group_sequential_2x2 spatialvla
 
 # Same, but with the end effector never repositioned between segments
 bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla off
@@ -185,11 +188,12 @@ bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo
 bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
 
 # Perturbation: the LSR reset goal is sometimes "put X on the OTHER receptacle"
-# instead of always "put X on table" — widens the forward policy's start states
-bash scripts/train.sh t320a 0 3 noep four_group_sequential_2x2 openvla on ppo mixed
+# instead of always "put X on table" — widens the forward policy's start states.
+# Needs a mode with LSR; plain `noep` has no reset segment to perturb.
+bash scripts/train.sh t320a 0 3 noep+LSR four_group_sequential_2x2 openvla on ppo mixed
 
 # Perturbation composes with GRPO (orthogonal dimensions)
-bash scripts/train.sh t320a 0 3 noep four_group_sequential_2x2 openvla on grpo-task recep
+bash scripts/train.sh t320a 0 3 noep+LSR four_group_sequential_2x2 openvla on grpo-task recep
 
 # Any GRPO mode with the std term overridden (tagged, so it lands in its own dir)
 GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
@@ -197,17 +201,35 @@ GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential
 
 `RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
 
-**Reset-mode legend:**
+**Reset-mode legend** — full account in [`CRONOS/doc/reset_modes.md`](CRONOS/doc/reset_modes.md):
 
-| mode | CLI flags added | Meaning |
-|---|---|---|
-| `normal` | (nothing) | hard `env.reset()` every episode |
-| `LSR` | `--enable-backward --backward-interval 1` | learn the backward policy (put X back) alternating with forward task switches |
-| `HSR` | `--reset-unsuitable` | respawn fallen / out-of-workspace actors at every task boundary |
-| `LSR+HSR` | LSR + HSR | backward learning + soft respawn |
-| `noep` | LSR+HSR + `--reset-mode none` | non-episodic continuity (no inter-episode hard reset) |
+| mode | CLI flags added | `RUN_TAG` | Meaning |
+|---|---|---|---|
+| `normal` | (nothing) | `normal` | hard `env.reset()` every episode |
+| `LSR` | `--enable-backward --backward-interval 1` | `LSR` | learn the backward policy (put X back) alternating with forward task switches |
+| `HSR` | `--reset-unsuitable` | `HSR` | respawn fallen / out-of-workspace actors at every task boundary |
+| `HSR+LSR` | HSR + LSR | `HSRLSR` | soft respawn + backward learning. `LSR+HSR` is still accepted as input |
+| `noep` | HSR + `--reset-mode none` | `HSRnoep` | non-episodic continuity (no inter-episode hard reset). **No LSR** |
+| `noep+LSR` | HSR + LSR + `--reset-mode none` | `HSRLSRnoep` | non-episodic continuity *with* a learned reset policy |
 
-**Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR:
+`noep` means "HSR but no episodic reset" and does **not** include LSR — that is
+`noep+LSR`. The `HSR+LSR` / `noep` / `noep+LSR` triple is what separates "does
+removing the episodic reset hurt" from "does learning a reset policy pay for it".
+
+> ⚠️ **`noep` changed meaning, and the tags were renamed.** It used to expand to
+> LSR+HSR+`--reset-mode none`, i.e. today's `noep+LSR`. Any run directory
+> containing `-noep-` predates the change and is a `noep+LSR` run under the
+> current definition — do not put it in the same plot-config group as a new
+> `-HSRnoep-` run. The tag rename (`LSR+HSR`→`HSRLSR`, `noep`→`HSRnoep`,
+> `noep+LSR`→`HSRLSRnoep`) guarantees no new run collides with a historical one.
+
+> ⚠️ Bare `noep` has no mechanism that returns a *successfully placed* object to
+> its initial state: HSR respawns only what its detector flags as fallen or out
+> of bounds, and there is no `env.reset()`. Start states therefore drift toward
+> already-satisfied tasks, which inflates both reward and rollout success rate.
+> `main.py` warns at startup; `doc/reset_modes.md` says how to check for it.
+
+**Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR (`LSR`, `HSR+LSR`, `noep+LSR`):
 
 | perturb | CLI flags added | LSR reset goal |
 |---|---|---|
@@ -225,7 +247,7 @@ forward policy's start-state distribution narrow (arXiv:2004.12570 §4.1).
 `off` emits no flag, no tag, and does not draw from the RNG, so it is numerically
 identical to before the option existed.
 
-**EER (End-Effector Reset)** — the 7th positional arg, orthogonal to all five reset modes above:
+**EER (End-Effector Reset)** — the 7th positional arg, orthogonal to every reset mode above:
 
 | eer | CLI flag added | Meaning |
 |---|---|---|
@@ -284,9 +306,11 @@ Written to the run's `glob/` on every run; full column specs in
 
 `rollout_success.csv` uses the **same** `success` definition as eval — the value
 at the segment's final step — so rollout and eval curves are directly
-comparable; they differ only in when they are sampled. Under LSR/noep, filter
-`direction == 'forward'` before aggregating: the env's success predicate is
-always the forward one, so backward segments score 0 by construction.
+comparable; they differ only in when they are sampled. Under a mode with LSR
+(`LSR`, `HSR+LSR`, `noep+LSR`), filter `direction == 'forward'` before
+aggregating: the env's success predicate is always the forward one, so backward
+segments score 0 by construction. Modes without LSR — including bare `noep` —
+log every row as `forward`, so the filter is a harmless no-op there.
 
 ### Evaluation (standalone)
 
@@ -426,7 +450,7 @@ table.
 | `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
 | `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
 | `--segment` / `--episode-range LO:HI` / `--last-episodes N` | Narrow in time |
-| `--forward-only` | Join `rollout_success.csv` on (episode, segment, env) and keep only forward segments — worth using under LSR / noep, where half the segment ends are reset-goal states |
+| `--forward-only` | Join `rollout_success.csv` on (episode, segment, env) and keep only forward segments — worth using under a mode with LSR (`LSR`, `HSR+LSR`, `noep+LSR`), where half the segment ends are reset-goal states. A no-op without LSR |
 | `--hexbin` | Density hexbin instead of the episode-coloured scatter |
 | `--workspace=X0,X1,Y0,Y1` | Overlay a rectangle, e.g. `workspace_aabb` bounds being validated. Use the `=` form — the bounds are negative and argparse would read them as a flag |
 
@@ -442,8 +466,8 @@ a list is a resume chain** — those run dirs are stitched into one continuous
 series, with the child winning at any overlapping `total_steps`.
 
 ```bash
-python tools/plot_rollout_success.py   --config scripts/plot_runs_example.json
-python tools/plot_segment_positions.py --config scripts/plot_runs_example.json --actor-kind obj
+python tools/plot_rollout_success.py   --config tools/plot_runs_example.json
+python tools/plot_segment_positions.py --config tools/plot_runs_example.json --actor-kind obj
 ```
 
 ```json
@@ -461,7 +485,7 @@ python tools/plot_segment_positions.py --config scripts/plot_runs_example.json -
 ```
 
 Schema and full docs in [`tools/plot_common.py`](CRONOS/tools/plot_common.py);
-a ready-to-edit copy is [`scripts/plot_runs_example.json`](CRONOS/scripts/plot_runs_example.json).
+a ready-to-edit copy is [`tools/plot_runs_example.json`](CRONOS/tools/plot_runs_example.json).
 Top-level keys starting with `_` are ignored, so the example carries its own notes.
 
 ##### Runs recorded before the `phase` split
@@ -490,14 +514,14 @@ four-point geometries × 4! slot permutations, occupying just 16 xy positions
 (a 4×4 corner sub-grid) — the workspace is 0.15 × 0.15 m and the spacing
 constraint is 0.12 m, so the points are pushed into the corners.
 
-#### Cross-run aggregator — `scripts/plot.py`
+#### Cross-run aggregator — `tools/plot_eval_success.py`
 
 Reads multiple `eval_success.csv` files (one per seed × config × condition), aggregates mean ± std, and writes 4 main PNGs (ID/OOD × Steps/Resets) plus 2 gap PNGs (success vs grasp).
 
 ```bash
-# 1. Edit scripts/plot_config.json — list run groups (label → list of CSV paths)
+# 1. Edit tools/plot_config.json — list run groups (label → list of CSV paths)
 # 2. Run the aggregator
-python scripts/plot.py --config scripts/plot_config.json
+python tools/plot_eval_success.py --config tools/plot_config.json
 ```
 
 `plot_config.json` schema (one entry per logical comparison curve):
@@ -746,7 +770,7 @@ without modifying AutoRL. Full analysis in
 | `tools/plot_run_trends.py` | Per-run live 4-panel dashboard (see [Visualization](#visualization)) |
 | `tools/plot_rollout_success.py` | Per-segment (per-80-step) rollout success rate from `rollout_success.csv` |
 | `tools/plot_segment_positions.py` | Per-segment actor position distribution from `segment_pose.csv` |
-| `scripts/plot.py` | Cross-run aggregator over `eval_success.csv` files |
+| `tools/plot_eval_success.py` | Cross-run aggregator over `eval_success.csv` files |
 | `tools/mcnemar_pair.py` | Paired McNemar gate over `eval_per_trial.csv` |
 | `tools/parse_autorl_eval.py` | Rebuild a correct per-trial baseline from an AutoRL run's video filenames (read-only; AutoRL is never modified) |
 | `tools/bench_rollout.py` | Rollout throughput + GPU peak memory per package stack, with a phase breakdown (inference / env.step / buffer / PPO update) |
