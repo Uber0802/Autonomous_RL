@@ -53,7 +53,8 @@ _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 # tool does not understand are simply ignored, exactly like the eval-SR keys
 # above — one config can carry settings for all three tools.
 TOOL_OPTION_KEYS = {
-    "actor_kind", "phase", "workspace_scale",   # plot_segment_positions.py
+    # plot_segment_positions.py
+    "actor_kind", "phase", "workspace_scale", "step_range",
     "direction", "by", "metric", "smooth",      # plot_rollout_success.py
 }
 

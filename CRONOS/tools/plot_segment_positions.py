@@ -18,6 +18,13 @@ A boundary is not one instant, which is what the `phase` column records:
 on by default in every reset mode, so the gripper always differs between them
 and the objects often do.
 
+A run recorded before the `phase` split holds only `end` rows, and `--phase
+start` then rebuilds them: the start of segment s is the recorded end of s-1
+wherever the boundary provably did not move anything, and only the boundaries
+that really are an `env.reset()` draw are synthesized. See `rebuild_start_rows`
+— it also explains when the rebuild is not available and the tool falls back to
+synthesizing every start.
+
     python tools/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
 Layout: **one PNG per figure, never a grid.** Each figure is a single xy scatter
@@ -32,6 +39,11 @@ writes, which is what actually makes them comparable.
     recep   the receptacles they are moved onto
 
 The scatter is coloured by episode, so drift over training is visible.
+
+`--step-range` selects which part of the run to draw and **defaults to
+`0:655360`**, one training segment's step budget, so a resumed run is cropped to
+its first segment unless the range is widened (`--step-range all` for the whole
+run). Recorded and rebuilt rows are treated the same by it.
 
 Notes on the data
 -----------------
@@ -125,6 +137,37 @@ def parse_actor_kinds(value) -> list:
                          f"{list(_VALID_KINDS)} or 'all', comma-separated")
     # De-duplicate while keeping _KIND_ORDER for a stable figure order.
     return [k for k in _VALID_KINDS if k in parts]
+
+
+# `--step-range` default: one training segment's step budget (see
+# `scripts/train.sh`'s horizon table — the 'a' segments each run 655,360 env
+# steps, and every horizon's `total_steps` advances 5120 per boundary). A run
+# longer than this is CROPPED by default, so `apply_filters` always reports what
+# the range kept.
+DEFAULT_STEP_RANGE = "0:163840"
+
+
+def parse_step_range(value):
+    """`--step-range` / config `step_range` -> (lo, hi), or None for no filter.
+
+    Accepts `LO:HI`, an open end on either side (`:HI`, `LO:`), and `all`.
+    """
+    if value is None:
+        value = DEFAULT_STEP_RANGE
+    text = str(value).strip()
+    if text.lower() in ("all", "none", ""):
+        return None
+    if ":" not in text:
+        raise SystemExit(f"--step-range must look like LO:HI (or 'all'), got {text!r}")
+    lo_s, hi_s = text.split(":", 1)
+    try:
+        lo = float(lo_s) if lo_s.strip() else float("-inf")
+        hi = float(hi_s) if hi_s.strip() else float("inf")
+    except ValueError:
+        raise SystemExit(f"--step-range bounds must be numbers, got {text!r}")
+    if lo > hi:
+        raise SystemExit(f"--step-range LO must not exceed HI, got {text!r}")
+    return lo, hi
 
 
 def _slug(text: str) -> str:
@@ -301,7 +344,9 @@ def _report_offscreen(df: pd.DataFrame, xlim, ylim, label: str = "") -> int:
     return int(off)
 
 
-def synth_start_poses(run_dir: Path, n_draws: int, seed: int = 0) -> pd.DataFrame:
+def synth_start_poses(run_dir: Path, n_draws: int, seed: int = 0,
+                      segment: int = 1, episodes=None,
+                      total_steps=None) -> pd.DataFrame:
     """Reconstruct the *distribution* of segment-start poses for an old run.
 
     Runs recorded before the `phase` split hold end-of-segment rows only, and the
@@ -322,7 +367,19 @@ def synth_start_poses(run_dir: Path, n_draws: int, seed: int = 0) -> pd.DataFram
     episodes x 64 envs) draws far more than a T2560 one (4 x 64), and the plots
     show that difference in density instead of hiding it.
 
-    Rows come back tagged `phase="start"`, `synthetic=True`.
+    **This is only the right reconstruction for a boundary that really is a
+    fresh draw** — i.e. an `env.reset()`. `rebuild_start_rows` decides which
+    boundaries those are and calls this for those alone; every other segment
+    start is carried over from the recorded `end` instead. See that function.
+
+    Rows come back tagged `phase="start"`, `synthetic=True`, and `segment` set
+    by the caller: 1 when these are episode-first starts, -1 when the run's
+    structure could not be determined and every start is being synthesized.
+
+    `episodes` / `total_steps` are per-draw stamps, length `n_draws`. Passing
+    them makes the synthetic rows selectable by `--step-range`, `--episode-range`
+    and `--last-episodes` like any other row; without them the rows carry -1 and
+    those filters treat them as undated (see `apply_filters`).
     """
     try:
         pose_configs(_NXM_PRESET[(2, 2)][0])   # probe importability
@@ -350,7 +407,12 @@ def synth_start_poses(run_dir: Path, n_draws: int, seed: int = 0) -> pd.DataFram
         for logical in range(count):
             p = xyz[idx, physical(base + logical)]            # (n_draws, 3)
             rows.append(pd.DataFrame({
-                "episode": -1, "segment": -1, "phase": "start", "total_steps": -1,
+                # Without stamps `episode`/`total_steps` stay -1: the draws are
+                # exchangeable, so no row can be attributed to a moment in the
+                # run. With stamps each draw belongs to a known boundary.
+                "episode": -1 if episodes is None else episodes,
+                "segment": segment, "phase": "start",
+                "total_steps": -1 if total_steps is None else total_steps,
                 "env": np.arange(n_draws) % max(1, int(rc.get("num_envs", 64))),
                 "actor_kind": kind, "slot": logical,
                 "model_name": "", "task": "",
@@ -387,23 +449,176 @@ def reset_count(run_dir: Path) -> int:
                      f"(no counters.json, no rollout_success.csv)")
 
 
+def _segments_per_episode(rc: dict):
+    """`episode_len / task_len` — how many segment boundaries an episode holds.
+
+    1 means every segment start is also an episode start, so every one of them
+    follows a full `env.reset()`. That is the T80 case, and the only shape for
+    which synthesizing *all* starts is right.
+    """
+    try:
+        ep, task = int(rc["episode_len"]), int(rc["task_len"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return max(1, ep // task) if task > 0 else None
+
+
+def _carryover_is_exact(rc: dict):
+    """Whether the end of one segment IS the start of the next, exactly.
+
+    Between the `phase="end"` record and the next segment's first step the train
+    loop runs exactly two things that can move an actor, and nothing else:
+
+        --reset-unsuitable   HSR respawns the flagged envs to a fresh draw
+        --reset-robot        EER's `reset_robot()`, whose `_settle(0.5)` also
+                             lets objects drift
+
+    With both off, the boundary only reassigns the task and no `env.step` runs,
+    so the poses are unchanged and the carry-over is exact rather than merely
+    close. LSR is irrelevant here: `set_backward_goals` swaps the goal, not the
+    poses.
+
+    Returns `(exact, reason_if_not)`.
+    """
+    if rc.get("reset_unsuitable"):
+        return False, "reset_unsuitable=True — HSR respawns flagged envs at the boundary"
+    if rc.get("reset_robot"):
+        return False, "reset_robot=True — EER's _settle(0.5) nudges objects"
+    return True, ""
+
+
+def rebuild_start_rows(run_dir: Path, df: pd.DataFrame, args) -> pd.DataFrame:
+    """`phase=start` rows for a run that only recorded `phase=end`.
+
+    Only the boundaries that really are a fresh `xyz_configs` draw need
+    synthesizing. Every other segment start is a pose the run already recorded,
+    one segment earlier — `segment` in the CSV is 1-based and the recorder logs
+    the start of segment s with that same s, so the start of s is the end of
+    s-1. Synthesizing all of them (which this tool used to do) throws away
+    those measurements and replaces them with an idealized 16-site lattice; the
+    further into an episode a segment sits the more wrong that is. Measured on
+    Q1's T320, the fraction of end poses still within 1 mm of a spawn site falls
+    26.9% -> 22.2% -> 18.1% -> 15.1% across the four segments of an episode.
+
+    Which boundaries are fresh draws depends on the reset mode:
+
+        reset_mode=per_episode   segment 1 of every episode (`env.reset()`)
+        reset_mode=none          only the very first boundary of the run
+
+    Returns the rows to append to `df`. Empty when the run's structure cannot be
+    determined or the carry-over would not be exact — the caller then falls back
+    to synthesizing everything, which is the previous behaviour.
+    """
+    rc = read_run_config(run_dir)
+    if not rc:
+        print(f"[start] {run_dir.name}: no run_config.json, cannot tell which "
+              f"boundaries were env.reset() — synthesizing every start",
+              file=sys.stderr)
+        return pd.DataFrame()
+
+    segs = _segments_per_episode(rc)
+    if segs is None:
+        print(f"[start] {run_dir.name}: run_config.json has no episode_len/"
+              f"task_len — synthesizing every start", file=sys.stderr)
+        return pd.DataFrame()
+
+    exact, why = _carryover_is_exact(rc)
+    if not exact:
+        print(f"[start] {run_dir.name}: {why}; the previous segment's end is no "
+              f"longer the next one's start — synthesizing every start",
+              file=sys.stderr)
+        return pd.DataFrame()
+
+    end = df[df["phase"] == "end"]
+    if end.empty:
+        return pd.DataFrame()
+
+    per_episode = str(rc.get("reset_mode", "per_episode")) != "none"
+    # segs == 1 (T80) needs no special case: every boundary is then an episode
+    # first, `nxt % segs != 0` is false for all of them, and the code below
+    # correctly derives nothing and synthesizes every start — which for that
+    # shape is the right answer, not a fallback. Going through the same path
+    # also stamps those draws with their episode and step.
+
+    # Flatten (episode, segment) to one boundary ordinal so both reset modes are
+    # handled by the same "the start of ordinal o+1 is the end of ordinal o".
+    eps = sorted(end["episode"].unique())
+    ep_idx = {e: i for i, e in enumerate(eps)}
+    inv = {i: e for e, i in ep_idx.items()}
+    n_bnd = len(eps) * segs
+
+    end = end.copy()
+    end["_ord"] = end["episode"].map(ep_idx) * segs + (end["segment"] - 1)
+    nxt = end["_ord"] + 1
+    keep = nxt < n_bnd                      # the run's last end feeds no start
+    if per_episode:
+        keep &= (nxt % segs != 0)           # episode-first starts are fresh draws
+    derived = end[keep].copy()
+    derived["_ord"] = derived["_ord"] + 1
+    derived["episode"] = (derived["_ord"] // segs).map(inv)
+    derived["segment"] = (derived["_ord"] % segs) + 1
+    derived["phase"] = "start"
+    derived["synthetic"] = False            # a recorded pose, re-labelled
+    derived = derived.drop(columns=["_ord"])
+
+    # Every boundary that is NOT derived is a fresh draw and still needs one.
+    # Stamp each draw with the boundary it stands for so it filters like real
+    # data: a boundary's start is the previous boundary's end, i.e. one
+    # boundary's worth of steps earlier (`task_len * num_envs` — every boundary
+    # advances `total_steps` by exactly that).
+    n_envs = max(1, int(rc.get("num_envs", 64)))
+    step_per_bnd = int(rc.get("task_len", 80)) * n_envs
+    firsts = (end[end["segment"] == 1][["episode", "total_steps"]]
+              .drop_duplicates().sort_values("episode"))
+    if not per_episode:
+        firsts = firsts.head(1)        # only the run's very first boundary
+    ep_stamp = np.repeat(firsts["episode"].to_numpy(), n_envs)
+    ts_stamp = np.repeat(firsts["total_steps"].to_numpy() - step_per_bnd, n_envs)
+    n_fresh = len(firsts)
+
+    print(f"[start] {run_dir.name}: {segs} segments/episode, "
+          f"reset_mode={'per_episode' if per_episode else 'none'} -> "
+          f"{len(derived)} start rows carried over from the recorded ends, "
+          f"{n_fresh}/{n_bnd} boundaries still need a draw", file=sys.stderr)
+
+    if args.no_synth:
+        print(f"[start] {run_dir.name}: --no-synth, so the {n_fresh} "
+              f"env.reset() boundaries are omitted", file=sys.stderr)
+        return derived
+    synth = synth_start_poses(run_dir, n_fresh * n_envs, args.synth_seed,
+                              segment=1, episodes=ep_stamp, total_steps=ts_stamp)
+    return pd.concat([derived, synth], ignore_index=True)
+
+
+def ensure_start_rows(run_dir: Path, df: pd.DataFrame, args) -> pd.DataFrame:
+    """Append rebuilt `phase=start` rows when `df` has none and they are wanted.
+
+    Shared by the single-run and `--config` paths. It used to live only in the
+    group loader, so `--run-dir --phase start` on a pre-`phase` run failed with
+    "no rows with phase='start'" instead of rebuilding them.
+    """
+    if args.phase not in ("start", "all"):
+        return df
+    if (df["phase"] == "start").any():
+        return df
+    extra = rebuild_start_rows(run_dir, df, args)
+    if extra.empty and args.no_synth:
+        print(f"[warn] {run_dir.name}: no phase=start rows, nothing could be "
+              f"carried over, and --no-synth given", file=sys.stderr)
+    elif extra.empty:
+        extra = synth_start_poses(run_dir, reset_count(run_dir),
+                                  args.synth_seed, segment=-1)
+    return pd.concat([df, extra], ignore_index=True) if not extra.empty else df
+
+
 def load_group_poses(run_dirs, args) -> pd.DataFrame:
-    """Load one group's runs, synthesizing `start` rows where they are missing."""
+    """Load one group's runs, rebuilding `start` rows where they are missing."""
     frames = []
     for run_dir in run_dirs:
         run_dir = Path(run_dir)
         df = load_pose(run_dir / "segment_pose.csv")
         df["synthetic"] = False
-        has_start = (df["phase"] == "start").any()
-        if args.phase in ("start", "all") and not has_start:
-            if args.no_synth:
-                print(f"[warn] {run_dir.name}: no phase=start rows and --no-synth "
-                      f"given; skipping", file=sys.stderr)
-            else:
-                df = pd.concat(
-                    [df, synth_start_poses(run_dir, reset_count(run_dir), args.synth_seed)],
-                    ignore_index=True)
-        frames.append(df)
+        frames.append(ensure_start_rows(run_dir, df, args))
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -428,6 +643,24 @@ def apply_filters(df: pd.DataFrame, args, csv_path: Path) -> pd.DataFrame:
         df = df[df["task"].astype(str).str.contains(args.task, case=False, na=False)]
     if args.segment is not None:
         df = df[df["segment"] == args.segment]
+    rng = parse_step_range(args.step_range)
+    if rng is not None:
+        lo, hi = rng
+        # Rows with total_steps < 0 are undated — synthetic draws made without a
+        # known boundary (see `synth_start_poses`). They are kept rather than
+        # silently dropped, because dropping them would empty the figure for a
+        # run whose structure could not be reconstructed.
+        dated = df["total_steps"] >= 0
+        before = len(df)
+        df = df[~dated | (df["total_steps"].between(lo, hi))]
+        undated = int((~dated).sum())
+        note = f", {undated} undated rows kept" if undated else ""
+        print(f"[pose] --step-range {lo:g}:{hi:g} kept {len(df)}/{before} rows"
+              f"{note}", file=sys.stderr)
+        if len(df) < before - undated:
+            print(f"[pose] {before - undated - (len(df) - undated)} rows lie "
+                  f"outside that step range — widen it or pass "
+                  f"--step-range all to use the whole run", file=sys.stderr)
     if args.episode_range:
         try:
             lo, hi = (int(v) for v in args.episode_range.split(":"))
@@ -597,26 +830,23 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
     written = []
     for label, color, kind, sub in panels:
         _report_offscreen(sub, xlim, ylim, f"{label} / {kind}")
-        real = sub[~sub["synthetic"]]
-        synth = sub[sub["synthetic"]]
+        n_synth = int(sub["synthetic"].sum())
         fig, ax = _new_panel()
         if args.hexbin:
             hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
                            mincnt=1, linewidths=0, extent=(*xlim, *ylim))
             fig.colorbar(hb, ax=ax, label="count", shrink=0.85)
         else:
-            # Real and reconstructed points are drawn distinctly and never
-            # merged into one cloud: the synthetic set is a uniform draw over the
-            # discrete `xyz_configs` table, so it looks nothing like a recorded
-            # distribution and pooling them silently would misrepresent both.
-            if len(real):
-                ax.scatter(real["px"], real["py"], s=6, alpha=0.35, linewidths=0,
-                           color=color, label=f"recorded ({len(real)})")
-            if len(synth):
-                ax.scatter(synth["px"], synth["py"], s=26, alpha=0.75, marker="x",
-                           linewidths=0.9, color="black",
-                           label=f"synthetic ({len(synth)})")
-        tag = f"  [{len(synth)}/{len(sub)} synthetic]" if len(synth) else ""
+            # One style for both. The synthetic rows are no longer a stand-in
+            # for the whole run: `rebuild_start_rows` synthesizes only the
+            # boundaries that really are an `env.reset()` draw, and for those the
+            # uniform draw over `xyz_configs` IS the initial-state distribution
+            # — the same quantity the recorded rows carry. Drawing them as black
+            # crosses made a legitimate part of the distribution read as an
+            # annotation. The synthetic share stays visible in the title.
+            ax.scatter(sub["px"], sub["py"], s=6, alpha=0.35, linewidths=0,
+                       color=color, label=f"{kind} ({len(sub)})")
+        tag = f"  [{n_synth}/{len(sub)} synthetic]" if n_synth else ""
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace,
                       title=f"{label} — {kind}  (n={len(sub)}){tag}\n{_low_z_note(sub)}")
         out = out_variant(out_base, slugs[label], kind)
@@ -656,10 +886,12 @@ def main():
                         "Default: <run-dir>/segment_positions.png, or "
                         "<out_dir>/<name>_segment_positions.png in --config mode")
     p.add_argument("--no-synth", action="store_true",
-                   help="--config mode: skip runs that lack phase=start rows instead "
-                        "of reconstructing their start distribution by drawing "
-                        "uniformly from the same `xyz_configs` table the env samples, "
-                        "as many times as the run actually reset")
+                   help="for a run that recorded no phase=start rows, omit the "
+                        "env.reset() boundaries instead of drawing them from the "
+                        "same `xyz_configs` table the env samples. The starts "
+                        "carried over from the recorded ends are still used, so "
+                        "this gives measured data only — at the cost of dropping "
+                        "segment 1 of every episode")
     p.add_argument("--synth-seed", type=int, default=0,
                    help="seed for the synthetic draw (reproducible plots)")
     p.add_argument("--phase", default=None, choices=["start", "end", "all"],
@@ -679,6 +911,14 @@ def main():
     p.add_argument("--task", default=None, help="substring match on the task string")
     p.add_argument("--segment", type=int, default=None,
                    help="keep only this 1-based segment index within each episode")
+    p.add_argument("--step-range", default=None, metavar="LO:HI",
+                   help=f"keep only boundaries whose `total_steps` falls in this "
+                        f"range, so one training segment of a resumed run can be "
+                        f"plotted on its own. Default {DEFAULT_STEP_RANGE} (one "
+                        f"segment's step budget); either side may be left open "
+                        f"(':HI', 'LO:') and 'all' disables the filter. Can also "
+                        f"be set in the config as `step_range`. What it kept is "
+                        f"always reported on stderr.")
     p.add_argument("--episode-range", default=None, metavar="LO:HI")
     p.add_argument("--last-episodes", type=int, default=None,
                    help="keep only the last N episodes")
@@ -722,6 +962,8 @@ def main():
         args.phase = cfg.option("phase", args.phase, "start")
         args.workspace_scale = float(cfg.option("workspace_scale",
                                                 args.workspace_scale, 3.0))
+        args.step_range = cfg.option("step_range", args.step_range,
+                                     DEFAULT_STEP_RANGE)
         out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_segment_positions.png"
         for path in render_groups(cfg, out, args=args):
             print(f"[ok] wrote {path}", file=sys.stderr)
@@ -735,6 +977,7 @@ def main():
     ws = None if args.no_clip else workspace_extent([csv_path.parent])
     df = load_pose(csv_path)
     df["synthetic"] = False
+    df = ensure_start_rows(csv_path.parent, df, args)
     df = apply_filters(df, args, csv_path)
     summarize(df)
 

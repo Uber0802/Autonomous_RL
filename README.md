@@ -449,6 +449,7 @@ table.
 | `--config` | JSON with several groups of runs; one column per group. See [Comparing runs](#comparing-several-runs) |
 | `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
 | `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
+| `--step-range LO:HI` | Keep only boundaries whose `total_steps` falls in the range, so one training segment of a resumed run can be plotted on its own. **Defaults to `0:655360`** — one segment's step budget — so a longer run is cropped unless you widen it or pass `--step-range all`. Either side may be left open (`:HI`, `LO:`). What it kept is always reported on stderr. Config key: `step_range` |
 | `--segment` / `--episode-range LO:HI` / `--last-episodes N` | Narrow in time |
 | `--forward-only` | Join `rollout_success.csv` on (episode, segment, env) and keep only forward segments — worth using under a mode with LSR (`LSR`, `HSR+LSR`, `noep+LSR`), where half the segment ends are reset-goal states. A no-op without LSR |
 | `--hexbin` | Density hexbin instead of the episode-coloured scatter |
