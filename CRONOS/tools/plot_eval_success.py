@@ -309,11 +309,26 @@ def moving_average(y: np.ndarray, window: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+# Columns `aggregate_all` produces. Named so the empty case can still carry
+# them: `pd.DataFrame([])` has no columns at all, so every downstream
+# `long_df["eval_kind"]` raised `KeyError: 'eval_kind'` from deep inside pandas
+# instead of saying that nothing was aggregated.
+_AGG_COLUMNS = ("group", "eval_kind", "x_axis", "x_value",
+                "metric", "mean", "std", "n_runs")
+_SUMMARY_COLUMNS = ("group", "eval_kind", "x_axis", "metric",
+                    "final_x", "final_mean", "final_std", "n_runs")
+
+
 def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Build the long-form `aggregated` table + the `summary` table.
 
     `aggregated` columns: group, eval_kind, x_axis, x_value, metric, mean, std, n_runs
-    `summary` columns:    group, eval_kind, metric, final_mean, final_std, n_runs
+    `summary` columns:    group, eval_kind, x_axis, metric, final_x, final_mean,
+                          final_std, n_runs
+
+    Both frames come back with those columns even when no group yielded a
+    single row, so a caller can test `.empty` instead of tripping over a
+    missing column.
     """
     long_rows = []
     summary_rows = []
@@ -326,6 +341,7 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
         except (FileNotFoundError, TypeError, ValueError) as e:
             print(f"  [WARN] {spec.label}: {e}")
             continue
+        rows_before = len(long_rows)
         # Apply BOTH end_steps and end_resets crops at the row level so every
         # x_axis view sees the same eval-point subset. Without this, a run
         # cropped to end_steps on the step-axis would still contribute its
@@ -369,7 +385,18 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
                         "final_std": float(std[-1]),
                         "n_runs": n_runs,
                     })
-    return pd.DataFrame(long_rows), pd.DataFrame(summary_rows)
+        if len(long_rows) == rows_before:
+            # The CSVs loaded but nothing survived. Report the group's own
+            # contents so the cause is visible without opening the files: it is
+            # almost always an `eval_kind` that is not in `cfg.eval_kinds`, or a
+            # filter / crop that removed every row.
+            kinds = sorted({k for d in dfs for k in d["eval_kind"].unique()})
+            print(f"  [WARN] {spec.label}: loaded {sum(len(d) for d in dfs)} rows "
+                  f"but produced no curve. eval_kind present: {kinds or '(none)'}; "
+                  f"config wants: {list(cfg.eval_kinds)}. Also check "
+                  f"cronos_group_filter / task_filter / end_steps / end_resets.")
+    return (pd.DataFrame(long_rows, columns=list(_AGG_COLUMNS)),
+            pd.DataFrame(summary_rows, columns=list(_SUMMARY_COLUMNS)))
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +503,22 @@ def main() -> int:
 
     print("[plot] aggregating...")
     long_df, summary_df = aggregate_all(cfg)
+    if long_df.empty:
+        # Stop here rather than at the first `long_df["eval_kind"]` in the plot
+        # layer: every group already printed a [WARN] naming its own reason, and
+        # continuing would only bury those behind a pandas KeyError.
+        raise SystemExit(
+            "[plot] nothing was aggregated — no figure can be drawn.\n"
+            "  The per-group [WARN] lines above give the reason. The usual ones:\n"
+            "    * a `runs`/`csv_paths` path does not exist (the segs/seed line\n"
+            "      above shows 0 for those), or points at a run dir instead of\n"
+            "      its glob/ subdirectory\n"
+            "    * the run is eval-only / too early and eval_success.csv has no\n"
+            "      rows yet\n"
+            "    * `eval_kinds` in the config does not match the eval_kind values\n"
+            "      in the CSV\n"
+            "    * cronos_group_filter / task_filter matches nothing\n"
+            "    * end_steps / end_resets crop away every eval point")
     # `<name>_` prefixed like every PNG below: without it two configs sharing an
     # out_dir silently overwrite each other's aggregates.
     agg_csv = out_dir / f"{cfg.name}_aggregated.csv"

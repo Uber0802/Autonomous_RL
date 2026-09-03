@@ -196,6 +196,7 @@ def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
     fig, ax = new_curve_figure()
     colors = default_colors(len(cfg.groups))
     x_max = 0.0
+    drawn = 0
 
     for gi, group in enumerate(cfg.groups):
         series = []
@@ -238,6 +239,17 @@ def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
         plot_group_curve(ax, x, mean_y, std_y, color=colors[gi],
                          label=group.label, n_series=n)
         x_max = max(x_max, float(x.max()) if len(x) else 0.0)
+        drawn += 1
+
+    if not drawn:
+        # Without this the figure saves as an empty pair of axes, which reads as
+        # "the policy scored zero" rather than "no input was found".
+        raise SystemExit(
+            f"[rollout] no group produced a curve — nothing to plot.\n"
+            f"  The [warn] lines above name the groups. Check that each `runs`\n"
+            f"  entry points at a run's glob/ dir containing rollout_success.csv\n"
+            f"  (an eval-only run has none), and that direction={direction!r} and\n"
+            f"  metric={metric!r} exist in it.")
 
     style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
     smooth_note = f", MA{smooth}" if smooth > 1 else ""
