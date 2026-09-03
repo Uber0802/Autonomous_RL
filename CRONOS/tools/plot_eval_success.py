@@ -435,9 +435,9 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
                          label=spec.label, n_series=n)
         x_max = max(x_max, float(x.max()) if len(x) else 0.0)
     style_curve_axes(ax, x_axis=x_axis, y_label="success", x_max=x_max)
-    ax.set_title(f"eval success ({eval_kind}, MA{cfg.smoothing_window}); "
-                 f"band = ±1 std across series")
-    save_curve_figure(fig, out_path, suptitle=cfg.name)
+    # No title / suptitle: eval_kind and x_axis are already in the filename, and
+    # the smoothing window and band meaning are settings rather than findings.
+    save_curve_figure(fig, out_path)
 
 
 def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
@@ -468,9 +468,7 @@ def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
             x_max = max(x_max, float(x.max()) if len(x) else 0.0)
     style_curve_axes(ax, x_axis="total_steps", y_label="success / grasp",
                      x_max=x_max)
-    ax.set_title(f"eval success vs grasp ({eval_kind}, MA{cfg.smoothing_window}); "
-                 f"gap = placement-collapse early warning")
-    save_curve_figure(fig, out_path, suptitle=cfg.name)
+    save_curve_figure(fig, out_path)
 
 
 # ---------------------------------------------------------------------------

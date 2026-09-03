@@ -252,10 +252,12 @@ def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
             f"  metric={metric!r} exist in it.")
 
     style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
+    # No title: direction / smoothing / band meaning are settings, not findings,
+    # and they are already on stderr with the per-group series counts.
     smooth_note = f", MA{smooth}" if smooth > 1 else ""
-    ax.set_title(f"per-segment {metric} (direction={direction}{smooth_note}); "
-                 f"band = ±1 std across series")
-    return save_curve_figure(fig, out_path, suptitle=cfg.name)
+    print(f"[rollout] per-segment {metric} (direction={direction}{smooth_note}); "
+          f"band = ±1 std across series", file=sys.stderr)
+    return save_curve_figure(fig, out_path)
 
 
 def summarize(df: pd.DataFrame, direction: str) -> None:

@@ -40,10 +40,10 @@ writes, which is what actually makes them comparable.
 
 The scatter is coloured by episode, so drift over training is visible.
 
-`--step-range` selects which part of the run to draw and **defaults to
-`0:655360`**, one training segment's step budget, so a resumed run is cropped to
-its first segment unless the range is widened (`--step-range all` for the whole
-run). Recorded and rebuilt rows are treated the same by it.
+`--step-range` selects which part of the run to draw, and its default
+(`DEFAULT_STEP_RANGE`) is **not the whole run** — a longer run is cropped unless
+the range is widened, so pass `--step-range all` for everything. What it kept is
+always reported on stderr. Recorded and rebuilt rows are treated the same by it.
 
 Notes on the data
 -----------------
@@ -706,38 +706,45 @@ def _new_panel():
     return plt.subplots(figsize=(5.8, 5.8))
 
 
-def _low_z_note(sub: pd.DataFrame) -> str:
-    """What the removed pz histogram was for, as one line of title.
+def report_panel(label: str, sub: pd.DataFrame) -> None:
+    """What the figure no longer says, on stderr.
 
-    The histogram's only real question was "how many actors fell off the
-    table", and the answer is a count, so it costs a line of text rather than
-    half a figure.
+    The panel used to carry the point count, the synthetic share and the
+    below-`low_z` fraction in its title. The figures are captioned wherever they
+    are used, so the title is gone — but the numbers are still the ones you need
+    to read the cloud, so they are printed instead of dropped.
     """
     below = int((sub["pz"] < LOW_Z_THRESHOLD).sum())
-    return (f"{below}/{len(sub)} below low_z={LOW_Z_THRESHOLD} "
-            f"({below / max(1, len(sub)):.1%})")
+    n_synth = int(sub["synthetic"].sum())
+    synth = f", {n_synth} synthetic" if n_synth else ""
+    print(f"[pose] {label}: n={len(sub)}{synth}, {below} below "
+          f"low_z={LOW_Z_THRESHOLD} ({below / max(1, len(sub)):.1%})",
+          file=sys.stderr)
 
 
-def _finish_panel(ax, *, xlim, ylim, workspace, title: str) -> None:
+def _finish_panel(ax, *, xlim, ylim, workspace) -> None:
     if workspace:
         x0, x1, y0, y1 = workspace
         ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
                                    edgecolor="crimson", linestyle="--",
                                    linewidth=1.2, label="workspace"))
-    ax.set_title(title, fontsize=10)
+    # No title and no legend. There is one actor kind and one experiment per
+    # figure, so a legend labels the only series on the axes, and the caption
+    # belongs to whatever document uses the figure. `report_panel` prints the
+    # counts. The workspace rectangle keeps its label only so a reader who
+    # enables it can still tell what the dashed box is — see below.
     ax.set_xlabel("px")
     ax.set_ylabel("py")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.25)
-    if ax.get_legend_handles_labels()[0]:
+    if workspace:
         ax.legend(loc="upper right", fontsize=7)
 
 
-def _save_panel(fig, out_path: Path, suptitle: str) -> Path:
-    fig.suptitle(suptitle, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+def _save_panel(fig, out_path: Path) -> Path:
+    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
@@ -751,8 +758,9 @@ def _announce_view(ws, scale: float, xlim, ylim) -> None:
               file=sys.stderr)
 
 
-def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace, title: str,
-           robust: bool = True, ws=None, scale: float = 3.0) -> list:
+def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
+           label: str = "", robust: bool = True, ws=None,
+           scale: float = 3.0) -> list:
     """One PNG per actor kind: `<out_base stem>_obj.png`, `..._recep.png`."""
     kinds = [k for k in _KIND_ORDER if k in set(df["actor_kind"])]
     if not kinds:
@@ -781,15 +789,18 @@ def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace, title: 
                             vmin=ep_lo, vmax=max(ep_hi, ep_lo + 1))
             if ep_hi > ep_lo:
                 fig.colorbar(sc, ax=ax, label="episode", shrink=0.85)
+        report_panel(f"{label} {kind}".strip(), sub)
         # A single distinct xy means the pose is pinned rather than sparsely
         # sampled. Say so; a lone dot on a clipped axis is otherwise easy to
-        # misread as missing data.
+        # misread as missing data — and the figure no longer has a title to
+        # carry the warning.
         spread = max(sub["px"].max() - sub["px"].min(),
                      sub["py"].max() - sub["py"].min())
-        pinned = "  (fixed pose)" if spread < 1e-9 else ""
-        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace,
-                      title=f"{kind}  (n={len(sub)}){pinned}\n{_low_z_note(sub)}")
-        written.append(_save_panel(fig, out_variant(out_base, kind), title))
+        if spread < 1e-9:
+            print(f"[pose] {kind}: every point is the SAME xy — a pinned pose, "
+                  f"not missing data", file=sys.stderr)
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace)
+        written.append(_save_panel(fig, out_variant(out_base, kind)))
     return written
 
 
@@ -830,7 +841,7 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
     written = []
     for label, color, kind, sub in panels:
         _report_offscreen(sub, xlim, ylim, f"{label} / {kind}")
-        n_synth = int(sub["synthetic"].sum())
+        report_panel(f"{label} / {kind}", sub)
         fig, ax = _new_panel()
         if args.hexbin:
             hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
@@ -843,15 +854,12 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
             # uniform draw over `xyz_configs` IS the initial-state distribution
             # — the same quantity the recorded rows carry. Drawing them as black
             # crosses made a legitimate part of the distribution read as an
-            # annotation. The synthetic share stays visible in the title.
+            # annotation. The synthetic share is reported by `report_panel`.
             ax.scatter(sub["px"], sub["py"], s=6, alpha=0.35, linewidths=0,
-                       color=color, label=f"{kind} ({len(sub)})")
-        tag = f"  [{n_synth}/{len(sub)} synthetic]" if n_synth else ""
-        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace,
-                      title=f"{label} — {kind}  (n={len(sub)}){tag}\n{_low_z_note(sub)}")
+                       color=color)
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
         out = out_variant(out_base, slugs[label], kind)
-        written.append(_save_panel(
-            fig, out, f"{cfg.name} — segment-{args.phase} {kind} positions"))
+        written.append(_save_panel(fig, out))
     return written
 
 
@@ -984,8 +992,8 @@ def main():
     out = Path(args.out) if args.out else csv_path.with_name("segment_positions.png")
     label = {"start": "segment-start", "end": "segment-end", "all": "segment-boundary"}[args.phase]
     for path in render(df, out, hexbin=args.hexbin, workspace=workspace,
-                       title=f"{label} positions — {csv_path.parent}",
-                       robust=not args.no_clip, ws=ws, scale=args.workspace_scale):
+                       label=label, robust=not args.no_clip, ws=ws,
+                       scale=args.workspace_scale):
         print(f"[ok] wrote {path}", file=sys.stderr)
 
 

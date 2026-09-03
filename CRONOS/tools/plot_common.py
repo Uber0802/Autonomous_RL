@@ -209,14 +209,17 @@ def default_colors(n: int):
 # both now use; the one thing added on top is that every curve is extended back
 # to the origin (see `prepend_origin`).
 
-CURVE_FIGSIZE = (11.0, 5.2)
+CURVE_FIGSIZE = (6.4, 6.0)
 CURVE_DPI = 120
 CURVE_YLIM = (-0.02, 1.02)
 CURVE_LINEWIDTH = 2.0
 CURVE_BAND_ALPHA = 0.16
 CURVE_GRID_ALPHA = 0.3
 CURVE_LEGEND = {"loc": "upper left", "fontsize": 8}
-CURVE_TITLE_SIZE = 11
+# The plot box is forced square rather than left to `figsize`: the figure's own
+# margins depend on how wide the tick labels come out, so a square `figsize`
+# gives a visibly non-square box, and a different x range changes it again.
+CURVE_BOX_ASPECT = 1.0
 
 X_LABEL = {
     "total_steps": "environment steps",
@@ -261,10 +264,14 @@ def prepend_origin(x, mean, std=None):
 def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
     """One group's mean curve plus its ±1 std band, drawn identically in both
     tools. The band is omitted for a single series, where std is 0 everywhere
-    and a zero-width ribbon only suggests a spread that was never measured."""
+    and a zero-width ribbon only suggests a spread that was never measured.
+
+    `n_series` only decides whether to draw the band; it is not put in the
+    legend. Both tools print the series count per group on stderr, so the
+    figure stays a figure.
+    """
     import numpy as np
-    text = label if n_series is None else f"{label}  (n={n_series})"
-    ax.plot(x, mean, linewidth=CURVE_LINEWIDTH, color=color, label=text)
+    ax.plot(x, mean, linewidth=CURVE_LINEWIDTH, color=color, label=label)
     if std is not None and (n_series is None or n_series > 1):
         lo = np.clip(np.asarray(mean) - std, CURVE_YLIM[0], 1.0)
         hi = np.clip(np.asarray(mean) + std, 0.0, 1.0)
@@ -278,16 +285,16 @@ def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None):
     # Left edge pinned to 0 so the anchored origin is actually visible.
     ax.set_xlim(0.0, None if not x_max else float(x_max))
     ax.grid(alpha=CURVE_GRID_ALPHA)
+    ax.set_box_aspect(CURVE_BOX_ASPECT)
     ax.legend(**CURVE_LEGEND)
 
 
-def save_curve_figure(fig, out_path, *, suptitle=None) -> Path:
+def save_curve_figure(fig, out_path) -> Path:
+    """Write the figure. No suptitle: these go into documents that caption them
+    themselves, and a baked-in run name is wrong the moment the figure is
+    reused. The run identity lives in the filename."""
     import matplotlib.pyplot as plt
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=CURVE_TITLE_SIZE)
-        fig.tight_layout(rect=(0, 0, 1, 0.96))
-    else:
-        fig.tight_layout()
+    fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=CURVE_DPI, bbox_inches="tight")
