@@ -44,9 +44,10 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (CURVE_FIGSIZE, default_colors,  # noqa: E402
+from plot_common import (CURVE_FIGSIZE, NoData, default_colors,  # noqa: E402
                          new_curve_figure, plot_group_curve, prepend_origin,
-                         resolve_out_dir, save_curve_figure, style_curve_axes)
+                         read_table, resolve_out_dir, save_curve_figure,
+                         style_curve_axes, warn)
 
 
 # ---------------------------------------------------------------------------
@@ -165,18 +166,18 @@ def load_run_csv(csv_path: str,
                  task_filter: Optional[List[str]] = None) -> pd.DataFrame:
     """Load one eval_success.csv and apply optional filters.
 
-    Returns a long-form DataFrame with the original columns. Missing/non-CSV
-    paths raise FileNotFoundError so configuration errors surface loudly.
+    Returns a long-form DataFrame with the original columns.
+
+    Every "there is nothing here" case — absent, zero bytes, header-only, or an
+    older file without a column — raises `NoData`, which `aggregate_all` catches
+    per group: one such run is named on stderr and skipped rather than costing
+    every other group its figure. Only a config that yields NO group at all is
+    fatal, because that is a configuration error rather than a missing file.
     """
-    p = Path(csv_path)
-    if not p.is_file():
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
-    df = pd.read_csv(p)
-    expected = {"episode", "total_steps", "total_resets", "eval_kind",
-                "group", "task", "success", "grasp"}
-    missing = expected - set(df.columns)
-    if missing:
-        raise ValueError(f"{csv_path} is missing required columns: {sorted(missing)}")
+    df = read_table(csv_path, what="eval_success.csv",
+                    required_cols=("episode", "total_steps", "total_resets",
+                                   "eval_kind", "group", "task", "success",
+                                   "grasp"))
     if cronos_group_filter:
         df = df[df["group"].isin(cronos_group_filter)].copy()
     if task_filter:
@@ -338,8 +339,12 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
         try:
             dfs = [load_seed(entry, spec.cronos_group_filter, spec.task_filter)
                    for entry in spec.csv_paths]
-        except (FileNotFoundError, TypeError, ValueError) as e:
+        except (NoData, FileNotFoundError, TypeError, ValueError) as e:
             print(f"  [WARN] {spec.label}: {e}")
+            continue
+        if all(d.empty for d in dfs):
+            print(f"  [WARN] {spec.label}: every CSV loaded but held no rows "
+                  f"after cronos_group_filter / task_filter")
             continue
         rows_before = len(long_rows)
         # Apply BOTH end_steps and end_resets crops at the row level so every
@@ -411,14 +416,18 @@ def _group_color(cfg: PlotConfig, index: int, palette) -> object:
 
 
 def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
-                     cfg: PlotConfig, out_path: Path) -> None:
+                     cfg: PlotConfig, out_path: Path) -> bool:
     """One PNG per (eval_kind × x_axis). Overlays mean ± std envelopes for each
     config group on the same axes (one line per group)."""
     sub = long_df[(long_df["eval_kind"] == eval_kind) &
                   (long_df["x_axis"] == x_axis) &
                   (long_df["metric"] == "success")]
     if sub.empty:
-        return
+        # Returning False rather than writing an empty axes: a blank panel reads
+        # as "every group scored zero", and `main` used to announce it as
+        # written even though no file was ever saved.
+        warn(f"{eval_kind} / {x_axis}: no group has success rows — no figure")
+        return False
     fig, ax = new_curve_figure(cfg.figsize)
     palette = default_colors(len(cfg.groups))
     x_max = 0.0
@@ -438,16 +447,18 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
     # No title / suptitle: eval_kind and x_axis are already in the filename, and
     # the smoothing window and band meaning are settings rather than findings.
     save_curve_figure(fig, out_path)
+    return True
 
 
 def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
-                    cfg: PlotConfig, out_path: Path) -> None:
+                    cfg: PlotConfig, out_path: Path) -> bool:
     """Success vs grasp overlaid. A persistent gap (grasp high, success low)
     is the placement-collapse signature."""
     sub = long_df[(long_df["eval_kind"] == eval_kind) &
                   (long_df["x_axis"] == "total_steps")]
     if sub.empty:
-        return
+        warn(f"gap / {eval_kind}: no group has rows on total_steps — no figure")
+        return False
     fig, ax = new_curve_figure(cfg.figsize)
     palette = default_colors(len(cfg.groups))
     x_max = 0.0
@@ -469,6 +480,7 @@ def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
     style_curve_axes(ax, x_axis="total_steps", y_label="success / grasp",
                      x_max=x_max)
     save_curve_figure(fig, out_path)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -540,11 +552,11 @@ def main() -> int:
     for eval_kind in cfg.eval_kinds:
         for x_axis in cfg.x_axes:
             png = out_dir / f"{cfg.name}_{eval_kind}_{x_axis}.png"
-            plot_main_panel(long_df, eval_kind, x_axis, cfg, png)
-            print(f"  wrote {png.name}")
+            if plot_main_panel(long_df, eval_kind, x_axis, cfg, png):
+                print(f"  wrote {png.name}")
         gap_png = out_dir / f"{cfg.name}_gap_{eval_kind}.png"
-        plot_gap_panel(long_df, eval_kind, cfg, gap_png)
-        print(f"  wrote {gap_png.name}")
+        if plot_gap_panel(long_df, eval_kind, cfg, gap_png):
+            print(f"  wrote {gap_png.name}")
 
     print("[plot] done")
     return 0

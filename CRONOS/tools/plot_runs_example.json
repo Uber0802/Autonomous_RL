@@ -11,6 +11,18 @@
     "a LIST is a resume chain: those run dirs are stitched into a single",
     "continuous series, with the child winning at any overlapping total_steps.",
     "",
+    "plot_rollout_success.py writes <name>_rollout_success.png (all groups,",
+    "one hue each, drawn whole) plus one <name>_rollout_success_<group>.png",
+    "per group, in which the curve is split at that group's own resets and",
+    "each piece drawn in its own colour. The split applies to runs with",
+    "episode_len >= 1280 (T1280+); a shorter one is drawn whole and",
+    "says so on stderr. Turn either off with \"per_group\": false /",
+    "\"reset_split\": false below, or --no-per-group / --no-reset-split.",
+    "",
+    "A run that cannot contribute -- no CSV, an empty one, or one predating a",
+    "column -- is named on stderr and skipped; a tool fails only when NO group",
+    "produced anything.",
+    "",
     "Paths point at a run's glob dir: <RUN_OUT_DIR>/wandb/run-<ts>-<id>/glob",
     "",
     "Any top-level key starting with '_' is ignored, so this block can stay."
@@ -18,6 +30,9 @@
 
   "out_dir": "reports/figures/2026-08-26",
   "name": "perturb_ablation",
+
+  "per_group": true,
+  "reset_split": true,
 
   "groups": [
     {

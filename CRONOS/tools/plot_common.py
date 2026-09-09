@@ -32,6 +32,7 @@ or one panel each.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -55,7 +56,8 @@ _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 TOOL_OPTION_KEYS = {
     # plot_segment_positions.py
     "actor_kind", "phase", "workspace_scale", "step_range",
-    "direction", "by", "metric", "smooth",      # plot_rollout_success.py
+    # plot_rollout_success.py
+    "direction", "by", "metric", "smooth", "per_group", "reset_split",
 }
 
 
@@ -314,3 +316,214 @@ def read_run_config(run_dir: Path) -> Optional[dict]:
         return json.loads(p.read_text())
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Missing / unusable input
+# ---------------------------------------------------------------------------
+#
+# The tools are pointed at whole directories of runs, and a run legitimately
+# lacks a file: an eval-only run writes no `rollout_success.csv`, a run started
+# with `--no-record-segment-pose` writes no `segment_pose.csv`, and a run that
+# is still in its first episode has files that exist but are empty. Older runs
+# additionally predate columns the current code expects.
+#
+# In `--config` mode one such run must not abort the whole figure set, so the
+# loaders raise `NoData` and every group loop catches it, warns, and moves on.
+# A tool only fails when NOTHING could be plotted — which is a configuration
+# error, not a missing file.
+#
+# The single-run paths (`--run-dir` / `--csv`) still fail loudly: there the user
+# named one specific file, so "not found" is the answer to their question.
+
+
+class NoData(Exception):
+    """This input holds nothing plottable. Caught per group in --config mode."""
+
+
+def warn(msg: str) -> None:
+    print(f"[warn] {msg}", file=sys.stderr)
+
+
+def read_table(path, *, what: str, required_cols=()) -> pd.DataFrame:
+    """Read one CSV, raising `NoData` for every "there is nothing here" case.
+
+    Covers all four in one place: the file is absent, it is zero bytes, it holds
+    only a header, or it predates a column the caller needs. Each raises with a
+    message naming the file, so the [warn] line a caller prints is enough to act
+    on without opening anything.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise NoData(f"{path}: no {what}")
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        raise NoData(f"{path}: {what} is empty (0 bytes) — the run wrote no rows yet")
+    except Exception as e:                      # malformed / truncated mid-write
+        raise NoData(f"{path}: {what} could not be parsed ({type(e).__name__}: {e})")
+    if df.empty:
+        raise NoData(f"{path}: {what} has a header but no rows")
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise NoData(f"{path}: {what} is missing column(s) {missing} "
+                     f"(have: {sorted(df.columns)}) — written by an older version?")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Output naming, shared by the per-group figures
+# ---------------------------------------------------------------------------
+
+
+def slugify(text: str) -> str:
+    """A group label as a filename fragment (labels carry spaces and '+')."""
+    import re
+    s = re.sub(r"[^0-9A-Za-z._-]+", "-", str(text)).strip("-._")
+    return s or "group"
+
+
+def unique_slugs(labels) -> dict:
+    """label -> distinct filename fragment. Two labels can slugify the same
+    way ("noep +PTB" and "noep-PTB"), and the second figure would silently
+    overwrite the first, so collisions get a numeric suffix."""
+    out, used = {}, set()
+    for label in labels:
+        base = slugify(label)
+        slug, i = base, 2
+        while slug in used:
+            slug, i = f"{base}-{i}", i + 1
+        used.add(slug)
+        out[label] = slug
+    return out
+
+
+def out_variant(base, *parts: str) -> Path:
+    """`fig.png` + ("noep", "obj") -> `fig_noep_obj.png`."""
+    base = Path(base)
+    return base.with_name("_".join([base.stem, *parts]) + (base.suffix or ".png"))
+
+
+# ---------------------------------------------------------------------------
+# Reset-segmented curves (per-group figures)
+# ---------------------------------------------------------------------------
+#
+# A training curve is not one continuous experiment: at every reset the batch is
+# re-randomized, so the success rate the policy achieves *within* one inter-reset
+# stretch is a different quantity from the trend across them. Drawing the whole
+# thing as one line hides that structure — a within-stretch climb followed by a
+# drop at the reset reads as noise.
+#
+# So the per-group figures split each curve at its own reset boundaries and give
+# each piece its own colour. A per-group figure holds exactly one group and its
+# legend title names it, so the hue is not needed for group identity there and
+# is spent on the reset index instead.
+#
+# It is only worth doing when a stretch has enough points to show a shape. At
+# `segment_len = 80` an episode holds `episode_len / 80` segments, so T1280 is
+# the first horizon with a usable 16; T320's 4 and T80's 1 are not curves.
+
+RESET_SPLIT_MIN_EPISODE_LEN = 1280
+# Independent of the horizon: HSR fires soft resets at segment boundaries, so a
+# long-horizon run can still come out chopped into 2-point fragments. Below this
+# median piece length the split is noise and the curve is drawn whole.
+RESET_SPLIT_MIN_PIECE = 4
+
+
+def piece_colors(n: int):
+    """`n` visibly distinct colours, one per reset piece.
+
+    Categorical, not a ramp through one hue. A same-hue ramp keeps the tie to
+    the group's colour in the all-group figure, but its adjacent steps differ
+    only in lightness, and past three or four pieces that is not enough to tell
+    them apart at a glance — which is the whole point of splitting the curve.
+
+    Nothing is lost by spending the hue here: a per-group figure holds exactly
+    one group, and the legend's title names it, so the hue is free to carry the
+    reset index instead. The first four entries are the maximally-separated
+    head of `tab10` (blue, orange, green, red).
+    """
+    return default_colors(n)
+
+
+def reset_pieces(resets):
+    """Split an aligned cumulative-reset array into inter-reset index ranges.
+
+    Returns half-open `(start, stop)` index pairs. A boundary is any point where
+    the cumulative count went up — which is what "a reset happened just before
+    this segment" means in `rollout_success.csv`, where `total_resets` is stamped
+    at the segment's end.
+    """
+    import numpy as np
+    r = np.asarray(resets, dtype=float)
+    if r.size == 0:
+        return []
+    bounds = [0]
+    for i in range(1, r.size):
+        # NaN (an older CSV without the column, or a gap in a resume chain)
+        # is not a boundary: an unknown reset count is not evidence of a reset.
+        if np.isfinite(r[i]) and np.isfinite(r[i - 1]) and r[i] > r[i - 1]:
+            bounds.append(i)
+    bounds.append(r.size)
+    return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+
+def piece_labels(x, resets, pieces, *, max_labelled: int = 10):
+    """Legend text per reset piece, or None for the pieces left unlabelled.
+
+    With more pieces than a legend can carry, only the first and last are
+    named — the shade ramp already says which is which, and 30 legend entries
+    would cover the panel they describe.
+    """
+    import numpy as np
+    r = np.asarray(resets, dtype=float)
+    names = []
+    for lo, _ in pieces:
+        n = r[lo] if lo < r.size and np.isfinite(r[lo]) else None
+        names.append("before any reset" if n == 0 else
+                     "resets unknown" if n is None else f"after {int(n)} resets")
+    if len(pieces) <= max_labelled:
+        return names
+    return [names[0]] + [None] * (len(pieces) - 2) + [names[-1]]
+
+
+def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
+                               pieces=None, labels=None, n_series=None,
+                               mark_resets=True):
+    """One group's curve, split at its resets, a distinct colour per piece.
+
+    Same line width, band and clipping as `plot_group_curve` — only the colour
+    varies along the curve — so a per-group figure and the main figure are read
+    to the same scale.
+
+    Pieces are drawn joined: each starts at its predecessor's last point, so the
+    line is continuous and the colour change alone marks the reset. The dotted
+    rule sits between the two points, which is where the reset actually happened.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    mean = np.asarray(mean, dtype=float)
+    std = None if std is None else np.asarray(std, dtype=float)
+    if pieces is None:
+        pieces = reset_pieces(resets if resets is not None else np.zeros_like(x))
+    if labels is None:
+        labels = [None] * len(pieces)
+    shades = piece_colors(len(pieces))
+    band = std is not None and (n_series is None or n_series > 1)
+    for i, (lo, hi) in enumerate(pieces):
+        start = lo - 1 if i else lo          # join to the previous piece
+        xs, ms = x[start:hi], mean[start:hi]
+        if xs.size == 0:
+            continue
+        ax.plot(xs, ms, linewidth=CURVE_LINEWIDTH, color=shades[i],
+                label=labels[i], solid_capstyle="round")
+        if band:
+            ss = std[start:hi]
+            ax.fill_between(xs, np.clip(ms - ss, CURVE_YLIM[0], 1.0),
+                            np.clip(ms + ss, 0.0, 1.0),
+                            color=shades[i], alpha=CURVE_BAND_ALPHA, linewidth=0)
+        if mark_resets and i:
+            # Darker than the grid it sits on: the rule marks an event, and at
+            # the grid's own weight it read as one more gridline.
+            ax.axvline(0.5 * (x[lo - 1] + x[lo]), color="0.45", linewidth=0.9,
+                       linestyle=":", zorder=0)

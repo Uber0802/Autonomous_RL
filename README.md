@@ -420,11 +420,50 @@ python tools/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 | `--by` | `none` | Add a second panel split by `task` \| `group` \| `obj` \| `recep` |
 | `--x-axis` | `total_steps` | `total_steps` \| `segment` \| `episode` |
 | `--smooth` | 5 | Rolling-mean window in segments (1 disables) |
+| `--no-per-group` | off | `--config` mode: write only the all-group main figure, skipping the per-group ones |
+| `--no-reset-split` | off | Draw every per-group curve whole instead of splitting it at its resets |
 
 The top panel overlays success, `consecutive_grasp` and `is_src_obj_grasped`;
 the success-vs-grasp gap is the placement-collapse diagnostic. Empty cells (an
 env that did not report at a boundary) are read as NaN and excluded from the
 means rather than as zeros.
+
+##### `--config` mode writes a figure set, split at the resets
+
+    <name>_rollout_success.png            all groups, one hue each, drawn whole
+    <name>_rollout_success_<group>.png    one group, split at ITS OWN resets
+
+A training curve is not one continuous experiment: every reset re-randomizes the
+batch, so the rate the policy reaches *within* an inter-reset stretch and the
+trend *across* stretches are different quantities. One unbroken line hides the
+difference — a within-stretch climb followed by the reset's drop reads as noise.
+Each per-group figure therefore splits the curve at that group's own reset
+boundaries and gives **each piece its own colour** (the `tab10` head — blue,
+orange, green, red — so four pieces are unmistakable and eight are still
+separable). A dotted rule marks each reset.
+
+The hue is free to carry the reset index here because a per-group figure holds
+exactly one group and the legend's title names it. An earlier version shaded the
+pieces light → dark within the group's hue, which kept the tie to the main
+figure's colour but left adjacent pieces differing only in lightness — not
+enough to tell apart at a glance, which is the whole point of the split.
+
+The split stays out of the main figure deliberately: there the hue is what tells
+the conditions apart, and spending it on the reset index would leave nothing to
+identify a group by.
+
+**T1280 and up only.** At `segment_len = 80` an episode holds `episode_len / 80`
+segments, so T1280 is the first horizon whose 16 make a shape — T320's 4 and
+T80's 1 do not. A shorter run is drawn whole and says so on stderr, so one
+figure set can mix split and unsplit groups without either being mistaken for
+the other. A resume chain is only as splittable as its coarsest leg, and a run
+whose resets outpace its horizon (HSR fires soft resets at segment boundaries)
+is caught by a second guard on the measured piece length.
+
+```
+[rollout] noep+LSR T2560: split into 4 inter-reset pieces (episode_len=2560)
+[rollout] baseline T320: drawn whole — episode_len=320 < 1280 (T1280+ only)
+```
 
 #### Per-segment position scatter — `tools/plot_segment_positions.py`
 
@@ -488,6 +527,25 @@ python tools/plot_segment_positions.py --config tools/plot_runs_example.json --a
 Schema and full docs in [`tools/plot_common.py`](CRONOS/tools/plot_common.py);
 a ready-to-edit copy is [`tools/plot_runs_example.json`](CRONOS/tools/plot_runs_example.json).
 Top-level keys starting with `_` are ignored, so the example carries its own notes.
+
+##### A run with no data is skipped, not fatal
+
+A config routinely points at runs that cannot answer the question asked of them:
+an eval-only run writes no `rollout_success.csv`, `--no-record-segment-pose`
+writes no `segment_pose.csv`, a run still in its first episode has files that
+exist but are empty, and an older run may predate a column the current code
+reads. In `--config` mode all four plot tools name each such run on stderr and
+skip it, so one of them does not cost every other group its figure:
+
+```
+[warn] group 'noep baseline': /data/runs/.../glob/rollout_success.csv: no rollout_success.csv
+[warn] group 'noep baseline': /data/runs/.../glob/rollout_success.csv: rollout_success.csv is missing column(s) ['total_steps'] — written by an older version?
+```
+
+A tool fails only when **no** group produced anything — that is a configuration
+error rather than a missing file, and the error names the usual causes. The
+single-run paths (`--run-dir` / `--csv`) still fail loudly: there you named one
+specific file, so "not found" is the answer to the question you asked.
 
 ##### Runs recorded before the `phase` split
 

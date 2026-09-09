@@ -69,7 +69,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -82,8 +81,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from plot_common import (concat_chain, default_colors, load_plot_config,  # noqa: E402
-                         read_run_config)
+from plot_common import (NoData, default_colors, load_plot_config,  # noqa: E402
+                         out_variant, read_run_config, read_table,
+                         unique_slugs, warn)
 
 # `envs/unsuitable.py::LowZDetector.z_threshold` — the height below which HSR
 # treats an actor as fallen. Reported by `summarize()`; there is no pz figure.
@@ -170,40 +170,24 @@ def parse_step_range(value):
     return lo, hi
 
 
-def _slug(text: str) -> str:
-    """A group label as a filename fragment (labels carry spaces and '+')."""
-    s = re.sub(r"[^0-9A-Za-z._-]+", "-", str(text)).strip("-._")
-    return s or "group"
+def load_pose(csv_path: Path, *, required: bool = True) -> pd.DataFrame:
+    """Read one `segment_pose.csv`.
 
-
-def unique_slugs(labels) -> dict:
-    """label -> distinct filename fragment. Two labels can slugify the same
-    way ("noep +PTB" and "noep-PTB"), and the second figure would silently
-    overwrite the first, so collisions get a numeric suffix."""
-    out, used = {}, set()
-    for label in labels:
-        base = _slug(label)
-        slug, i = base, 2
-        while slug in used:
-            slug, i = f"{base}-{i}", i + 1
-        used.add(slug)
-        out[label] = slug
-    return out
-
-
-def out_variant(base: Path, *parts: str) -> Path:
-    """`fig.png` + ("noep", "obj") -> `fig_noep_obj.png`."""
-    base = Path(base)
-    return base.with_name("_".join([base.stem, *parts]) + (base.suffix or ".png"))
-
-
-def load_pose(csv_path: Path) -> pd.DataFrame:
-    if not csv_path.exists():
+    `required=False` is the `--config` path: every "nothing here" case raises
+    `NoData` for the group loop to warn about and skip, so one run recorded with
+    `--no-record-segment-pose` does not cost the other groups their figures.
+    """
+    if not required:
+        df = read_table(csv_path, what="segment_pose.csv",
+                        required_cols=("episode", "segment", "env",
+                                       "actor_kind", "px", "py", "pz"))
+    elif not csv_path.exists():
         raise FileNotFoundError(
             f"{csv_path} not found. It is written only when --record-segment-pose "
             f"is on (it is on by default; --no-record-segment-pose disables it)."
         )
-    df = pd.read_csv(csv_path)
+    else:
+        df = pd.read_csv(csv_path)
     for col in ("px", "py", "pz"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     before = len(df)
@@ -425,7 +409,7 @@ def synth_start_poses(run_dir: Path, n_draws: int, seed: int = 0,
     return out
 
 
-def reset_count(run_dir: Path) -> int:
+def reset_count(run_dir: Path, *, required: bool = True):
     """The run's total reset count — one per per-env fresh pose draw.
 
     `hard_reset_count` advances by `num_envs` per episode (every env is
@@ -433,6 +417,9 @@ def reset_count(run_dir: Path) -> int:
     HSR respawned, so the sum is exactly how many independent draws from
     `xyz_configs` the run made. Read from `counters.json`, falling back to the
     last `total_resets` in `rollout_success.csv`.
+
+    `required=False` returns None instead of exiting, for the `--config` path
+    where a run that cannot be reconstructed is skipped rather than fatal.
     """
     counters = Path(run_dir) / "counters.json"
     if counters.exists():
@@ -442,11 +429,18 @@ def reset_count(run_dir: Path) -> int:
             pass
     roll = Path(run_dir) / "rollout_success.csv"
     if roll.exists():
-        r = pd.read_csv(roll, usecols=["total_resets"])
+        try:
+            r = pd.read_csv(roll, usecols=["total_resets"])
+        except (ValueError, pd.errors.EmptyDataError):
+            r = pd.DataFrame()               # empty, or predates the column
         if len(r):
-            return int(pd.to_numeric(r["total_resets"], errors="coerce").max())
-    raise SystemExit(f"{run_dir}: cannot determine the reset count "
-                     f"(no counters.json, no rollout_success.csv)")
+            total = pd.to_numeric(r["total_resets"], errors="coerce").max()
+            if pd.notna(total):
+                return int(total)
+    if required:
+        raise SystemExit(f"{run_dir}: cannot determine the reset count "
+                         f"(no counters.json, no rollout_success.csv)")
+    return None
 
 
 def _segments_per_episode(rc: dict):
@@ -590,7 +584,8 @@ def rebuild_start_rows(run_dir: Path, df: pd.DataFrame, args) -> pd.DataFrame:
     return pd.concat([derived, synth], ignore_index=True)
 
 
-def ensure_start_rows(run_dir: Path, df: pd.DataFrame, args) -> pd.DataFrame:
+def ensure_start_rows(run_dir: Path, df: pd.DataFrame, args, *,
+                      required: bool = True) -> pd.DataFrame:
     """Append rebuilt `phase=start` rows when `df` has none and they are wanted.
 
     Shared by the single-run and `--config` paths. It used to live only in the
@@ -601,36 +596,78 @@ def ensure_start_rows(run_dir: Path, df: pd.DataFrame, args) -> pd.DataFrame:
         return df
     if (df["phase"] == "start").any():
         return df
-    extra = rebuild_start_rows(run_dir, df, args)
+    try:
+        extra = rebuild_start_rows(run_dir, df, args)
+    except SystemExit as e:
+        if required:
+            raise
+        warn(f"{run_dir.name}: start rows could not be rebuilt ({e})")
+        return df
     if extra.empty and args.no_synth:
         print(f"[warn] {run_dir.name}: no phase=start rows, nothing could be "
               f"carried over, and --no-synth given", file=sys.stderr)
     elif extra.empty:
-        extra = synth_start_poses(run_dir, reset_count(run_dir),
-                                  args.synth_seed, segment=-1)
+        n_resets = reset_count(run_dir, required=required)
+        if n_resets is None:
+            # --config path: no counters.json and no usable rollout CSV, so the
+            # number of fresh draws is unknown and nothing can be synthesized.
+            # The run keeps whatever real rows it has instead of taking the
+            # whole figure set down with it.
+            warn(f"{run_dir.name}: no phase=start rows and the reset count is "
+                 f"unknown — cannot rebuild them, keeping the recorded rows")
+            return df
+        try:
+            extra = synth_start_poses(run_dir, n_resets, args.synth_seed,
+                                      segment=-1)
+        except SystemExit as e:
+            if required:
+                raise
+            warn(f"{run_dir.name}: start rows could not be synthesized ({e})")
+            return df
     return pd.concat([df, extra], ignore_index=True) if not extra.empty else df
 
 
-def load_group_poses(run_dirs, args) -> pd.DataFrame:
-    """Load one group's runs, rebuilding `start` rows where they are missing."""
+def load_group_poses(run_dirs, args, *, label: str = "") -> pd.DataFrame:
+    """Load one group's runs, rebuilding `start` rows where they are missing.
+
+    A run with no usable `segment_pose.csv` — absent, empty, or predating a
+    column — is named on stderr and skipped; the group is built from whatever
+    is left. `render_groups` drops the group only when nothing is.
+    """
     frames = []
     for run_dir in run_dirs:
         run_dir = Path(run_dir)
-        df = load_pose(run_dir / "segment_pose.csv")
+        try:
+            df = load_pose(run_dir / "segment_pose.csv", required=False)
+        except NoData as e:
+            warn(f"group '{label}': {e}" if label else str(e))
+            continue
         df["synthetic"] = False
-        frames.append(ensure_start_rows(run_dir, df, args))
+        frames.append(ensure_start_rows(run_dir, df, args, required=False))
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def apply_filters(df: pd.DataFrame, args, csv_path: Path) -> pd.DataFrame:
+def apply_filters(df: pd.DataFrame, args, csv_path: Path, *,
+                  required: bool = True) -> pd.DataFrame:
+    """Apply every CLI filter in turn.
+
+    `required=False` returns an empty frame instead of exiting when a filter
+    leaves nothing — the `--config` path, where one group filtering itself out
+    must not take the other groups' figures with it.
+    """
+    def _empty(msg: str) -> pd.DataFrame:
+        if required:
+            raise SystemExit(msg)
+        warn(msg)
+        return df.iloc[0:0]
+
     if args.phase != "all":
         sel = df[df["phase"] == args.phase]
         if sel.empty:
             avail = sorted(df["phase"].unique())
-            raise SystemExit(
+            return _empty(
                 f"no rows with phase={args.phase!r}; present: {avail}. The run may "
-                f"have used --segment-pose-phase to record only one side."
-            )
+                f"have used --segment-pose-phase to record only one side.")
         df = sel
     kinds = parse_actor_kinds(args.actor_kind)
     if set(kinds) != set(_VALID_KINDS):
@@ -673,7 +710,7 @@ def apply_filters(df: pd.DataFrame, args, csv_path: Path) -> pd.DataFrame:
     if args.forward_only:
         df = _keep_forward(df, csv_path)
     if df.empty:
-        raise SystemExit("no rows left after filtering")
+        return _empty("no rows left after filtering")
     return df
 
 
@@ -823,16 +860,25 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
     panels = []   # (label, color, kind, rows)
     for gi, group in enumerate(cfg.groups):
         runs = [d for chain in group.chains for d in chain]
-        df = load_group_poses(runs, args)
+        df = load_group_poses(runs, args, label=group.label)
         if df.empty:
-            print(f"[warn] group '{group.label}' produced no rows", file=sys.stderr)
+            warn(f"group '{group.label}' produced no rows")
             continue
-        df = apply_filters(df, args, Path(runs[0]) / "segment_pose.csv")
+        df = apply_filters(df, args, Path(runs[0]) / "segment_pose.csv",
+                           required=False)
+        if df.empty:
+            warn(f"group '{group.label}': every row was filtered out")
+            continue
         for kind in [k for k in _KIND_ORDER if k in set(df["actor_kind"])]:
             panels.append((group.label, colors[gi], kind,
                            df[df["actor_kind"] == kind]))
     if not panels:
-        raise SystemExit("no group produced any rows")
+        raise SystemExit(
+            "[pose] no group produced any rows — nothing to plot.\n"
+            "  The [warn] lines above name the groups. Check that each `runs`\n"
+            "  entry points at a run's glob/ dir containing segment_pose.csv\n"
+            "  (a run launched with --no-record-segment-pose has none), and that\n"
+            "  --phase / --actor-kind / --step-range keep something.")
 
     xlim, ylim = _shared_limits(pd.concat([p[3] for p in panels]),
                                 robust=robust, ws=ws, scale=scale)

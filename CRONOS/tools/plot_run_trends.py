@@ -318,6 +318,15 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     id_eps, id_succ = _ep_avg(by_kind["in_domain"])
     ood_eps, ood_succ = _ep_avg(by_kind["out_of_domain"])
 
+    # Both sources came back empty: no eval_success.csv (or an empty one) AND no
+    # wandb history — offline, unauthenticated, or a run dir that does not
+    # exist. Drawing anyway produces four blank axes under a live-looking title,
+    # which reads as "the run flatlined". Say what is missing and write nothing.
+    if not history and not id_eps and not ood_eps and not roll_succ_eps:
+        print(f"[warn] {run_dir}: no eval_success.csv rows and no wandb history "
+              f"— nothing to plot, skipping {out_path}", file=sys.stderr)
+        return None
+
     # Headline episode count for the title.
     current_ep = max(
         [m for m in (
@@ -486,6 +495,12 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
     else:
         task_panels = [(_slug_to_task_label(s), s) for s in rollout_slugs]
 
+    if not task_panels:
+        # Same rule as `render`: an empty grid of axes is worse than no file.
+        print(f"[warn] {run_dir}: no per-task rollout or eval series — nothing "
+              f"to plot, skipping {out_path}", file=sys.stderr)
+        return None
+
     n_panels = max(len(task_panels), 1)
     # 2-column layout — extra rows if more than 4 tasks (e.g., 3x3 scene).
     ncols = 2 if n_panels <= 4 else 3
@@ -595,8 +610,13 @@ def main():
                         "of this flag.")
     args = p.parse_args()
 
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        raise SystemExit(f"--run-dir {run_dir} is not a directory. It should be "
+                         f"the run's glob dir: <RUN_OUT_DIR>/wandb/run-<ts>-<id>/glob")
+
     out = Path(args.out)
-    render(Path(args.run_dir), args.max_episodes, out,
+    render(run_dir, args.max_episodes, out,
            args.entity, args.project, args.run_id,
            extra_run_ids=args.prior_run_id, extra_eval_csvs=args.prior_eval_csv,
            x_key=args.x_axis)
@@ -604,7 +624,7 @@ def main():
     out_pt = Path(args.out_per_task) if args.out_per_task else (
         out.with_name(out.stem + "-per_task" + out.suffix)
     )
-    render_per_task(Path(args.run_dir), args.max_episodes, out_pt,
+    render_per_task(run_dir, args.max_episodes, out_pt,
                     args.entity, args.project, args.run_id,
                     extra_run_ids=args.prior_run_id, extra_eval_csvs=args.prior_eval_csv)
 
