@@ -1015,7 +1015,20 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         self.select_quat_ids = episode_id % l2
 
         # Per-env random pose for non-fixed obj_set (matching AutoRL exactly)
-        if obj_set != "fixed":
+        self.last_layout_rand_ids = None
+        if obj_set != "fixed" and "layout_ids" in options:
+            # Explicit per-env layout draw (envs/rng_streams.py). Replaces the
+            # torch.randint below, which consumes the global CUDA generator that
+            # the policy's action sampling also advances — so the layout an env
+            # got depended on how many actions had been sampled before it. An
+            # id is a uniform 62-bit integer; `% ltt` maps it onto the same
+            # uniform-over-configs distribution the randint drew from.
+            ids = torch.as_tensor(options["layout_ids"], dtype=torch.long, device=self.device).reshape(b)
+            rand_id = ids % ltt
+            self.last_layout_rand_ids = rand_id
+            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_quat_ids = rand_id % l2
+        elif obj_set != "fixed":
             if obj_set != "rand_8":
                 rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
             else:

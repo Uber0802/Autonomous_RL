@@ -136,11 +136,11 @@ They coincide at `task_idx == 0`.
 
 ### Where they are available
 
-Both columns come from `eval_only.py`, which is the path `scripts/eval.sh` and
-the `configs/eval/` configs use. `main.py --eval-sequential` gets the accounting
-fix but not the two columns: it has never written `eval_per_trial.csv` at all,
-only the aggregate `eval_success.csv`, so there is no per-env row to chain.
-Use `eval_only.py` when the chained score is wanted.
+Both columns come from the shared standalone evaluator
+(`evaluation/sequential.py`), used by `eval_only.py` and by
+`main.py --eval-single/--eval-sequential` alike. Chaining is per (domain, round,
+env); every scene of a multi-group config chains on its own env range. See
+[`eval_sequential.md`](eval_sequential.md).
 
 ---
 
@@ -193,6 +193,12 @@ below a threshold and otherwise draws distinct shuffles by rejection sampling.
 This also removes a duplicated implementation — the two call sites had
 hand-rolled the same logic separately.
 
+> **Superseded for standalone eval.** Rounds are now drawn by
+> `envs/rng_streams.py::random_orders`, which is prefix-stable in the number of
+> rounds, and layouts by seeded per-(round, scene) streams. The byte-identity
+> claim below describes `build_eval_sequences`, which standalone eval no longer
+> calls. See [`eval_sequential.md §3`](eval_sequential.md).
+
 Verified: for a 4-task pool the new function returns byte-identical orderings to
 both previous implementations across seeds 0-4 and `eval_sequences` ∈ {1,3,5,24},
 so existing 2×2 runs stay reproducible. For 9 tasks it returns in 0.09 ms versus
@@ -230,7 +236,7 @@ print("elapsed_steps on entry:", self.env.env.unwrapped._elapsed_steps[:4])
 
 Before the fix this prints `[80, 80, 80, 80]` for `task_idx ≥ 1`; after, `[0,0,0,0]`.
 
-End to end, run `--eval-mode sequential --eval-sequences 2` and check
+End to end, run `--eval-mode sequential --eval-rounds 0-1` and check
 `eval_per_trial.csv`: the row count must be exactly
 `sequences × tasks × num_envs`, and `task_idx ≥ 1` rows must no longer be
 uniformly zero.

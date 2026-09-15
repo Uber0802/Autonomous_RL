@@ -20,6 +20,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
+import warnings
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
@@ -85,6 +86,19 @@ def build_eval_sequences(
         seen.add(key)
         out.append(cand)
     return [training_seq] + out
+
+
+_PADDING_WARNED = set()
+
+
+def _warn_padding(msg: str) -> None:
+    """Warn once per distinct message. Padding is unreachable for YAML configs
+    that pass V3/V23 (per-group sums and even splits); it can only trigger via
+    the flat-pool path or a CLI --num-envs that disagrees with the YAML. Eval
+    (`evaluation/plan.py::check_env_partition`) refuses to pad at all."""
+    if msg not in _PADDING_WARNED:
+        _PADDING_WARNED.add(msg)
+        warnings.warn(f"[scheduler padding] {msg}", stacklevel=3)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +321,8 @@ class TaskScheduler:
                 # Handle remainder envs within group
                 remainder_in_group = g_size - sub_size * n_tasks
                 if remainder_in_group > 0:
+                    _warn_padding(f"group '{gs.name}': {remainder_in_group} env(s) beyond an even "
+                                  f"{n_tasks}-task split repeat the last task")
                     objects.extend([objects[-1]] * remainder_in_group)
                     receptacles.extend([receptacles[-1]] * remainder_in_group)
             else:
@@ -319,6 +335,8 @@ class TaskScheduler:
         # Pad to num_envs if needed (shouldn't happen with correct per-group sizes)
         remainder = self.num_envs - len(objects)
         if remainder > 0:
+            _warn_padding(f"per-group num_envs sum to {len(objects)} but num_envs={self.num_envs}; "
+                          f"{remainder} env(s) repeat the last task")
             objects.extend([objects[-1]] * remainder)
             receptacles.extend([receptacles[-1]] * remainder)
 

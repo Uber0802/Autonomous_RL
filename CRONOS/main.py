@@ -24,11 +24,12 @@ from version import __version__ as CRONOS_VERSION
 from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
-from envs.scheduler import TaskScheduler, build_eval_sequences
+from envs.scheduler import TaskScheduler
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO, aggregate_train_results
 from training.grpo import CronosGRPO
 from training.buffer import CronosReplayBuffer
+from evaluation.records import SegmentPoseWriter
 from training.metrics import SuccessRecorder
 from mani_skill.utils.visualization.misc import images_to_video
 
@@ -212,7 +213,22 @@ class Args:
     eval_at_start: bool = False     # run eval before first training episode
     eval_single: bool = False
     eval_sequential: bool = False
-    eval_sequences: int = 5         # permutation sequences (1 training + N-1 random)
+    # Standalone eval (--eval-single / --eval-sequential) settings; same names and
+    # meaning as eval_only.py, and settable from the config's `eval:` block. CLI
+    # wins over YAML. See evaluation/plan.py::EVAL_SETTING_SPEC.
+    eval_mode: str = "sequential"
+    eval_pose_sets: int = 1
+    eval_rounds: str = "all"
+    eval_layout_slots: int = -1
+    eval_policy_seed: int = -1
+    allow_config_mismatch: bool = False
+    eval_sequence_seed: int = -1
+    eval_layout_seed: int = -1
+    eval_scene_schedule: str = "parallel"
+    eval_domains: str = "in_domain,out_of_domain"
+    video_envs_per_block: int = -1
+    record_eval_pose: bool = True
+    eval_pose_phase: str = "both"
     vla_checkpoint_interval: int = 8
     resume_from: str = ""           # path to checkpoint dir (auto-loads config + weights)
 
@@ -632,6 +648,14 @@ class CronosRunner:
         except Exception:
             cfg["git_rev"] = None
 
+        # Snapshot the experiment config itself: run_config only records its path,
+        # and the file can be edited after training. Standalone eval reads this
+        # copy (evaluation/provenance.py) so it rebuilds the environment the
+        # checkpoint was trained in.
+        if self.args.config_path and Path(self.args.config_path).exists():
+            import shutil as _shutil
+            _shutil.copy2(self.args.config_path, self.glob_dir / "experiment_config.yaml")
+
         # Coerce anything non-JSON-native (Path, etc.) via default=str.
         (self.glob_dir / "run_config.json").write_text(
             json.dumps(cfg, indent=2, default=str, sort_keys=False) + "\n"
@@ -867,84 +891,54 @@ class CronosRunner:
 
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
-    @torch.no_grad()
-    def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
-        """— Standalone evaluation (port of AutoRL `render`).
+    def run_standalone_eval(self, single=False):
+        """`--eval-single` / `--eval-sequential`: the same evaluator as eval_only.py.
 
-        All envs run the SAME (object[i], receptacle[i]) — typically the caller broadcasts
-        a single task as `[object_str]*num_envs / [receptacle_str]*num_envs`. Runs one
-        `segment_len`-step rollout with deterministic policy, records per-env videos,
-        and returns aggregated stats. **No fan-out** — that's `eval_all_groups`.
-
-        This is the eval mode used by `--eval-single`, `--eval-sequential`, and
-        `eval_only.py`; `eval_all_groups` (fan-out rotation) is reserved for
-        training-time eval (`--eval-at-start` and the periodic eval inside `train()`).
-
-        Args:
-            iteration: epoch / sequence index (logging only)
-            task_idx: task index within iteration (logging + video name)
-            obj_set: physics randomization set (e.g. "rand", "rand_ood")
-            object: list[str] of length num_envs — object names
-            receptacle: list[str] of length num_envs — receptacle names
-            prefix: video sub-dir name under `glob/eval_videos/`
-            reset: True → env.reset (start of a sequence); False → continue from
-                   current state (chained sequence steps, AutoRL-aligned)
-            group_idx: which YAML group's physical objects to broadcast to all envs
-                       (default 0; multi-group sequential eval is work)
+        Every scene of the config is evaluated (the old path broadcast group 0's
+        objects to all envs and crashed on the first task of another group).
+        `--eval-single` forces mode=single over whatever `eval.mode` says.
         """
-        if reset:
-            self.policy.prep_rollout()
-            obs, _, _ = self.env.reset(
-                obj_set_override=obj_set,
-                group_idx_override=group_idx,
-                skip_scheduler=True,
-            )
-            self.env.set_task(object, receptacle)
-        else:
-            self.env.set_task(object, receptacle)
-            # Reopen the measurement window on a continued segment — see
-            # `CronosWrapper.begin_segment`. Without it `_elapsed_steps` keeps
-            # the env truncated from step 1, turning `success` into a
-            # time-average and letting grasp flags carry over across tasks.
-            # Scene state is untouched, so chained-sequence continuity holds.
-            self.env.begin_segment()
-            obs = self.env.get_obs_image()
-        instruction = self.env.get_language_instructions()
+        import sys as _sys
+        from evaluation.plan import build_plan, build_scenes, checkpoint_progress, resolve_eval_settings
+        from evaluation.sequential import SequentialEvaluator
 
-        print(f"  [{prefix}] {object[0]} -> {receptacle[0]}")
-
-        record = self.args.record_video
-        if record:
-            video_frames = [[] for _ in range(self.args.num_envs)]
-
-        env_infos = defaultdict(list)
-        for _ in tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False):
-            if record:
-                for env_i in range(self.args.num_envs):
-                    video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-            val, action, logp = self._get_action(obs, instruction, deterministic=True)
-            obs, reward, truncated, env_info = self.env.step(action)
-            if "episode" in env_info:
-                for k, v in env_info["episode"].items():
-                    env_infos[k] += v
-
-        if record:
-            for env_i in range(self.args.num_envs):
-                video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-            render_dir = self.glob_dir / "eval_videos" / prefix
-            render_dir.mkdir(parents=True, exist_ok=True)
-            successes = env_infos.get("success", [0] * self.args.num_envs)
-            for i in range(self.args.num_envs):
-                s = int(successes[i]) if i < len(successes) else 0
-                obj_safe = str(object[i]).replace(" ", "_")
-                rec_safe = str(receptacle[i]).replace(" ", "_")
-                images_to_video(
-                    video_frames[i], str(render_dir),
-                    f"task{task_idx}-env{i}-{obj_safe}_{rec_safe}-s{s}",
-                    fps=10, verbose=False,
-                )
-
-        return {k: float(np.mean(v)) for k, v in env_infos.items() if v}
+        a = self.args
+        groups = self.yaml_config.groups if (self.yaml_config and self.yaml_config.groups) else None
+        settings = resolve_eval_settings(a, self.yaml_config.eval if self.yaml_config else None,
+                                         _sys.argv[1:])
+        if single:
+            settings.mode, settings.sources["mode"] = "single", "cli(--eval-single)"
+        from evaluation.provenance import check_against_training, find_training_config
+        from envs.config import load_cronos_config
+        provenance = dict(config_path=a.config_path, config_source="cli", checkpoint=a.vla_load_path,
+                          **find_training_config(a.vla_load_path, Path(__file__).resolve().parent))
+        if self.yaml_config is not None:
+            check_against_training(self.yaml_config, provenance, load_cronos_config, a.allow_config_mismatch)
+        scenes = build_scenes(self.scheduler.group_states, a.num_envs,
+                              env_n=a.env_n, env_m=a.env_m, group_specs=groups,
+                              fan_out=self.scheduler.fan_out)
+        plan = build_plan(scenes, settings, num_envs=a.num_envs, segment_len=a.segment_len, seed=a.seed)
+        plan.provenance = provenance
+        from evaluation.plan import plan_fingerprint
+        from evaluation.provenance import scene_definition
+        plan.fingerprint = plan_fingerprint(plan, dict(
+            checkpoint=str(Path(a.vla_load_path).resolve()) if a.vla_load_path else "",
+            policy=a.policy, vla_path=a.vla_path, vla_unnorm_key=a.vla_unnorm_key, vla_lora_rank=a.vla_lora_rank,
+            vla_temperature_eval=a.vla_temperature_eval, action_chunk=1,
+            buffer_inferbatch=a.buffer_inferbatch, env_id=a.env_id, obj_set=a.obj_set,
+            scene_definition=scene_definition(self.yaml_config) if self.yaml_config else None,
+        ))
+        episode, total_steps, src = checkpoint_progress(a.vla_load_path)
+        print(f"[eval] checkpoint progress: episode={episode} total_steps={total_steps} ({src})")
+        result = SequentialEvaluator(
+            plan=plan, env=self.env, glob_dir=self.glob_dir,
+            act_fn=lambda obs, instr: self._get_action(obs, instr, deterministic=True)[1],
+            prep_rollout=self.policy.prep_rollout, obj_set=a.obj_set,
+            episode=episode, total_steps=total_steps, report_name=a.eval_report,
+        ).run()
+        if result["wandb"]:
+            wandb.log(result["wandb"], step=total_steps)
+        return result
 
     def eval_all_groups(self, iteration, obj_set, prefix="eval"):
         """M4: Evaluate all groups using per-env rotation.
@@ -1009,7 +1003,13 @@ class CronosRunner:
                     envs_recep.append(recep)
                     env_task_map[g_start + local_i] = (g_idx, g_name, task_str)
 
-            # Pad remainder envs (if total per-group sizes < num_envs)
+            # Pad remainder envs (if total per-group sizes < num_envs). Padded envs
+            # are stepped but excluded from the per-(group, task) accumulators
+            # below, so they cost compute without skewing results.
+            if len(envs_obj) < self.args.num_envs and ep == 0:
+                print(f"[WARN] eval_all_groups: {self.args.num_envs - len(envs_obj)} padding env(s) "
+                      f"(per-group num_envs sum to {len(envs_obj)}, num_envs={self.args.num_envs}); "
+                      f"they are excluded from the results")
             while len(envs_obj) < self.args.num_envs:
                 envs_obj.append(envs_obj[-1])
                 envs_recep.append(envs_recep[-1])
@@ -1704,9 +1704,10 @@ class CronosRunner:
                 })
                 # per-checkpoint config + scheduler state
                 import shutil, json as _json
-                src_cfg = self.glob_dir / "run_config.yaml"
-                if src_cfg.exists():
-                    shutil.copy2(src_cfg, ckpt_path / "run_config.yaml")
+                for name in ("run_config.yaml", "experiment_config.yaml"):
+                    src_cfg = self.glob_dir / name
+                    if src_cfg.exists():
+                        shutil.copy2(src_cfg, ckpt_path / name)
                 sched_state = self.scheduler.get_state()
                 sched_state["task_pool"] = self.scheduler.task_pool  # for human inspection
                 (ckpt_path / "scheduler_state.json").write_text(
@@ -1796,41 +1797,10 @@ class CronosRunner:
         except Exception:
             instr = [""] * self.args.num_envs
 
-        csv_path = self.glob_dir / "segment_pose.csv"
-        write_hdr = not csv_path.exists()
-        ep_1, seg_1 = episode, segment_id + 1
-
-        # Materialize on CPU once per segment rather than per row — these are
-        # GPU tensors and a per-row .item() would sync 64x(N+M) times.
-        def _np(pair):
-            p, q = pair
-            return p.detach().cpu().numpy(), q.detach().cpu().numpy()
-
-        rows = []
-        for kind, entries, name_lists in (
-            ("obj", poses["obj"], poses["obj_names"]),
-            ("recep", poses["recep"], poses["recep_names"]),
-        ):
-            for slot, (pair, names) in enumerate(zip(entries, name_lists)):
-                p, q = _np(pair)
-                rows.append((kind, slot, names, p, q))
-        g_p, g_q = _np(poses["gripper"])
-        rows.append(("gripper", 0, [""] * self.args.num_envs, g_p, g_q))
-
-        with open(csv_path, "a") as f:
-            if write_hdr:
-                f.write("episode,segment,phase,total_steps,env,actor_kind,slot,"
-                        "model_name,task,px,py,pz,qw,qx,qy,qz\n")
-            for i in range(self.args.num_envs):
-                # Quote task/model in case they contain commas (they don't today
-                # but defensive — CSV-safe).
-                task_str = str(instr[i]).replace('"', '""') if i < len(instr) else ""
-                for kind, slot, names, p, q in rows:
-                    model = str(names[i]).replace('"', '""') if i < len(names) else ""
-                    f.write(f"{ep_1},{seg_1},{phase},{total_steps},{i},{kind},{slot},"
-                            f"\"{model}\",\"{task_str}\","
-                            f"{p[i,0]:.6f},{p[i,1]:.6f},{p[i,2]:.6f},"
-                            f"{q[i,0]:.6f},{q[i,1]:.6f},{q[i,2]:.6f},{q[i,3]:.6f}\n")
+        SegmentPoseWriter(self.glob_dir / "segment_pose.csv").write(
+            poses, instr, self.args.num_envs,
+            episode=episode, segment=segment_id + 1, phase=phase, total_steps=total_steps,
+        )
 
     def _refresh_trends_image(self):
         """re-render the trends dashboards after each
@@ -1918,54 +1888,8 @@ def main():
     args = tyro.cli(Args)
     runner = CronosRunner(args)
     
-    if args.eval_single:
-        # Standard Single/All Task Evaluation
-        task_pool = runner.scheduler.task_pool
-        results = []
-        for task_idx, task in enumerate(task_pool):
-            obj, recep = TaskScheduler._extract_obj_recep(task)
-            sval_stats = runner.eval(0, task_idx, args.obj_set, [obj]*args.num_envs, [recep]*args.num_envs, prefix="eval")
-            results.append((task, sval_stats))
-        runner._write_eval_report("Single Task Evaluation:\n", results)
-
-    elif args.eval_sequential:
-        # Multi-sequence permutation eval
-        runner.env.reset()
-        task_pool = runner.scheduler.task_pool
-        print(f"Task Pool: {task_pool}")
-
-        # Shared with eval_only.py — sequence 0 is the training order, the rest
-        # are distinct random permutations. Same draw as the previous inline
-        # `random.sample(list(permutations(pool))[1:], k)`, minus the factorial
-        # materialization for large pools.
-        all_sequences = build_eval_sequences(task_pool, args.eval_sequences, args.seed)
-
-        print(f"Running Sequential Evaluation across {len(all_sequences)} sequences...")
-        for seq_idx, task_list in enumerate(all_sequences):
-            print(f"Sequence {seq_idx + 1}: {task_list}")
-            seq_results = []
-            for task_idx, task_str in enumerate(task_list):
-                obj, recep = TaskScheduler._extract_obj_recep(task_str)
-                reset = (task_idx == 0)
-                sval_stats = runner.eval(seq_idx, task_idx, args.obj_set, [obj]*args.num_envs, [recep]*args.num_envs, prefix=f"seq{seq_idx}_task{task_idx}", reset=reset)
-                seq_total_steps = (seq_idx + 1) * args.episode_len * args.num_envs
-                scalars = runner.recorder.log_eval(
-                    episode=seq_idx + 1,
-                    total_steps=seq_total_steps,
-                    total_resets=0,
-                    eval_kind=f"sequential_seq{seq_idx}",
-                    task=task_str,
-                    scene="default",
-                    n_envs=args.num_envs,
-                    success=sval_stats.get("success", 0.0),
-                    grasp=sval_stats.get("consecutive_grasp", 0.0),
-                    obj_grasped=sval_stats.get("is_src_obj_grasped", 0.0),
-                )
-                panel = runner.recorder.build_wandb_eval_panel(f"sequential_seq{seq_idx}")
-                wandb.log({**scalars, **panel}, step=seq_total_steps)
-                seq_results.append((task_str, sval_stats))
-            runner._write_eval_report(f"Sequence {seq_idx + 1}:\n", seq_results)
-
+    if args.eval_single or args.eval_sequential:
+        runner.run_standalone_eval(single=args.eval_single)
     else:
         runner.train()
 

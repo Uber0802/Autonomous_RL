@@ -1,13 +1,23 @@
 #!/bin/bash
 # eval.sh - CRONOS standalone evaluation.
 #
-# Usage: bash scripts/eval.sh <checkpoint_dir> [config] [cuda] [num_eval_episode]
+# Usage: bash scripts/eval.sh <checkpoint_dir> [config|-] [cuda] [num_eval_episode] [extra eval_only.py flags...]
 #
 # Example:
-#   bash scripts/eval.sh .../glob/episode_0128
-#   bash scripts/eval.sh .../glob/episode_0128 configs/two_group_sequential_2x2.yaml 2 8
+#   bash scripts/eval.sh .../glob/episode_0128                  # training config, GPU 3
+#   bash scripts/eval.sh .../glob/episode_0128 - 2              # training config, GPU 2
+#   bash scripts/eval.sh .../glob/episode_0128 - 2 4 \
+#       --eval-rounds 0-5 --eval-domains in_domain --video-envs-per-block 1
 #
+# config: leave empty or "-" to use the checkpoint's TRAINING config (the
+# experiment_config.yaml snapshot next to the checkpoint, else the config_path in
+# its run_config). A config given here must define the same scenes as training,
+# or eval_only.py stops (--allow-config-mismatch to override on purpose).
 # num_envs is read from the config file (per-group num_envs).
+# Eval settings (rounds, pose sets, scene schedule, domains, video, pose, RNG
+# seeds) come from that config's `eval:` block; flags after the 4th
+# argument override it. Resolved values land in <glob>/eval_plan.json before rollout.
+# Resume an interrupted eval:  ... - <cuda> 4 --eval-resume <old glob dir>
 #
 # Output directory: defaults to a sibling `eval/` of the checkpoint's run, i.e.
 # the eval lands inside the same run tree as the checkpoint it evaluates instead
@@ -30,7 +40,10 @@ if [ ! -f "eval_only.py" ] || [ ! -d "configs" ]; then
 fi
 
 CKPT=${1:?Usage: bash scripts/eval.sh <checkpoint_dir> [config] [cuda] [num_eval_ep]}
-CONFIG=${2:-configs/one_group_seq_random_2x2.yaml}
+CONFIG=${2:-}
+[ "$CONFIG" = "-" ] && CONFIG=""
+CONFIG_ARGS=()
+[ -n "$CONFIG" ] && CONFIG_ARGS=(--config-path "$CONFIG")
 CUDA=${3:-3}
 NUM_EVAL_EP=${4:-4}
 
@@ -72,9 +85,9 @@ python eval_only.py \
     --env-id PickPlaceNxM-v1 \
     --vla-path openvla/openvla-7b \
     --vla-unnorm-key bridge_orig \
-    --config-path "$CONFIG" \
+    "${CONFIG_ARGS[@]}" \
     --segment-len 80 \
     --num-eval-episode $NUM_EVAL_EP \
     --vla-load-path "$CKPT" \
     --wandb-dir "$RUN_OUT_DIR" \
-    --record-video
+    "${@:5}"

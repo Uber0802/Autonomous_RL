@@ -1,14 +1,21 @@
 """CRONOS — Standalone evaluation script.
 
-Loads a checkpoint and runs eval_all_groups() with per-env rotation.
-No training rollout, no PPO, no replay buffer allocation.
+Loads a checkpoint and runs single-task or sequential eval over every scene
+(YAML group) of the config. No training rollout, no PPO, no replay buffer.
+
+The environment comes from the checkpoint's training config file (the snapshot
+next to the checkpoint, or the recorded `config_path`) unless `--config-path`
+names one; either way it must define the same scenes as training
+(`evaluation/provenance.py`). Settings come from, in order of precedence: CLI
+flags > that config's `eval:` block > defaults
+(`evaluation/plan.py::EVAL_SETTING_SPEC`). The resolved values,
+and where each came from, are written to `glob/eval_plan.json` before any
+rollout, together with every sequence and the RNG record.
 
 Usage:
     python eval_only.py \
-        --config-path configs/two_group_2x2.yaml \
-        --vla-load-path /path/to/checkpoint/episode_0128 \
-        --num-envs 16 --num-eval-episode 4 \
-        --record-video
+        --vla-load-path /path/to/glob/episode_0128 \
+        --eval-scene-schedule parallel          # all 24 orders by default
 """
 
 import logging
@@ -23,17 +30,15 @@ import tyro
 import wandb
 from pathlib import Path
 from dataclasses import dataclass
-from collections import defaultdict
-from tqdm import tqdm
-
-from mani_skill.utils.visualization.misc import images_to_video
 
 from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
-from envs.scheduler import TaskScheduler, build_eval_sequences
+from envs.scheduler import TaskScheduler
 import envs.bridge_multi  # Trigger environment registration
-from training.metrics import SuccessRecorder
+from evaluation.plan import build_plan, build_scenes, checkpoint_progress, plan_fingerprint, resolve_eval_settings
+from evaluation.provenance import check_against_training, resolve_config_path, scene_definition
+from evaluation.sequential import SequentialEvaluator
 
 
 @dataclass
@@ -57,11 +62,26 @@ class EvalArgs:
     scene: str = ""
 
     # --- Eval control ---
+    # Every field in this block marked [key] can also be set in the config's
+    # `eval:` block. An explicit CLI flag wins over the YAML; the YAML wins over
+    # the default shown here. See evaluation/plan.py::EVAL_SETTING_SPEC.
     segment_len: int = 80
     num_eval_episode: int = 4               # legacy / unused in single+sequential modes
-    eval_mode: str = "sequential"           # "sequential" (AutoRL default) | "single"
-    eval_sequences: int = 5                 # sequential mode: training_seq + (N-1) random perms
-    config_path: str = ""
+    eval_mode: str = "sequential"           # [mode] sequential (AutoRL render_seq) | single (AutoRL render, blocks run tasks side by side)
+    eval_pose_sets: int = 1                 # [pose_sets] sets of start poses; each set = every cycle once (4 tasks: 6 rounds)
+    eval_rounds: str = "all"                # [rounds] all | 3 | 3-5 | 3- | 0,6-11 — global round numbers
+    eval_layout_slots: int = -1             # [layout_slots] start poses per order block; -1 = one per env, 1 = a single pose
+    eval_sequence_seed: int = -1            # [sequence_seed] cycle-order stream; -1 = --seed
+    eval_layout_seed: int = -1              # [layout_seed] start-pose stream; -1 = --seed
+    eval_policy_seed: int = -1              # [policy_seed] per-unit action-sampling reseed; -1 = --seed
+    eval_resume: str = ""                   # glob dir of an interrupted eval: skip its done units, rerun the rest there
+    eval_scene_schedule: str = "parallel"   # [scene_schedule] parallel (all scenes in one batch) | serial
+    eval_domains: str = "in_domain,out_of_domain"  # [domains] comma-separated subset
+    video_envs_per_block: int = -1          # [video_envs_per_block] first k envs of each order block; -1 = all
+    record_eval_pose: bool = True           # [record_pose] eval_segment_pose.csv (training segment_pose columns)
+    eval_pose_phase: str = "both"           # [pose_phase] start | end | both
+    config_path: str = ""                   # default: the checkpoint's training config
+    allow_config_mismatch: bool = False     # evaluate on a config whose scenes differ from training
     task_order: str = "sequential"
     task_filter: str = ""
     num_groups: int = 0
@@ -74,12 +94,12 @@ class EvalArgs:
     vla_lora_rank: int = 32
     vla_temperature_eval: float = 0.6
     action_chunk: int = 1                   # SpatialVLA chunk(K) open-loop deployment; K=1 = single-step
-    eval_ood: bool = True                   # if False, skip the out_of_domain (rand_ood) loop
+    eval_ood: bool = True                   # legacy alias: --no-eval-ood == --eval-domains in_domain
 
     # --- Logging ---
     wandb: bool = False
     wandb_dir: str = ""
-    record_video: bool = True
+    record_video: bool = True               # [record_video]
     log_file: str = "eval.log"              # tee of stdout (in the wandb files/ dir, NOT glob/)
     eval_report: str = "eval_report.txt"
 
@@ -92,12 +112,6 @@ class EvalRunner:
 
     def __init__(self, args: EvalArgs):
         self.args = args
-
-        # Chained-success (semantics A) state: (obj_set, seq_idx) -> per-env
-        # running AND over the tasks completed so far in that sequence. Reset at
-        # task_idx == 0. Keyed by obj_set so the in_domain and out_of_domain
-        # sweeps over the same sequences do not contaminate each other.
-        self._chain_success = {}
 
         np.random.seed(args.seed)
         random.seed(args.seed)
@@ -121,6 +135,12 @@ class EvalRunner:
         wandb.define_metric("eval_*", step_metric="total_steps")
         # `glob/` is a sibling of `files/` and is NOT synced to wandb.
         self.glob_dir = Path(run.dir).parent / "glob"
+        if args.eval_resume:
+            # Results continue in the interrupted run's glob; this wandb run only
+            # holds the resumed session's log.
+            self.glob_dir = Path(args.eval_resume).resolve()
+            if not (self.glob_dir / "eval_plan.json").exists():
+                raise ValueError(f"--eval-resume {args.eval_resume}: no eval_plan.json there")
         self.glob_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir = Path(run.dir)
 
@@ -135,12 +155,38 @@ class EvalRunner:
                     for st in self.streams: st.flush()
             sys.stdout = _Tee(sys.__stdout__, log_fp)
 
-        self.recorder = SuccessRecorder(self.glob_dir)
-
         # Device
         device_id = 0
         device_id_other = 1 if torch.cuda.device_count() > 1 else 0
         self.device = torch.device(f"cuda:{device_id}")
+
+        # Config (load BEFORE policy and env creation: a wrong or mismatched
+        # config should fail before a 7B model is loaded, and env_n/env_m/num_envs
+        # must be correct before the env is built).
+        # num_envs is authoritative from the YAML (sum of per-group num_envs);
+        # the CLI default is only a fallback when no config is provided.
+        from envs.config import load_cronos_config
+        cronos_root = Path(__file__).resolve().parent
+        args.config_path, self.provenance = resolve_config_path(args.config_path, args.vla_load_path, cronos_root)
+        print(f"[eval] config: {args.config_path} ({self.provenance['config_source']})")
+        yaml_config = load_cronos_config(args.config_path)
+        check_against_training(yaml_config, self.provenance, load_cronos_config, args.allow_config_mismatch)
+        print(f"[eval] training config check: {self.provenance['check']}")
+        import shutil as _shutil
+        if not (args.eval_resume and (self.glob_dir / "experiment_config.yaml").exists()):
+            _shutil.copy2(args.config_path, self.glob_dir / "experiment_config.yaml")
+        for field_name in ("env_n", "env_m", "num_envs",
+                           "obj1_index", "obj2_index", "obj3_index",
+                           "plate1_index", "plate2_index", "plate3_index",
+                           "scene", "task_order"):
+            yaml_val = getattr(yaml_config, field_name, None)
+            if yaml_val is not None:
+                setattr(args, field_name, yaml_val)
+        if yaml_config.groups:
+            args.env_n = max(len(g.obj) for g in yaml_config.groups)
+            args.env_m = max(len(g.recep) for g in yaml_config.groups)
+
+        self.yaml_config = yaml_config
 
         # Policy (no PPO needed). `--policy` picks the class; `_policy_args`
         # passes through the same minimal namespace to either constructor —
@@ -153,23 +199,6 @@ class EvalRunner:
             raise ValueError(f"Unknown --policy {args.policy!r}; expected one of 'openvla', 'spatialvla'.")
         self.policy = _PolicyCls(self._policy_args(), device_id=device_id_other)
 
-        # Config (load BEFORE env creation so env_n/env_m/num_envs are correct).
-        # num_envs is authoritative from the YAML (sum of per-group num_envs);
-        # the CLI default is only a fallback when no config is provided.
-        yaml_config = None
-        if args.config_path:
-            from envs.config import load_cronos_config
-            yaml_config = load_cronos_config(args.config_path)
-            for field_name in ("env_n", "env_m", "num_envs",
-                               "obj1_index", "obj2_index", "obj3_index",
-                               "plate1_index", "plate2_index", "plate3_index",
-                               "scene", "task_order"):
-                yaml_val = getattr(yaml_config, field_name, None)
-                if yaml_val is not None:
-                    setattr(args, field_name, yaml_val)
-            if yaml_config.groups:
-                args.env_n = max(len(g.obj) for g in yaml_config.groups)
-                args.env_m = max(len(g.recep) for g in yaml_config.groups)
 
         # Environment (created after config so env_n/env_m are correct)
         unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
@@ -231,7 +260,11 @@ class EvalRunner:
 
         # Dump config
         cfg = dict(args.__dict__)
-        (self.glob_dir / "run_config.json").write_text(json.dumps(cfg, indent=2, default=str) + "\n")
+        name = "run_config.json"
+        if args.eval_resume and (self.glob_dir / name).exists():
+            import datetime as _dt
+            name = f"run_config_resume_{_dt.datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        (self.glob_dir / name).write_text(json.dumps(cfg, indent=2, default=str) + "\n")
 
     def _policy_args(self):
         """Build a namespace that OpenVLAPolicy.__init__ expects."""
@@ -309,260 +342,54 @@ class EvalRunner:
         action_len = flat.shape[1] // chunk
         return flat.view(flat.shape[0], chunk, action_len)
 
-    def _write_eval_report(self, header, results):
-        report_path = str(self.glob_dir / self.args.eval_report)
-        with open(report_path, "a") as f:
-            f.write(header)
-            for task_name, stats in results:
-                success = stats.get("success", 0.0)
-                chained = stats.get("success_chained", 0.0)
-                grasp = stats.get("consecutive_grasp", 0.0)
-                obj_grasped = stats.get("is_src_obj_grasped", 0.0)
-                # `success` = independent (B); `chained` = cumulative AND over
-                # the sequence so far (A). They coincide at task_idx 0.
-                f.write(f"  {task_name:<45s} success: {success:.4f}  "
-                        f"chained: {chained:.4f}  grasp: {grasp:.4f}  "
-                        f"obj_grasped: {obj_grasped:.4f}\n")
-            f.write("\n")
-
-    @torch.no_grad()
-    def eval(self, iteration, task_idx, obj_set, object, receptacle, prefix="eval", reset=True, group_idx=0):
-        """Standalone evaluation (port of AutoRL `render`).
-
-        Mirrors `CronosRunner.eval` in main.py. All envs run the SAME (object[i],
-        receptacle[i]) — the caller broadcasts a single task. No fan-out. This is
-        the eval mode for `eval_only.py`; `eval_all_groups` (fan-out rotation) is
-        reserved for training-time eval inside `main.py:train()` and is intentionally
-        absent here.
-        """
-        if reset:
-            self.policy.prep_rollout()
-            obs, _, _ = self.env.reset(
-                obj_set_override=obj_set,
-                group_idx_override=group_idx,
-                skip_scheduler=True,
-            )
-            self.env.set_task(object, receptacle)
-        else:
-            self.env.set_task(object, receptacle)
-            # Continue from the live scene, but reopen the measurement window:
-            # without this the previous segment's `_elapsed_steps` keeps the env
-            # permanently truncated (so `info["episode"]` fires every step and
-            # `success` degrades into a time-average) and the latched grasp
-            # flags carry over from the previous task. `begin_segment` clears
-            # only those counters — poses stay put, so the no-reset continuity
-            # this eval mode exists to measure is preserved. Result: identical
-            # accounting to a training segment (terminal `success`, grasp
-            # latched within this segment only).
-            self.env.begin_segment()
-            obs = self.env.get_obs_image()
-        instruction = self.env.get_language_instructions()
-
-        print(f"  [{prefix}] {object[0]} -> {receptacle[0]}")
-
-        record = self.args.record_video
-        if record:
-            video_frames = [[] for _ in range(self.args.num_envs)]
-
-        env_infos = defaultdict(list)
-        K = max(1, int(self.args.action_chunk))
-        # K==1 is the existing single-step path used by both OpenVLA and the
-        # SpatialVLA single-step gate. K>1 is the SpatialVLA chunk(K) open-loop
-        # path: one inference produces K actions, then we step the env K times
-        # before re-inferring. `segment_len` remains the env-step horizon, so
-        # for K=4 / segment_len=80 we do 20 inferences * 4 = 80 env steps.
-        pbar = tqdm(range(self.args.segment_len), desc=f"eval {prefix}", leave=False)
-        step_i = 0
-        while step_i < self.args.segment_len:
-            if K == 1:
-                val, action, logp = self._get_action(obs, instruction)
-                chunk_actions = action.unsqueeze(1)  # [num_envs, 1, action_len]
-            else:
-                # SpatialVLA-only: open-loop chunk(K). No value/logprob — eval discards them anyway.
-                chunk_actions = self._get_action_chunk(obs, instruction, K)  # [num_envs, K, 3]
-            for k in range(K):
-                if step_i >= self.args.segment_len:
-                    break
-                if record:
-                    for env_i in range(self.args.num_envs):
-                        video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-                obs, reward, truncated, env_info = self.env.step(chunk_actions[:, k])
-                if "episode" in env_info:
-                    for k_info, v in env_info["episode"].items():
-                        env_infos[k_info] += v
-                step_i += 1
-                pbar.update(1)
-        pbar.close()
-
-        # Dump per-trial outcomes to a CSV so the paired-McNemar gate has
-        # the per-(task, env) pairing key it needs. The episodic
-        # `eval_only.py` reset is
-        # seed-determined (wrapper.py:42-44), so two runs at the same
-        # `--seed` produce byte-identical (task_idx, env_i) inits — no
-        # `episode_id` is needed in the key under the same-seed contract.
-        # File: `<glob_dir>/eval_per_trial.csv`. Columns:
-        #   seq_idx,task_idx,obj_set,task,env_idx,
-        #   success,success_chained,grasp,obj_grasped,prefix
-        #
-        # Two scoring semantics, both emitted so one eval answers both
-        # questions without a re-run:
-        #   `success`         — independent (B): this task judged on its own,
-        #                       regardless of what happened earlier in the
-        #                       sequence. This is AutoRL's semantics, correctly
-        #                       computed.
-        #   `success_chained` — chained (A): cumulative AND along `task_idx`
-        #                       within one (obj_set, seq_idx, env_idx). Once an
-        #                       env fails a task, every later task in that
-        #                       sequence scores 0 for that env. Measures how far
-        #                       into a sequence the policy stays alive; unlike
-        #                       B it is order-sensitive, so the same task set
-        #                       under different permutations gives different
-        #                       numbers by design.
-        per_trial_csv = self.glob_dir / "eval_per_trial.csv"
-        wrote_header = per_trial_csv.exists()
-        n_envs = self.args.num_envs
-        successes = env_infos.get("success", [0.0] * n_envs)
-        grasps = env_infos.get("consecutive_grasp", [0.0] * n_envs)
-        obj_grasps = env_infos.get("is_src_obj_grasped", [0.0] * n_envs)
-
-        # One terminal sample per env is the contract: `info["episode"]` must
-        # fire on the segment's final step only. More than that means the env
-        # was already truncated on entry, which silently turns `success` into a
-        # time-average and makes the per-env indexing below read the wrong
-        # timestep — the exact failure `CronosWrapper.begin_segment` prevents.
-        if len(successes) > n_envs:
-            print(f"[WARN] eval: expected {n_envs} terminal samples per metric, "
-                  f"got {len(successes)}. The segment was truncated before its "
-                  f"final step, so per-trial rows are sampled from the wrong "
-                  f"timestep and the aggregate is a time-average. Check that "
-                  f"begin_segment() runs on the reset=False path.")
-
-        # Chain state carries across tasks within one (obj_set, sequence).
-        chain_key = (obj_set, iteration)
-        if task_idx == 0:
-            chain = [1.0] * n_envs
-        else:
-            chain = self._chain_success.get(chain_key, [1.0] * n_envs)
-
-        with open(per_trial_csv, "a") as f:
-            if not wrote_header:
-                f.write("seq_idx,task_idx,obj_set,task,env_idx,"
-                        "success,success_chained,grasp,obj_grasped,prefix\n")
-            for env_i in range(n_envs):
-                obj_i = object[env_i] if env_i < len(object) else object[-1]
-                rec_i = receptacle[env_i] if env_i < len(receptacle) else receptacle[-1]
-                task_str = f"put {obj_i} on {rec_i}"
-                s = float(successes[env_i]) if env_i < len(successes) else 0.0
-                g = float(grasps[env_i]) if env_i < len(grasps) else 0.0
-                og = float(obj_grasps[env_i]) if env_i < len(obj_grasps) else 0.0
-                chain[env_i] = chain[env_i] * s   # 0/1 values → cumulative AND
-                f.write(f"{iteration},{task_idx},{obj_set},{task_str},"
-                        f"{env_i},{s:.4f},{chain[env_i]:.4f},{g:.4f},{og:.4f},{prefix}\n")
-        self._chain_success[chain_key] = chain
-
-        if record:
-            for env_i in range(self.args.num_envs):
-                video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
-            render_dir = self.glob_dir / "eval_videos" / prefix
-            render_dir.mkdir(parents=True, exist_ok=True)
-            successes = env_infos.get("success", [0] * self.args.num_envs)
-            for i in range(self.args.num_envs):
-                s = int(successes[i]) if i < len(successes) else 0
-                obj_safe = str(object[i]).replace(" ", "_")
-                rec_safe = str(receptacle[i]).replace(" ", "_")
-                images_to_video(
-                    video_frames[i], str(render_dir),
-                    f"task{task_idx}-env{i}-{obj_safe}_{rec_safe}-s{s}",
-                    fps=10, verbose=False,
-                )
-
-        stats = {k: float(np.mean(v)) for k, v in env_infos.items() if v}
-        # Semantics A alongside B. `success` above is the independent score;
-        # `success_chained` is the fraction of envs that have cleared every task
-        # of this sequence up to and including this one.
-        stats["success_chained"] = float(np.mean(chain)) if chain else 0.0
-        return stats
-
-    def _build_sequences(self, task_pool):
-        """Return list of task orderings to evaluate.
-
-        Sequential mode: [training_seq] + (N-1) random distinct permutations.
-        Single mode: one one-task "sequence" per task in the pool.
-        """
-        if self.args.eval_mode == "single":
-            return [[t] for t in task_pool]
-
-        return build_eval_sequences(task_pool, self.args.eval_sequences, self.args.seed)
+    def _build_scenes(self):
+        """One EvalScene per YAML group (or a single "default" scene)."""
+        return build_scenes(
+            self.scheduler.group_states, self.args.num_envs,
+            env_n=self.args.env_n, env_m=self.args.env_m,
+            group_specs=self.yaml_config.groups if (self.yaml_config and self.yaml_config.groups) else None,
+            fan_out=self.scheduler.fan_out,
+        )
 
     def run(self):
-        """Run AutoRL-style eval (sequential default) for in-domain + out-of-domain."""
-        task_pool = list(self.scheduler.task_pool)
-        sequences = self._build_sequences(task_pool)
-        group_name = (self.scheduler.group_states[0].name
-                      if getattr(self.scheduler, "group_states", None)
-                      else "default")
+        """Standalone eval: resolve settings → build plan → execute → write records."""
+        a = self.args
+        settings = resolve_eval_settings(a, self.yaml_config.eval if self.yaml_config else None, sys.argv[1:])
+        plan = build_plan(self._build_scenes(), settings, num_envs=a.num_envs,
+                          segment_len=a.segment_len, seed=a.seed)
+        plan.provenance = self.provenance
+        plan.fingerprint = plan_fingerprint(plan, dict(
+            checkpoint=str(Path(a.vla_load_path).resolve()) if a.vla_load_path else "",
+            policy=a.policy, vla_path=a.vla_path, vla_unnorm_key=a.vla_unnorm_key, vla_lora_rank=a.vla_lora_rank,
+            vla_temperature_eval=a.vla_temperature_eval, action_chunk=a.action_chunk,
+            buffer_inferbatch=a.buffer_inferbatch, env_id=a.env_id, obj_set=a.obj_set,
+            scene_definition=scene_definition(self.yaml_config),
+        ))
+        episode, total_steps, progress_src = checkpoint_progress(a.vla_load_path)
+        print(f"[eval] checkpoint progress: episode={episode} total_steps={total_steps} ({progress_src})")
 
-        print(f"\nEval mode: {self.args.eval_mode}, "
-              f"{len(sequences)} sequence(s), num_envs={self.args.num_envs}")
-        for i, seq in enumerate(sequences):
-            tag = "training" if (i == 0 and self.args.eval_mode == "sequential") else "task" if self.args.eval_mode == "single" else "random"
-            print(f"  seq{i} ({tag}): {seq}")
+        evaluator = SequentialEvaluator(
+            plan=plan, env=self.env, glob_dir=self.glob_dir,
+            act_fn=lambda obs, instr: self._get_action(obs, instr)[1],
+            chunk_fn=self._get_action_chunk if a.action_chunk > 1 else None,
+            action_chunk=a.action_chunk,
+            prep_rollout=self.policy.prep_rollout, obj_set=a.obj_set,
+            episode=episode, total_steps=total_steps, report_name=a.eval_report,
+            resume=bool(a.eval_resume),
+        )
+        result = evaluator.run()
+        if result["wandb"]:
+            wandb.log(result["wandb"], step=0)
 
-        eval_log = {"episode": 0, "total_steps": 0, "total_resets": 0}
-
-        # By default eval reports both `in_domain` and the rand_ood sweep
-        # (matching the pre-SpatialVLA behavior). `--eval-ood false` skips the
-        # OOD pass, which is used by single-object 1x1 configs (E-4) where
-        # rand_ood has no meaningful OOD pool to draw from.
-        sweeps = [("in_domain", self.args.obj_set)]
-        if self.args.eval_ood:
-            sweeps.append(("out_of_domain", "rand_ood"))
-        for kind_label, obj_set in sweeps:
-            print(f"\nEvaluating {kind_label}")
-            report_results = []
-            for seq_idx, sequence in enumerate(sequences):
-                for task_idx, task_str in enumerate(sequence):
-                    obj, recep = TaskScheduler._extract_obj_recep(task_str)
-                    reset = (task_idx == 0)  # only at sequence start
-                    stats = self.eval(
-                        iteration=seq_idx,
-                        task_idx=task_idx,
-                        obj_set=obj_set,
-                        object=[obj] * self.args.num_envs,
-                        receptacle=[recep] * self.args.num_envs,
-                        prefix=f"{kind_label}_seq{seq_idx}_task{task_idx}",
-                        reset=reset,
-                    )
-                    print(f"    seq{seq_idx} task{task_idx}: {task_str} "
-                          f"success={stats.get('success', 0.0):.4f} "
-                          f"chained={stats.get('success_chained', 0.0):.4f} "
-                          f"grasp={stats.get('consecutive_grasp', 0.0):.4f}")
-                    scalars = self.recorder.log_eval(
-                        episode=0,
-                        total_steps=seq_idx,
-                        total_resets=0,
-                        eval_kind=kind_label,
-                        group=group_name,
-                        task=task_str,
-                        scene="default",
-                        n_envs=self.args.num_envs,
-                        success=stats.get("success", 0.0),
-                        grasp=stats.get("consecutive_grasp", 0.0),
-                        obj_grasped=stats.get("is_src_obj_grasped", 0.0),
-                    )
-                    eval_log.update(scalars)
-                    report_results.append((f"seq{seq_idx}_task{task_idx}: {task_str}", stats))
-            eval_log.update(self.recorder.build_wandb_eval_panel(kind_label))
-            self._write_eval_report(f"{kind_label.replace('_', ' ').title()} Evaluation:\n",
-                                    report_results)
-
-        wandb.log(eval_log, step=0)
         print("\nEval complete. Results saved to:")
-        print(f"  CSV:    {self.glob_dir / 'eval_success.csv'}")
-        print(f"  Report: {self.glob_dir / self.args.eval_report}")
-        if self.args.record_video:
-            print(f"  Videos: {self.glob_dir / 'eval_videos'}")
-
+        for name in ("eval_plan.json", "eval_status.json", "eval_per_trial.csv", "eval_sequence_summary.csv",
+                     "eval_coverage.csv", "eval_layouts.csv", "eval_segment_pose.csv",
+                     "eval_success.csv", a.eval_report):
+            path = self.glob_dir / name
+            if path.exists():
+                print(f"  {path}")
+        if settings.record_video:
+            print(f"  {self.glob_dir / 'eval_videos'}")
 
 def main():
     args = tyro.cli(EvalArgs)

@@ -1,3 +1,8 @@
+# LEGACY: standalone eval now reads the checkpoint's training config
+# (configs/two_group_sequential_2x2.yaml), which also carries the `eval:` block.
+# This reduced-env copy differs from training in num_envs and only runs with
+# --allow-config-mismatch. The caveat below predates multi-scene eval support.
+#
 # Eval config for `configs/two_group_sequential_2x2.yaml`.
 #
 # CAVEAT — multi-group standalone eval is NOT FULLY SUPPORTED in V0.3.1.

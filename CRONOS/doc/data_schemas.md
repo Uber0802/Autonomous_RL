@@ -3,16 +3,25 @@
 Describes the current tree; the code version is in [`../version.py`](../version.py).
 Index of these documents: [`README.md`](README.md).
 
-Every file lands in the run's `glob/` directory. All of them are append-only,
-written with stdlib `csv`, and carry both x-axes (`total_steps` and
-`total_resets`) so any curve can be plotted against either without a re-run.
+Every file lands in the run's `glob/` directory, written with stdlib `csv`.
+Training files are append-only and carry both x-axes (`total_steps` and
+`total_resets`). Standalone eval has append-only *source* files and *derived*
+files that are rebuilt whole (see `eval_sequential.md` §6).
 
 | File | One row per | Written by | Enabled by |
 |---|---|---|---|
 | `rollout_success.csv` | (episode, segment, env) | training rollout | always |
 | `segment_pose.csv` | (episode, segment, phase, env, actor) | training rollout | always (`--no-record-segment-pose` to disable) |
-| `eval_success.csv` | (eval point, group, task) | training eval + `eval_only.py` | always |
-| `eval_per_trial.csv` | (sequence, task, env) | `eval_only.py` | always |
+| `eval_success.csv` | (eval point, group, task) | training eval (append) + standalone eval (derived) | always; standalone: complete evals only |
+| `eval_per_trial.csv` | (domain, round, task slot, env) | standalone eval (source) | always |
+| `eval_layouts.csv` | (domain, round, env) | standalone eval (source) | always |
+| `eval_segment_pose.csv` | (domain, round, task slot, phase, env, actor) | standalone eval (source) | `eval.record_pose` (default on) |
+| `eval_sequence_summary.csv` | (level, domain, seq_kind, …) | standalone eval (derived) | always |
+| `eval_coverage.csv` | (domain, seq_kind, scene) | standalone eval (derived) | always |
+| `eval_status.json` | — | standalone eval (derived) | always |
+
+"Standalone eval" is `eval_only.py` and `main.py --eval-single/--eval-sequential`;
+its design, settings and RNG contract are in [`eval_sequential.md`](eval_sequential.md).
 
 ---
 
@@ -215,26 +224,34 @@ was incremented again. Fixed here — only `segment` is incremented.
 
 ## `eval_per_trial.csv`
 
-Per-env outcome for each (sequence, task) in a standalone eval. This is the file
-`tools/mcnemar_pair.py` pairs on, with key `(eval_kind, task, env_idx)`.
+Source of truth for standalone eval: one row per (domain, round, task slot, env).
+`tools/mcnemar_pair.py` pairs on `(eval_kind, task, group, seq_idx, task_idx, env_idx)`.
+A unit's rows — (eval_kind, pass_label, seq_idx) — are appended together after its
+last task slot.
 
 | Column | Meaning |
 |---|---|
-| `seq_idx` | ordering index; 0 is the training order |
-| `task_idx` | position within the ordering |
+| `seq_idx` | global round number (see `eval_sequential.md` §3) |
+| `task_idx` | task slot within the round |
 | `obj_set` | `rand` (in-domain) or `rand_ood` |
 | `task` | resolved task string |
 | `env_idx` | parallel env index |
 | `success` | **B, independent** — this task judged on its own |
-| `success_chained` | **A, chained** — cumulative AND along `task_idx` |
+| `success_chained` | **A, chained** — cumulative AND along `task_idx` within (domain, round, env) |
 | `grasp`, `obj_grasped` | latched within this segment |
-| `prefix` | `{kind}_seq{i}_task{j}`, matches the video subdirectory |
+| `prefix` | `{eval_kind}_seq{round}_task{slot}` |
+| `eval_kind` | `in_domain` / `out_of_domain` |
+| `seq_kind` | `training` / `random` / `single` — filter on this to keep training rounds apart |
+| `group` | scene (YAML group) |
+| `obj`, `recep` | the task's object and receptacle |
+| `order` | the order this env runs in this round, as training-order letters (`ABCD`, `BCDA`, …) |
+| `pose_set` | set of start poses (`round // rounds_per_set`) |
+| `cycle_idx` | 0 = training cycle, 1.. = random cycles; 0 in single mode |
+| `pass_label` | `all_scenes` (parallel) or the scene name (serial) |
+| `episode`, `total_steps` | checkpoint progress, 0 if unknown |
 
-Both scoring semantics are always emitted; see `doc/eval_audit.md §3`.
-
-Row count must be exactly `sequences × tasks × num_envs`. A larger count means a
-segment reported on more than its final step — `eval_only.py` prints a warning
-when it sees this.
+The first ten columns keep their old names and order. Row count per unit is
+exactly `num_envs × task slots`; the eval refuses to continue otherwise.
 
 ### AutoRL side
 
@@ -248,10 +265,77 @@ of scoring them as zeros. So `--metric success` against a recovered AutoRL
 baseline works, and `--metric grasp` reports zero comparable pairs rather than
 producing a confident-looking result from nothing.
 
----
+Known gap (read, not fixed): `parse_autorl_eval.py` writes `prefix =
+autorl_seq…`, while `mcnemar_pair.py` derives the domain from a prefix starting
+with `in_domain` / `out_of_domain`, so recovered AutoRL rows are currently skipped.
+AutoRL orders and start states also differ from the round design, so only pooled
+rates are comparable anyway.
+
+## `eval_layouts.csv`
+
+One row per env per unit reset.
+
+| Column | Meaning |
+|---|---|
+| `eval_kind`, `seq_idx`, `seq_kind`, `pose_set`, `pass_label`, `group` | which reset |
+| `env_idx`, `scene_env_idx` | batch index, and index within the scene's env range |
+| `order` | order this env runs in the round |
+| `layout_slot` | slot inside the env's block (mod `layout_slots`); with `pose_set`, the start pose is a function of this alone |
+| `layout_key` | RNG stream key, `layout\|seed=0\|domain=in_domain\|set=0` |
+| `layout_id` | the drawn 62-bit id |
+| `rand_id`, `pos_id`, `quat_id`, `overlay_id` | what the env applied: `rand_id = layout_id % ltt`, `pos_id` indexes `xyz_configs`, `quat_id` indexes `quat_configs` |
+
+Two runs with the same seed produce identical files; within a file every
+`(eval_kind, pose_set, layout_slot)` has one `(pos_id, quat_id)`.
+
+## `eval_segment_pose.csv`
+
+Exactly the `segment_pose.csv` columns, same formatting (one shared writer,
+`evaluation/records.py::SegmentPoseWriter`), with `episode = seq_idx + 1` and
+`segment = task_idx + 1`, followed by `eval_kind, seq_kind, seq_idx, pose_set,
+task_idx, group, obj_set, pass_label`. `phase=start` is recorded after the reset
+(slot 0) or after `set_task` + `begin_segment` (later slots; the scene is not
+touched, so it equals the previous slot's `end`); `phase=end` after the last
+step. `total_steps` is the checkpoint's, so plot with `--step-range all`, and
+filter on `eval_kind` — both domains reuse `episode` numbers.
+
+## `eval_sequence_summary.csv`
+
+Derived; rebuilt whole from `eval_per_trial.csv`.
+
+| Column | Meaning |
+|---|---|
+| `level` | `slot` (group, round, order, slot) · `order` (group, round, order) · `pose_set` (group, pose set) · `task` (group, task) · `scene` (group) · `kind` (all scenes) |
+| `eval_kind`, `seq_kind` | always part of the key, so training and random rounds never pool |
+| `group`, `pose_set`, `seq_idx`, `order`, `task_idx`, `task` | filled as far as the level defines them |
+| `n_trials` | trials pooled |
+| `success`, `success_chained`, `grasp`, `obj_grasped` | means |
+
+`success_chained` above `level=slot` averages over the positions pooled.
+
+## `eval_coverage.csv`
+
+Derived. Planned (`envs, rounds, pose_sets, orders, tasks_per_round,
+distinct_tasks, trials, trials_per_task, resets, layouts`) and counted
+(`actual_trials, actual_resets, actual_layouts`) per (eval_kind, seq_kind, group),
+with `padded_envs` (always 0 — eval does not pad) and `match`.
+
+## `eval_status.json`
+
+Derived, also refreshed after every unit: `complete` (selected units done),
+`full_design` / `rounds_not_selected` (whether the selection covers every round of
+every pose set), `coverage_match`, `planned_units`, `done_units`, `missing` /
+`partial` unit keys, `overfull` (units with too many rows), `fingerprint`,
+`updated`.
 
 ## `eval_success.csv`
 
-Unchanged. Aggregate per (eval point, group, task), with `eval_kind`
-distinguishing `in_domain` / `out_of_domain` / `sequential_seq<N>`. Consumed by
-`scripts/plot.py` and `tools/plot_run_trends.py`.
+Aggregate per (eval point, group, task). Training-time eval appends
+`eval_kind` `in_domain` / `out_of_domain`. Standalone eval **rebuilds** it with
+`eval_kind = <domain>_<seq_kind>` (`in_domain_training`, `in_domain_random`,
+`out_of_domain_single`, …), the scene name in `group` and the background label in
+`scene` — and writes it **only when the eval is complete and covers the full
+design**; an incomplete eval or a round shard has no `eval_success.csv` (see
+`eval_status.json`). The older `sequential_seq<N>`
+kinds are no longer written. Consumed by `scripts/plot.py` and
+`tools/plot_run_trends.py`.

@@ -255,10 +255,19 @@ class CronosWrapper:
         return obs_image, reward, truncated, info
 
     def reset(self, same_init=True, obj_set_override=None, group_idx_override=None,
-              skip_scheduler=False, **kwargs):
-        """Unified reset matching AutoRL: env.reset → set_task → zero reward_old."""
+              skip_scheduler=False, layout_ids=None, **kwargs):
+        """Unified reset matching AutoRL: env.reset → set_task → zero reward_old.
+
+        layout_ids: optional per-env integers (`envs/rng_streams.py`) fixing each
+            env's initial object/receptacle placement. `None` keeps the env's own
+            `torch.randint` draw on the global CUDA generator (training today).
+        """
         options = self._build_options(obj_set_override=obj_set_override,
                                       group_idx_override=group_idx_override)
+        if layout_ids is not None:
+            if len(layout_ids) != self.num_envs:
+                raise ValueError(f"layout_ids has {len(layout_ids)} entries for {self.num_envs} envs")
+            options["layout_ids"] = torch.tensor(list(layout_ids), dtype=torch.long, device=self.device)
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
 

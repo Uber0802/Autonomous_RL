@@ -57,6 +57,7 @@ _KNOWN_TOP_KEYS = {
     "groups",
     "fan_out",  # sub-group fan-out (default True)
     "unsuitable_detector",  # HSR detector config (name + workspace AABB)
+    "eval",  # standalone eval settings (evaluation/plan.py::EVAL_SETTING_SPEC)
     # Legacy flat keys (still accepted for backward compat / CLI-only mode)
     "env_n", "env_m",
     "obj1_index", "obj2_index", "obj3_index",
@@ -102,6 +103,9 @@ class CronosConfig:
     fan_out: bool = True              # sub-group fan-out (default True)
     groups: List[GroupSpec] = field(default_factory=list)
     unsuitable_detector: Optional[dict] = None   # raw YAML block, parsed in wrapper
+    # Standalone eval block (`eval:`), validated at load time; merged with CLI
+    # flags by `evaluation.plan.resolve_eval_settings` (CLI wins).
+    eval: Optional[dict] = None
 
     # Legacy fields (populated when using old flat format or CLI-only)
     env_n: Optional[int] = None
@@ -332,6 +336,18 @@ def validate_config(config: CronosConfig, total_segments: Optional[int] = None):
     # V20: max_reset warning (caller passes this if available)
     # Handled externally in main.py since we don't have max_reset here.
 
+    # V30: `eval:` block — keys, value types and ranges. Scene-dependent checks
+    # (parallel schedule needs equal eval-task counts, enough permutations for
+    # num_sequences) run in `evaluation.plan.build_plan`, once tasks are resolved.
+    if config.eval is not None:
+        if not isinstance(config.eval, dict):
+            raise ValueError(f"V30: `eval:` must be a mapping, got {type(config.eval).__name__}")
+        from evaluation.plan import PlanError, resolve_eval_settings
+        try:
+            resolve_eval_settings(object(), config.eval, argv=())
+        except (PlanError, TypeError, ValueError) as e:
+            raise ValueError(f"V30: invalid `eval:` block: {e}") from e
+
     # V21: groups + task_filter mutually exclusive
     if groups and config.task_filter:
         raise ValueError(
@@ -462,6 +478,7 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
         fan_out=raw.get("fan_out", True),
         groups=groups,
         unsuitable_detector=raw.get("unsuitable_detector"),
+        eval=raw.get("eval"),
         # Legacy
         env_n=raw.get("env_n"),
         env_m=raw.get("env_m"),

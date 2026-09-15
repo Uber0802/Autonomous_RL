@@ -8,10 +8,18 @@ the pooled discordant pairs across all tasks of one `eval_kind`
 Each row of the input CSV is one trial:
     seq_idx,task_idx,obj_set,task,env_idx,success,grasp,obj_grasped,prefix
 
-Pairing key: `(eval_kind, task, env_idx)`. Under the same `--seed`,
-the episodic `eval_only.py` reset is seed-determined and policy-
-independent (wrapper.py:42-44), so two runs at the same seed yield byte-
-identical inits per (task, env_idx) — no `episode_id` is needed in the key.
+Pairing key: `(eval_kind, task, group, seq_idx, task_idx, env_idx)`.
+`seq_idx` / `task_idx` / `group` are part of the key because a sequential eval
+runs every task once per round and once per scene; the older key
+`(eval_kind, task, env_idx)` collapsed all rounds onto one entry and silently
+kept only the last. CSVs without a `group` column pair with group "".
+
+Under the same seed, `eval_only.py` with `layout_rng: seeded` gives round N the
+same task order and the same per-env initial layout in every run
+(envs/rng_streams.py), independent of the policy — which is what makes a
+(seq_idx, task_idx, env_idx) trial in one run the counterpart of the same trial
+in the other. The legacy `layout_rng: env` draw consumed the CUDA generator
+shared with action sampling, so its layouts matched only for round 0.
 
 McNemar test:
   - b = pairs where baseline=0, post-RL=1  (gains)
@@ -29,7 +37,7 @@ import sys
 from pathlib import Path
 
 
-def read_per_trial(path: Path):
+def read_per_trial(path: Path, seq_kinds=None):
     """Return {(eval_kind, task, env_idx): {success, success_chained, grasp, obj_grasped}}.
 
     Columns may be absent or empty. `tools/parse_autorl_eval.py` reconstructs a
@@ -59,7 +67,13 @@ def read_per_trial(path: Path):
                    ("out_of_domain" if prefix.startswith("out_of_domain") else None)
             if kind is None:
                 continue
-            key = (kind, row["task"], int(row["env_idx"]))
+            if seq_kinds is not None and (row.get("seq_kind") or "") not in seq_kinds:
+                continue
+            key = (kind, row["task"], row.get("group") or "",
+                   int(row.get("seq_idx") or 0), int(row.get("task_idx") or 0), int(row["env_idx"]))
+            if key in by:
+                raise SystemExit(f"{path}: duplicate trial key {key} — the file mixes "
+                                 f"several evals, or predates the seq_idx/group columns")
             by[key] = {
                 "success": _num(row, "success"),
                 "success_chained": _num(row, "success_chained"),
@@ -155,13 +169,17 @@ def main():
                    help="post-RL eval_per_trial.csv (SAME `--seed`, post-PPO checkpoint)")
     p.add_argument("--kinds", default="in_domain,out_of_domain",
                    help="comma-separated eval kinds to test")
+    p.add_argument("--seq-kinds", default="",
+                   help="comma-separated seq_kind filter (training,random,single); "
+                        "default: all rows")
     p.add_argument("--metric", default="success",
                    choices=["success", "grasp", "obj_grasped"],
                    help="binary outcome to McNemar on (default: success)")
     args = p.parse_args()
 
-    base = read_per_trial(args.baseline)
-    post = read_per_trial(args.post_rl)
+    seq_kinds = set(args.seq_kinds.split(",")) if args.seq_kinds else None
+    base = read_per_trial(args.baseline, seq_kinds)
+    post = read_per_trial(args.post_rl, seq_kinds)
 
     print(f"baseline: {args.baseline}  rows={len(base)}")
     print(f"post-RL : {args.post_rl}  rows={len(post)}")

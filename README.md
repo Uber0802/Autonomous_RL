@@ -314,56 +314,117 @@ log every row as `forward`, so the filter is a harmless no-op there.
 
 ### Evaluation (standalone)
 
-`eval_only.py` runs **AutoRL-style broadcast eval** by default: every env in the batch runs the same `(object, receptacle)` for one `segment_len` rollout, no fan-out. Two modes:
+`eval_only.py` (and `main.py --eval-single / --eval-sequential`, which share its
+loop in `evaluation/`) evaluates a checkpoint on **every scene** (YAML group) of
+the checkpoint's **training config file** — found from the checkpoint (the
+`experiment_config.yaml` snapshot training writes next to it, else the
+`config_path` in its `run_config`). A config passed explicitly must define the same
+scenes as training, or eval stops before loading the model
+(`--allow-config-mismatch` to override on purpose).
+Full design: [`doc/eval_sequential.md`](CRONOS/doc/eval_sequential.md).
 
-- `--eval-mode sequential` (default): runs `--eval-sequences N` orderings of the eval tasks. The first ordering is the training task order (sequence 0, AutoRL `eval_training_seq=True` convention); subsequent orderings are random permutations. Within each ordering, tasks switch one-by-one without env reset (matches AutoRL `render_seq`).
-- `--eval-mode single`: runs each task in `eval_tasks` once independently, all envs on the same task per pass (matches AutoRL `render`).
+**Rounds.** A round is one reset followed by every task of the scene without
+resets (AutoRL `render_seq`). Each scene's envs are split into 4 order blocks, as
+fan-out training splits them, and each block runs its own order. With 4 tasks
+there are 6 cycles × 4 rotations = 24 orderings, so a **pose set is 6 rounds**:
 
-**Note:** the fan-out rotation eval (per-env rotation) is not used for standalone eval — it lives only inside `train()` for training-time eval. Use `--eval-at-start` if you want the rotation eval against a checkpoint loaded by main.py.
+| round | kind | blocks run |
+|---|---|---|
+| 0, 6, 12, … | training | ABCD BCDA CDAB DABC — exactly the training rotations |
+| 1–5, 7–11, … | random | the 4 rotations of one untrained cycle (same cycle order in every pose set) |
+
+Round numbers are global and the **only selector** (`rounds`). Everything about a
+round — orders, start poses, action-sampling seed — is a function of its number
+and the seed, so any subset reproduces those rounds of a full run.
+
+**Start poses.** Every round, order and scene of a pose set starts from the same
+poses (one per block slot, 4 with 16-env scenes); round 6 starts pose set 1 with
+new poses. `pose_sets: K` gives K × 24 orderings on 4K start layouts.
+
+**Resume / shards.** After a crash, rerun the same command with
+`--eval-resume <glob>`: finished rounds are skipped, a half-finished round is
+rerun. Rounds can also be split across GPUs (`--eval-rounds 0-2` / `3-5`) and merged
+with `tools/rebuild_eval_outputs.py --out <dir> <glob_a> <glob_b>`.
+`eval_success.csv` is written only when the eval is complete *and* covers every
+round of every pose set (a shard gets none until merged); `eval_status.json`
+always says what is done and missing.
+
+**Settings** live in the `eval:` block of the training config (training ignores
+it); CLI flags override it:
+
+```yaml
+eval:
+  mode: sequential                 # sequential | single (one task slot per round, blocks run A/B/C/D)
+  pose_sets: 1                     # sets of start poses; 6 rounds each (4 tasks)
+  rounds: all                      # all | 3 | 3-5 | 3- | 0,6-11
+  sequence_seed: -1                # cycle order; -1 = --seed
+  layout_seed: -1                  # start poses; -1 = --seed
+  policy_seed: -1                  # per-round action-sampling reseed; -1 = --seed
+  layout_slots: -1                 # start poses per block; -1 = one per env of the block, 1 = one pose
+  scene_schedule: parallel         # parallel: all scenes in one batch | serial: one scene x all envs
+  domains: [in_domain, out_of_domain]
+  record_video: true
+  video_envs_per_block: 1          # first K envs of each block; -1 = all
+  record_pose: true                # eval_segment_pose.csv (training segment_pose.csv columns)
+  pose_phase: both
+```
 
 **Wrapper script** (recommended — sets the right env vars):
 ```bash
-# Args: <checkpoint_dir> [config] [cuda] [num_eval_episode]
-bash scripts/eval.sh /path/to/glob/episode_0128
-bash scripts/eval.sh /path/to/glob/episode_0128 configs/two_group_sequential_2x2.yaml 0,1 4
+# Args: <checkpoint_dir> [config|-] [cuda] [num_eval_episode] [extra eval_only.py flags...]
+# config empty or "-" = the checkpoint's training config
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0 4 --eval-rounds 0-5 --eval-domains in_domain
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0 4 --eval-resume /path/to/eval/wandb/offline-run-…/glob
 ```
 
-**Direct invocation**:
-```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python eval_only.py \
-  --name CRONOS-eval --seed 0 \
-  --env-id PickPlaceNxM-v1 \
-  --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig \
-  --config-path configs/two_group_sequential_2x2.yaml \
-  --vla-load-path /path/to/glob/episode_0128 \
-  --segment-len 80 --num-eval-episode 4 \
-  --record-video
-```
+`--num-envs` is **not** needed — it is the sum of per-group `num_envs`, and eval
+refuses a batch that does not match it (no padding envs).
 
-`--num-envs` is **not** needed on the CLI — it's derived from per-group `num_envs` in the config.
+**Coverage** (`four_group_sequential_2x2`, one pose set, per domain, per scene):
+training round 64 trials (16 per task), random rounds 320 trials (80 per task),
+4 start poses; 245,760 env-steps for all scenes and both domains. `serial` gives
+4× trials and 16 poses at 4× the steps. Printed before rollout, checked after.
 
-**Outputs** (under a fresh `wandb/offline-run-<timestamp>-<id>/glob/`):
+**Outputs** (under a fresh `wandb/offline-run-<timestamp>-<id>/glob/`; columns in [`doc/data_schemas.md`](CRONOS/doc/data_schemas.md)):
 
 | File | Contents |
 |---|---|
-| `eval_success.csv` | one row per (group, task, eval_kind) with `success`, `grasp`, `obj_grasped` |
-| `eval_per_trial.csv` | one row per (sequence, task, env) — the pairing key `tools/mcnemar_pair.py` needs. Carries both scoring semantics: `success` (independent) and `success_chained` (cumulative AND along the sequence) |
-| `eval_report.txt` | human-readable per-eval summary (rotation table + per-task means, both semantics) |
-| `eval_videos/{kind}/eval_ep{M}/env{i}.mp4` | one mp4 per env per eval episode (if `--record-video`) |
-| `run_config.json` / `run_config.yaml` | exact args + resolved YAML at run time |
+| `eval_plan.json` | resolved settings and their sources, fingerprint, config provenance, every round's orders per block, units, RNG keys and ids, planned coverage, resume history |
+| `eval_status.json` | complete?, done / partial / missing units |
+| `eval_per_trial.csv` | source: one row per (domain, round, task slot, env) — `success`, `success_chained`, grasp, `seq_kind`, `group`, `order`, `pose_set` |
+| `eval_layouts.csv` | source: per reset and env, layout slot, stream key, id, applied pose/quat/overlay ids |
+| `eval_segment_pose.csv` | source: poses at every task start/end, training `segment_pose.csv` columns + eval keys |
+| `eval_sequence_summary.csv` / `eval_coverage.csv` / `eval_report.txt` | derived, rebuilt whole; always split by `seq_kind` |
+| `eval_success.csv` | derived, `eval_kind` = `in_domain_training`, `in_domain_random`, …; **complete evals only** |
+| `eval_videos/<domain>/<seq_kind>/round<N>/task<M>/…` | videos |
+| `experiment_config.yaml`, `run_config.json` | config and args used |
 
-Common eval flags:
+Eval flags (the bracketed name is the `eval:` key):
 | Flag | Default | Description |
 |---|---|---|
-| `--config-path` | required | YAML experiment config (typically one from `configs/eval/`) |
-| `--vla-load-path` | required | Checkpoint dir (the `episode_XXXX/` from a training run, or `TestCheckpoint/seed0/`) |
-| `--eval-mode` | `sequential` | `sequential` (AutoRL `render_seq`) or `single` (AutoRL `render`) |
-| `--eval-sequences` | 5 | Sequential mode: training-order + N-1 random permutations |
+| `--vla-load-path` | required | Checkpoint dir (`episode_XXXX/`) |
+| `--config-path` | checkpoint's training config | must define the same scenes as training |
+| `--allow-config-mismatch` | false | evaluate on a config whose scenes differ from training |
+| `--eval-resume` | — | glob dir of an interrupted eval |
+| `--eval-mode` [mode] | `sequential` | `sequential` or `single` |
+| `--eval-pose-sets` [pose_sets] | 1 | sets of start poses |
+| `--eval-rounds` [rounds] | `all` | global round selection |
+| `--eval-sequence-seed` / `--eval-layout-seed` / `--eval-policy-seed` | -1 | streams; -1 = `--seed` |
+| `--eval-layout-slots` [layout_slots] | -1 | start poses per block |
+| `--eval-scene-schedule` [scene_schedule] | `parallel` | `parallel` or `serial` |
+| `--eval-domains` [domains] | `in_domain,out_of_domain` | comma-separated; `--no-eval-ood` = `in_domain` |
+| `--record-video` / `--video-envs-per-block` | true / -1 | videos, first K envs of each block |
+| `--record-eval-pose` / `--eval-pose-phase` | true / `both` | pose CSV |
 | `--segment-len` | 80 | Steps per task rollout |
-| `--record-video` | true | Write mp4s under `glob/eval_videos/{prefix}/` |
 | `--vla-temperature-eval` | 0.6 | Sampling temperature for the policy |
+
+Removed: `--eval-sequences`, `--eval-training-sequence`, and the YAML keys
+`num_sequences`, `include_training_sequence`, `training_orders`, `random_orders`,
+`layout_rng` — use `rounds`.
+
+**Note:** the per-env rotation eval lives only inside `train()` for training-time
+eval. Use `--eval-at-start` for rotation eval of a checkpoint loaded by `main.py`.
 
 ### Visualization
 
@@ -626,7 +687,9 @@ Outputs:
 
 ### Training config → eval config mapping
 
-Each training config under `configs/` has a matching eval config under `configs/eval/` with smaller `num_envs` for faster eval. Eval configs use `task_order: sequence_random` so eval orderings match AutoRL's random-permutation default.
+Standalone eval now uses the **training config itself** (see [Evaluation (standalone)](#evaluation-standalone)).
+The configs under `configs/eval/` are legacy reduced-env copies: they differ from
+training in `num_envs`, so they only run with `--allow-config-mismatch`.
 
 | Training config | Eval config | Notes |
 |---|---|---|
@@ -634,7 +697,8 @@ Each training config under `configs/` has a matching eval config under `configs/
 | `one_group_pure_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Default 2x2 single-group eval |
 | `one_group_seq_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Same eval as pure_random — neither has a canonical training order |
 | `one_group_sequential_3x3.yaml` | `eval/one_group_3x3.yaml` | 9 tasks; sequence 0 = auto-generated NxM order from training config |
-| `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | Multi-group standalone eval — see caveat in the file |
+| `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | legacy; the training config itself now carries an `eval:` block |
+| `four_group_sequential_2x2.yaml` | — | use the training config; every `eval:` key spelled out |
 
 ## YAML Config Format
 
@@ -778,16 +842,19 @@ Divisibility constraints (validated at config load):
 
 In non-episodic mode (`reset_mode=none`), the training scene state is snapshotted before each mid-training eval and restored after, so eval's `env.reset` calls don't break the live simulation continuity that non-episodic training relies on.
 
-### Standalone eval — AutoRL-style broadcast
+### Standalone eval — per-scene rounds
 
-Used by `eval_only.py` and `main.py --eval-single` / `--eval-sequential`. All envs run the same `(object, receptacle)` for one `segment_len`-step rollout (no fan-out). Two modes, configurable via `--eval-mode`:
+Used by `eval_only.py` and `main.py --eval-single` / `--eval-sequential`. Each
+scene runs on its own env range (`scene_schedule: parallel`) or on all envs one
+scene at a time (`serial`), split into 4 order blocks; each block runs its own
+order for `segment_len` steps per task.
 
 | Mode | Behavior | AutoRL analog |
 |---|---|---|
-| `sequential` (default) | `--eval-sequences N` orderings of the eval tasks; sequence 0 is the training task order, sequences 1..N-1 are random permutations. Tasks within an ordering switch one-by-one without env reset. | `render_seq(eval_training_seq=True)` |
-| `single` | Iterate `eval_tasks` once; all envs run the same task per pass. | `render` |
+| `sequential` (default) | rounds selected by number; each pose set = 6 rounds = all 24 orderings (round 6k training rotations, 6k+1..6k+5 the other cycles); every round of a pose set starts from the same poses; tasks within a round switch without env reset. Round N is reproducible per seed. | `render_seq(eval_training_seq=True)` |
+| `single` | One task slot per round from a fresh reset; the blocks run tasks A/B/C/D side by side. | `render` |
 
-This is the eval mode used by `scripts/eval.sh` and the per-training eval configs under `configs/eval/`.
+Details: [`doc/eval_sequential.md`](CRONOS/doc/eval_sequential.md).
 
 #### Sequential scoring: independent vs chained
 
@@ -831,6 +898,7 @@ without modifying AutoRL. Full analysis in
 | `tools/plot_segment_positions.py` | Per-segment actor position distribution from `segment_pose.csv` |
 | `tools/plot_eval_success.py` | Cross-run aggregator over `eval_success.csv` files |
 | `tools/mcnemar_pair.py` | Paired McNemar gate over `eval_per_trial.csv` |
+| `tools/rebuild_eval_outputs.py` | Rebuild standalone-eval derived files from per-trial rows; merge round shards of one eval |
 | `tools/parse_autorl_eval.py` | Rebuild a correct per-trial baseline from an AutoRL run's video filenames (read-only; AutoRL is never modified) |
 | `tools/bench_rollout.py` | Rollout throughput + GPU peak memory per package stack, with a phase breakdown (inference / env.step / buffer / PPO update) |
 
@@ -855,11 +923,13 @@ python tools/bench_rollout.py \
 - `training/` — PPO and GRPO algorithms, replay buffer, metrics/CSV recorders
 - `main.py` — Training entry point (train + eval)
 - `eval_only.py` — Standalone eval script (no training)
+- `evaluation/` — Standalone eval: plan (settings, scenes, rounds, coverage, fingerprint), records (CSV schemas, readers/writers), outputs (derived files, status, resume/merge), provenance (training config), sequential (rollout loop)
+- `tests/` — CPU-only tests for eval planning, RNG streams, records and the eval loop (`python -m pytest tests/ -q`)
 - `run_paths.py` — Run output directory resolution, shared by both entry points
 - `version.py` — Single source for the version stamped into every `run_config.json`
 - `configs/` — YAML training configs
 - `configs/eval/` — Per-training eval configs (smaller `num_envs`, `task_order: sequence_random`)
 - `scripts/` — Shell scripts for training and eval
 - `tools/` — Analysis, plotting, benchmarking and AutoRL-interop utilities
-- `doc/` — Design documents, indexed by [`doc/README.md`](CRONOS/doc/README.md): [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs), [`grpo_autorl.md`](CRONOS/doc/grpo_autorl.md) (AutoRL GRPO review + CRONOS's grouping / std choices)
+- `doc/` — Design documents, indexed by [`doc/README.md`](CRONOS/doc/README.md): [`eval_sequential.md`](CRONOS/doc/eval_sequential.md) (standalone eval rounds, pose sets, resume), [`rng_and_io_notes.md`](CRONOS/doc/rng_and_io_notes.md) (RNG and file-writing lessons, checklist for training), [`eval_audit.md`](CRONOS/doc/eval_audit.md) (eval semantics + the accounting fix), [`data_schemas.md`](CRONOS/doc/data_schemas.md) (CSV column specs), [`grpo_autorl.md`](CRONOS/doc/grpo_autorl.md) (AutoRL GRPO review + CRONOS's grouping / std choices)
 
