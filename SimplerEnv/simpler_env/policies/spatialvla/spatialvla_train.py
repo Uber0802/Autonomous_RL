@@ -50,11 +50,12 @@ from pathlib import Path
 from typing import List, Tuple
 
 import torch
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, get_peft_model
 from torch.optim import AdamW
 from transformers import AutoProcessor, BatchFeature
 
 from model.modeling_spatialvla_valuehead import SpatialVLAForActionPredictionWithValueHead
+from simpler_env.policies.peft_compat import load_peft_adapter
 
 
 # Prompt template — matches `Autonomous_RL/SpatialVLA/test/test_huggingface.py`
@@ -167,7 +168,10 @@ class SpatialVLAPolicy:
             )
             self.vla = get_peft_model(self.vla, lora_config)
         else:
-            self.vla = PeftModel.from_pretrained(
+            # load_peft_adapter is the identity transform here (peft 0.14 reads
+            # everything it writes); it keeps both pillars on one loader so a
+            # tf440-written adapter stays readable if this ever runs under tf440.
+            self.vla = load_peft_adapter(
                 self.vla, self.args.vla_load_path, is_trainable=True,
             )
             print(f"VLA load: {self.args.vla_load_path}")
@@ -202,7 +206,13 @@ class SpatialVLAPolicy:
         if getattr(self.args, "vla_load_path", ""):
             training_state_path = Path(self.args.vla_load_path) / "training_state.pt"
             if training_state_path.exists():
-                ts = torch.load(training_state_path, map_location=self.tpdv["device"])
+                # weights_only=False is explicit, not incidental: torch 2.6 flipped the
+                # default to True, and CRONOS spans torch 2.2 / 2.5 / 2.7 across its envs.
+                # training_state.pt holds optimizer state (not just tensors) and is written
+                # by this repo, so the unpickle is ours to trust. Matches main.py's
+                # _restore_training_state, which already loads it this way.
+                ts = torch.load(training_state_path, map_location=self.tpdv["device"],
+                                weights_only=False)
                 if "vh" in ts:
                     # `assign=True` so dtype/device tensors are taken as-is
                     # rather than cast in place (mirrors openvla_train.py:101).
@@ -442,7 +452,7 @@ class SpatialVLAPolicy:
         """Reload the full PPO surface from `path`. Mirrors `OpenVLAPolicy.load`.
 
         Tears down the current model, fresh-loads the base from `vla_path`,
-        wraps it with `PeftModel.from_pretrained`, re-bridges stats + the
+        wraps it with the saved adapter (`load_peft_adapter`), re-bridges stats + the
         action tokenizer, restores the value head, and re-creates both
         optimizers from `training_state.pt`.
         """
@@ -466,7 +476,7 @@ class SpatialVLAPolicy:
 
         # Wrap with the saved PEFT adapter (trainable so resumed training can
         # take optimizer steps).
-        self.vla = PeftModel.from_pretrained(self.vla, str(path), is_trainable=True)
+        self.vla = load_peft_adapter(self.vla, path, is_trainable=True)
         self.vla.print_trainable_parameters()
 
         # If the saved adapter had a custom norm_stats sidecar (e.g., trained
@@ -483,7 +493,8 @@ class SpatialVLAPolicy:
                     stats[k] = v
 
         training_state_path = path / "training_state.pt"
-        ts = torch.load(training_state_path, map_location=self.tpdv["device"])
+        ts = torch.load(training_state_path, map_location=self.tpdv["device"],
+                        weights_only=False)
 
         if "vh" in ts:
             self.vla.value_head.load_state_dict(ts["vh"], assign=True)

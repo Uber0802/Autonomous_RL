@@ -141,6 +141,52 @@ Tradeoffs:
 
 How `setup.sh` picks the install: the 1st positional arg picks the LM stack + which sibling pillars get installed, the 2nd picks the torch wheel channel. See the header comment in `setup.sh` for the full pin rationale and the 4-env recommended workflows.
 
+### 7. Checkpoint portability across envs
+
+A checkpoint is written by whichever env trained it, and the two LM stacks do not
+serialize the LoRA adapter the same way. **`tf447` (peft 0.14) writes three
+`LoraConfig` fields that `tf440` (peft 0.11.1) has no field for** — `eva_config`,
+`exclude_modules`, `lora_bias`. `LoraConfig` is a dataclass, so peft 0.11.1 does
+not ignore the extras; `PeftModel.from_pretrained` dies on the constructor:
+
+```
+TypeError: LoraConfig.__init__() got an unexpected keyword argument 'eva_config'
+```
+
+This cannot be pinned away. peft 0.14 needs `transformers>=4.43` (for
+`EncoderDecoderCache`), which breaks OpenVLA's `transformers<4.43` pin, and peft
+0.11.1 is the newest release that works against transformers 4.40.1 — so it is
+handled at the load site instead, in
+[`SimplerEnv/simpler_env/policies/peft_compat.py`](SimplerEnv/simpler_env/policies/peft_compat.py).
+`load_peft_adapter` filters out fields the *installed* peft cannot represent
+before building the config, and both VLA pillars load through it.
+
+The filter is behaviour-neutral, and enforces that rather than assuming it: a key
+is dropped **only** when it holds the value that means "feature off"
+(`eva_config: null`, `exclude_modules: null`, `lora_bias: false`) — which is what
+`tf447` checkpoints actually contain, since nobody turned those features on. A key
+that is genuinely set, or one no peft release in the table accounts for, raises
+instead of being silently discarded. The reverse direction (`tf440` checkpoint,
+`tf447` reader) needs no repair and is the identity transform.
+
+Audit a checkpoint tree before committing to a long eval, without loading a model
+(or peft, or torch):
+
+```bash
+python tools/check_ckpt_compat.py /path/to/runs                 # default target: tf440, the strict reader
+python tools/check_ckpt_compat.py /path/to/runs --target tf447
+python tools/check_ckpt_compat.py /path/to/runs --verbose       # one line per checkpoint
+```
+
+It exits non-zero if any checkpoint cannot be loaded by the target stack, so it
+also works as a preflight step in a shell script.
+
+The LoRA *weights* (`adapter_model.safetensors`) have the same layout in both peft
+releases and need no translation. `training_state.pt` is a torch pickle, and its
+own cross-version hazard is torch 2.6 flipping the `torch.load` default to
+`weights_only=True`; every load site passes `weights_only=False` explicitly, since
+CRONOS spans torch 2.2 / 2.5 / 2.7 and writes these files itself.
+
 ## Quick Start
 
 ### Training

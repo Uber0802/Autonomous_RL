@@ -6,11 +6,12 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from peft import LoraConfig, get_peft_model, PeftModel
+from peft import LoraConfig, get_peft_model
 from tqdm import tqdm
 from transformers import AutoTokenizer, BatchFeature
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPredictionWithValueHead
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from simpler_env.policies.peft_compat import load_peft_adapter
 
 def huber_loss(e, d):
     a = (abs(e) <= d).to(torch.float32)
@@ -77,7 +78,10 @@ class OpenVLAPolicy:
             )
             self.vla = get_peft_model(self.vla, lora_config)
         else:
-            self.vla = PeftModel.from_pretrained(self.vla, self.args.vla_load_path, is_trainable=True)
+            # load_peft_adapter, not PeftModel.from_pretrained: adapters written by
+            # the tf447 stack (peft 0.14) carry LoraConfig fields peft 0.11.1 has no
+            # field for, and the dataclass constructor rejects them outright.
+            self.vla = load_peft_adapter(self.vla, self.args.vla_load_path, is_trainable=True)
             print(f"VLA load: {self.args.vla_load_path}")
 
             if self.args.vla_unnorm_key not in self.vla.base_model.norm_stats:
@@ -102,7 +106,13 @@ class OpenVLAPolicy:
         if self.args.vla_load_path:
             training_state_path = Path(self.args.vla_load_path) / "training_state.pt"
             if training_state_path.exists():
-                training_state = torch.load(training_state_path, map_location=self.tpdv["device"])
+                # weights_only=False is explicit, not incidental: torch 2.6 flipped the
+                # default to True, and CRONOS spans torch 2.2 / 2.5 / 2.7 across its envs.
+                # training_state.pt holds optimizer state (not just tensors) and is written
+                # by this repo, so the unpickle is ours to trust. Matches main.py's
+                # _restore_training_state, which already loads it this way.
+                training_state = torch.load(training_state_path, map_location=self.tpdv["device"],
+                                            weights_only=False)
 
                 if "vh" in training_state:
                     self.vla.value_head.load_state_dict(training_state['vh'], assign=True)
@@ -258,7 +268,7 @@ class OpenVLAPolicy:
             device_map="cuda:" + str(self.device_id),
             vh_mode="a0",
         )
-        self.vla = PeftModel.from_pretrained(self.vla, path, is_trainable=True)
+        self.vla = load_peft_adapter(self.vla, path, is_trainable=True)
         self.vla.print_trainable_parameters()
 
         if self.args.vla_unnorm_key not in self.vla.base_model.norm_stats:
@@ -266,7 +276,8 @@ class OpenVLAPolicy:
             self.vla.base_model.norm_stats[self.args.vla_unnorm_key] = ds[self.args.vla_unnorm_key]
 
         training_state_path = path / "training_state.pt"
-        training_state = torch.load(training_state_path, map_location=self.tpdv["device"])
+        training_state = torch.load(training_state_path, map_location=self.tpdv["device"],
+                                    weights_only=False)
 
         if "vh" in training_state:
             self.vla.value_head.load_state_dict(training_state['vh'], assign=True)
