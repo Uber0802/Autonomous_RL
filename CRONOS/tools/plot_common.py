@@ -55,9 +55,12 @@ _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 # above — one config can carry settings for all three tools.
 TOOL_OPTION_KEYS = {
     # plot_segment_positions.py
-    "actor_kind", "phase", "workspace_scale", "step_range",
-    # plot_rollout_success.py
+    "actor_kind", "phase", "workspace_scale", "step_range", "density",
+    "bin_size", "per_task", "dense_min",
+    # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
+    # plot_sequence_eval.py
+    "seq_kind",
 }
 
 

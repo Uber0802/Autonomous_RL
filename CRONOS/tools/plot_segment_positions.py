@@ -38,7 +38,23 @@ writes, which is what actually makes them comparable.
     obj     the objects the task asks to move
     recep   the receptacles they are moved onto
 
-The scatter is coloured by episode, so drift over training is visible.
+Points that land close together are merged (`--density`, `--bin-size`): the
+spawn lattice stacks thousands of poses on one xy, and a plain scatter draws
+that stack as one dot the size of a lone escaped object. `emphasis` (default)
+keeps the old scatter and adds a larger, darker marker on every cell holding at
+least `--dense-min` points, so the figure reads as before and only the stacks
+(spawn / reset sites) stand out; `size` draws one marker per cell with its area
+proportional to the count; `shade` fills the cell from light to dark on a log
+scale; `scatter` is the old unmerged look, coloured by episode for a single run.
+
+`--step-range` takes several comma-separated ranges in `--config` mode
+(`0:163840,163841:327680`): one figure per range, all on one view and one
+count scale, with `_steps<LO>-<HI>` in the filename. One count scale is shared by every figure
+an invocation writes, like the view range. There are no px / py axis labels.
+
+`--per-task` writes one figure per (task, kind) instead — only the task's own
+object and receptacle, matched by model name — so with `--step-range` each
+task's distribution over one stretch of training can be read on its own.
 
 `--step-range` selects which part of the run to draw, and its default
 (`DEFAULT_STEP_RANGE`) is **not the whole run** — a longer run is cropped unless
@@ -168,6 +184,31 @@ def parse_step_range(value):
     if lo > hi:
         raise SystemExit(f"--step-range LO must not exceed HI, got {text!r}")
     return lo, hi
+
+
+def split_step_ranges(value) -> list:
+    """`0:163840,163841:327680` -> `["0:163840", "163841:327680"]`.
+
+    Each piece is validated by `parse_step_range`. A list is also accepted from
+    the config. Several ranges are drawn as separate figures on ONE shared view
+    and count scale, which is what makes the stretches comparable.
+    """
+    if value is None:
+        value = DEFAULT_STEP_RANGE
+    parts = value if isinstance(value, list) else str(value).split(",")
+    parts = [str(v).strip() for v in parts if str(v).strip()]
+    for part in parts:
+        parse_step_range(part)
+    return parts or [DEFAULT_STEP_RANGE]
+
+
+def step_range_tag(value: str) -> str:
+    """A step range as a filename fragment: `0:163840` -> `steps0-163840`."""
+    rng = parse_step_range(value)
+    if rng is None:
+        return "steps-all"
+    fmt = lambda v: "" if not np.isfinite(v) else f"{v:g}"
+    return f"steps{fmt(rng[0])}-{fmt(rng[1])}"
 
 
 def load_pose(csv_path: Path, *, required: bool = True) -> pd.DataFrame:
@@ -770,14 +811,196 @@ def _finish_panel(ax, *, xlim, ylim, workspace) -> None:
     # belongs to whatever document uses the figure. `report_panel` prints the
     # counts. The workspace rectangle keeps its label only so a reader who
     # enables it can still tell what the dashed box is — see below.
-    ax.set_xlabel("px")
-    ax.set_ylabel("py")
+    # No px / py axis labels either: every figure is the same top-down table
+    # view, so the labels only repeat what the caption says. Ticks stay, so
+    # coordinates can still be read off.
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.25)
     if workspace:
         ax.legend(loc="upper right", fontsize=7)
+
+
+_DENSITY_MODES = ("emphasis", "size", "shade", "scatter")
+DEFAULT_DENSITY = "emphasis"
+# Merge radius in metres, per mode. `size` / `emphasis` draw a marker per cell,
+# so a fine grid still reads; `shade` fills the cell itself, and 5 mm cells are
+# specks at the default x3 workspace view.
+DEFAULT_BIN_SIZE = {"emphasis": 0.005, "size": 0.005, "shade": 0.01,
+                    "scatter": 0.005}
+# `emphasis`: a cell needs at least this many points to be drawn enlarged. Below
+# it the plain scatter already shows the points faithfully. `None` = automatic:
+# DENSE_FRACTION of the figure's points, at least DENSE_FLOOR. A fixed count does
+# not fit both a whole-run figure and a per-task one holding 1/16 of its points.
+# On Q2 (8192 points/figure, 5 mm cells) the automatic 50 marks ~15 obj and ~30
+# recep cells — the spawn / reset sites — out of 1300 and 400 occupied.
+DEFAULT_DENSE_MIN = None
+DENSE_FRACTION = 0.006
+DENSE_FLOOR = 5
+
+
+def resolve_dense_min(dense_min, n_points: int) -> int:
+    if dense_min is not None:
+        return max(2, int(dense_min))
+    return max(DENSE_FLOOR, int(np.ceil(DENSE_FRACTION * n_points)))
+
+
+def bin_points(px, py, bin_size: float) -> pd.DataFrame:
+    """Merge neighbouring points into one entry per `bin_size` grid cell.
+
+    Returns one row per occupied cell: `x`, `y` (the centroid of the points in
+    it, not the cell centre, so a tight cluster is drawn where it really is)
+    and `count`. The spawn lattice puts thousands of points on the exact same
+    xy, and a plain scatter draws them as one dot the same size as a lone
+    escaped object — the count is what the figure has to show.
+    """
+    d = pd.DataFrame({"x": np.asarray(px, dtype=float),
+                      "y": np.asarray(py, dtype=float)})
+    d["ix"] = np.floor(d["x"] / bin_size).astype(np.int64)
+    d["iy"] = np.floor(d["y"] / bin_size).astype(np.int64)
+    return (d.groupby(["ix", "iy"])
+             .agg(x=("x", "mean"), y=("y", "mean"), count=("x", "size"))
+             .reset_index(drop=True))
+
+
+def _light_cmap(color):
+    """Near-white -> `color`, so a group keeps its hue in shade mode."""
+    from matplotlib.colors import LinearSegmentedColormap, to_rgb
+    return LinearSegmentedColormap.from_list("shade", [(0.93, 0.93, 0.93),
+                                                       to_rgb(color)])
+
+
+def _emphasis_style(color, c_max: int, dense_min: int):
+    """count -> (marker area, RGBA) for `emphasis` mode.
+
+    Area grows with sqrt(count): a stack of 800 must stand out without covering
+    the workspace. Colour darkens from `color` towards black and turns opaque
+    on a log scale between `dense_min` and the densest cell, so "denser" reads
+    as both bigger and darker.
+    """
+    from matplotlib.colors import to_rgb
+    base = np.array(to_rgb(color))
+    span = max(np.log(max(c_max, dense_min + 1) / dense_min), 1e-9)
+
+    def style(counts):
+        counts = np.asarray(counts, dtype=float)
+        t = np.clip(np.log(counts / dense_min) / span, 0.0, 1.0)
+        sizes = np.minimum(220.0, 6.0 * np.sqrt(counts))
+        rgb = base[None, :] * (1.0 - 0.55 * t[:, None])
+        alpha = 0.6 + 0.35 * t
+        return sizes, np.column_stack([rgb, alpha])
+    return style
+
+
+def cell_count_max(frames, *, xlim, ylim, bin_size: float) -> int:
+    """Largest per-cell count over several figures' rows, inside the view.
+
+    Passed to `_draw_cloud` as `count_max` so every figure one invocation
+    writes shares one size / shade scale — otherwise each is normalised to its
+    own densest cell, and a task with 8 points in its fullest cell draws that
+    cell as large as one with 80.
+    """
+    best = 1
+    for sub in frames:
+        cells = bin_points(sub["px"], sub["py"], bin_size)
+        cells = cells[cells["x"].between(*xlim) & cells["y"].between(*ylim)]
+        if len(cells):
+            best = max(best, int(cells["count"].max()))
+    return best
+
+
+def _draw_cloud(fig, ax, sub: pd.DataFrame, *, xlim, ylim, density: str,
+                bin_size: float, hexbin: bool, color="tab:blue",
+                episode_range=None, count_max=None,
+                dense_min=DEFAULT_DENSE_MIN) -> None:
+    """The distribution itself, in one of the density encodings.
+
+    emphasis every point exactly as `scatter` draws it, plus one enlarged,
+             darker marker on each `bin_size` cell holding >= `dense_min`
+             points — the overall look is unchanged and only the stacks (the
+             spawn / reset sites an untouched object never left) stand out
+    size     one marker per `bin_size` cell, AREA proportional to the count
+    shade    one filled cell per `bin_size` cell, shade from light to `color`
+             on a log scale (counts on the lattice sites are 1000x the rest)
+    scatter  every point, as before: coloured by episode when `episode_range`
+             is given, else in `color`
+    """
+    if hexbin:
+        hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
+                       mincnt=1, linewidths=0, extent=(*xlim, *ylim))
+        fig.colorbar(hb, ax=ax, label="count", shrink=0.85)
+        return
+    if density == "scatter":
+        if episode_range is not None:
+            ep_lo, ep_hi = episode_range
+            sc = ax.scatter(sub["px"], sub["py"], c=sub["episode"], cmap="viridis",
+                            s=5, alpha=0.45, linewidths=0,
+                            vmin=ep_lo, vmax=max(ep_hi, ep_lo + 1))
+            if ep_hi > ep_lo:
+                fig.colorbar(sc, ax=ax, label="episode", shrink=0.85)
+        else:
+            ax.scatter(sub["px"], sub["py"], s=6, alpha=0.35, linewidths=0,
+                       color=color)
+        return
+
+    from matplotlib.colors import LogNorm
+    cells = bin_points(sub["px"], sub["py"], bin_size)
+    # Only the cells inside the view: an escaped object 200 m away must not set
+    # the top of the scale for the cells that are actually drawn.
+    cells = cells[cells["x"].between(*xlim) & cells["y"].between(*ylim)]
+    if cells.empty:
+        return
+    c_max = int(count_max or cells["count"].max())
+    if density == "emphasis":
+        dense_min = resolve_dense_min(dense_min, len(sub))
+        ax.scatter(sub["px"], sub["py"], s=6, alpha=0.35, linewidths=0,
+                   color=color, zorder=2)
+        dense = cells[cells["count"] >= dense_min]
+        if dense.empty:
+            return
+        style = _emphasis_style(color, c_max, dense_min)
+        # Densest last, so a big stack is never hidden under a smaller one.
+        dense = dense.sort_values("count")
+        s_, c_ = style(dense["count"].to_numpy())
+        ax.scatter(dense["x"], dense["y"], s=s_, c=c_, linewidths=0.4,
+                   edgecolors="white", zorder=3)
+        refs = sorted({dense_min, max(dense_min, int(round(np.sqrt(dense_min * c_max)))),
+                       max(dense_min, c_max)})
+        handles = []
+        for v in refs:
+            sv, cv = style(np.array([v]))
+            handles.append(ax.scatter([], [], s=sv, c=cv, linewidths=0.4,
+                                      edgecolors="white"))
+        ax.add_artist(ax.legend(handles, [f"{v}" for v in refs],
+                                title=f"points / {bin_size * 1000:g} mm",
+                                loc="lower left", fontsize=7, title_fontsize=7,
+                                labelspacing=1.3, borderpad=0.8, framealpha=0.8))
+        return
+    if density == "size":
+        # Area, not radius, is proportional to the count: that is what the eye
+        # compares. The smallest marker stays visible.
+        s_max = 260.0
+        sizes = np.maximum(4.0, s_max * cells["count"] / c_max)
+        ax.scatter(cells["x"], cells["y"], s=sizes, color=color, alpha=0.55,
+                   linewidths=0.4, edgecolors="white")
+        refs = sorted({1, max(1, c_max // 10), c_max})
+        handles = [ax.scatter([], [], s=max(4.0, s_max * v / c_max), color=color,
+                              alpha=0.55, linewidths=0.4, edgecolors="white")
+                   for v in refs]
+        ax.add_artist(ax.legend(handles, [str(v) for v in refs], title="count",
+                                loc="lower left", fontsize=7, title_fontsize=7,
+                                labelspacing=1.2, borderpad=0.8, framealpha=0.8))
+    else:
+        x_edges = np.arange(np.floor(xlim[0] / bin_size),
+                            np.ceil(xlim[1] / bin_size) + 1) * bin_size
+        y_edges = np.arange(np.floor(ylim[0] / bin_size),
+                            np.ceil(ylim[1] / bin_size) + 1) * bin_size
+        h, _, _ = np.histogram2d(sub["px"], sub["py"], bins=(x_edges, y_edges))
+        h = np.ma.masked_equal(h.T, 0)
+        mesh = ax.pcolormesh(x_edges, y_edges, h, cmap=_light_cmap(color),
+                             norm=LogNorm(vmin=1, vmax=max(2, c_max)))
+        fig.colorbar(mesh, ax=ax, label="count", shrink=0.85)
 
 
 def _save_panel(fig, out_path: Path) -> Path:
@@ -795,10 +1018,70 @@ def _announce_view(ws, scale: float, xlim, ylim) -> None:
               file=sys.stderr)
 
 
+def _model_core(model_name: str) -> str:
+    """`007_ketchup bottle_1` -> `ketchup bottle`, `001_plate_simpler` -> `plate`."""
+    import re
+    s = re.sub(r"^\d+_", "", str(model_name))
+    s = re.sub(r"_(\d+|simpler)$", "", s)
+    return s.replace("_", " ").strip().lower()
+
+
+def task_actor_rows(sub: pd.DataFrame, task: str) -> pd.DataFrame:
+    """The rows of `sub` that are the task's OWN object / receptacle.
+
+    `segment_pose.csv` records every slot for every env, so a task's rows also
+    hold the distractor object and the other receptacle — which the task never
+    touches, and which would make every task's figure look alike. The actor is
+    matched by name: the model's core name (`ketchup bottle`, `plate`) must be
+    a phrase of the task string (`put ketchup bottle on yellow_plate`), on the
+    object side of " on " for `obj` rows and the receptacle side for `recep`.
+
+    Returns `sub` unchanged, with a warning, when no slot matches — better an
+    unfiltered figure than a missing one.
+    """
+    text = str(task).replace("_", " ").lower()
+    obj_part, _, recep_part = text.removeprefix("put ").partition(" on ")
+    side = {"obj": f" {obj_part} ", "recep": f" {recep_part} "}
+    cores = sub["model_name"].map(_model_core)
+    hay = sub["actor_kind"].map(side).fillna("")
+    keep = np.array([f" {c} " in h or (c and c in h) for c, h in zip(cores, hay)])
+    if not keep.any():
+        warn(f"task {task!r}: no model_name matches the task string — keeping "
+             f"every slot (models: {sorted(sub['model_name'].unique())})")
+        return sub
+    return sub[keep]
+
+
+def split_by_task(df: pd.DataFrame, *, task_actor_only: bool = True):
+    """`[(task, rows)]` for `--per-task`, in a stable (sorted) task order.
+
+    Rows without a task — synthetic `phase=start` draws, which stand for a
+    fresh env.reset() and belong to no task — cannot be attributed and are
+    dropped with a note.
+    """
+    tasks = df["task"].fillna("").astype(str)
+    untasked = int((tasks == "").sum())
+    if untasked:
+        print(f"[pose] --per-task: {untasked} rows carry no task (synthetic "
+              f"start draws) and are left out; --phase end uses recorded rows "
+              f"only", file=sys.stderr)
+    out = []
+    for task in sorted(t for t in tasks.unique() if t):
+        rows = df[tasks == task]
+        out.append((task, task_actor_rows(rows, task) if task_actor_only else rows))
+    return out
+
+
 def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
            label: str = "", robust: bool = True, ws=None,
-           scale: float = 3.0) -> list:
-    """One PNG per actor kind: `<out_base stem>_obj.png`, `..._recep.png`."""
+           scale: float = 3.0, density: str = DEFAULT_DENSITY,
+           bin_size: float = DEFAULT_BIN_SIZE[DEFAULT_DENSITY], per_task: bool = False,
+           task_actor_only: bool = True,
+           dense_min=DEFAULT_DENSE_MIN) -> list:
+    """One PNG per actor kind: `<out_base stem>_obj.png`, `..._recep.png`.
+
+    `per_task` writes one PNG per (task, kind) instead, into
+    `<out_base stem>_per_task/`."""
     kinds = [k for k in _KIND_ORDER if k in set(df["actor_kind"])]
     if not kinds:
         raise SystemExit(f"no rows for the plotted kinds {list(_KIND_ORDER)}; "
@@ -811,21 +1094,40 @@ def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
     xlim, ylim = _shared_limits(df, robust=robust, ws=ws, scale=scale)
     _announce_view(ws, scale, xlim, ylim)
 
+    if per_task:
+        panels = [(t, kind, rows[rows["actor_kind"] == kind])
+                  for t, rows in split_by_task(df, task_actor_only=task_actor_only)
+                  for kind in kinds]
+        task_dir = out_base.with_name(f"{out_base.stem}_per_task") / out_base.name
+        slugs = unique_slugs(sorted({t for t, _, _ in panels}))
+        c_max = cell_count_max([p[2] for p in panels], xlim=xlim, ylim=ylim,
+                               bin_size=bin_size)
+        written = []
+        for task, kind, sub in panels:
+            if sub.empty:
+                continue
+            _report_offscreen(sub, xlim, ylim, f"{task} / {kind}")
+            report_panel(f"{task} / {kind}", sub)
+            fig, ax = _new_panel()
+            _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=density,
+                        bin_size=bin_size, hexbin=hexbin, count_max=c_max,
+                        dense_min=dense_min)
+            _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace)
+            written.append(_save_panel(fig, out_variant(task_dir, slugs[task], kind)))
+        if not written:
+            raise SystemExit("--per-task: no task has rows to plot")
+        return written
+
+    c_max = cell_count_max([df[df["actor_kind"] == k] for k in kinds],
+                           xlim=xlim, ylim=ylim, bin_size=bin_size)
     written = []
     for kind in kinds:
         sub = df[df["actor_kind"] == kind]
         _report_offscreen(sub, xlim, ylim, kind)
         fig, ax = _new_panel()
-        if hexbin:
-            hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
-                           mincnt=1, linewidths=0, extent=(*xlim, *ylim))
-            fig.colorbar(hb, ax=ax, label="count", shrink=0.85)
-        else:
-            sc = ax.scatter(sub["px"], sub["py"], c=sub["episode"], cmap="viridis",
-                            s=5, alpha=0.45, linewidths=0,
-                            vmin=ep_lo, vmax=max(ep_hi, ep_lo + 1))
-            if ep_hi > ep_lo:
-                fig.colorbar(sc, ax=ax, label="episode", shrink=0.85)
+        _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=density,
+                    bin_size=bin_size, hexbin=hexbin, episode_range=(ep_lo, ep_hi),
+                    count_max=c_max, dense_min=dense_min)
         report_panel(f"{label} {kind}".strip(), sub)
         # A single distinct xy means the pose is pinned rather than sparsely
         # sampled. Say so; a lone dot on a clipped axis is otherwise easy to
@@ -857,21 +1159,41 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
     colors = default_colors(len(cfg.groups))
     slugs = unique_slugs([g.label for g in cfg.groups])
 
-    panels = []   # (label, color, kind, rows)
+    import copy
+    ranges = split_step_ranges(args.step_range)
+    # Only tagged when there is something to tell apart, so a single-range run
+    # keeps its old filenames.
+    range_tags = ({r: step_range_tag(r) for r in ranges} if len(ranges) > 1
+                  else {ranges[0]: None})
+
+    panels = []   # (label, color, kind, rows, task or None, range tag or None)
     for gi, group in enumerate(cfg.groups):
         runs = [d for chain in group.chains for d in chain]
-        df = load_group_poses(runs, args, label=group.label)
-        if df.empty:
+        loaded = load_group_poses(runs, args, label=group.label)
+        if loaded.empty:
             warn(f"group '{group.label}' produced no rows")
             continue
-        df = apply_filters(df, args, Path(runs[0]) / "segment_pose.csv",
-                           required=False)
-        if df.empty:
-            warn(f"group '{group.label}': every row was filtered out")
-            continue
-        for kind in [k for k in _KIND_ORDER if k in set(df["actor_kind"])]:
-            panels.append((group.label, colors[gi], kind,
-                           df[df["actor_kind"] == kind]))
+        for rng_text, rtag in range_tags.items():
+            r_args = copy.copy(args)
+            r_args.step_range = rng_text
+            df = apply_filters(loaded, r_args, Path(runs[0]) / "segment_pose.csv",
+                               required=False)
+            if df.empty:
+                warn(f"group '{group.label}' step range {rng_text}: every row "
+                     f"was filtered out")
+                continue
+            kinds = [k for k in _KIND_ORDER if k in set(df["actor_kind"])]
+            if args.per_task:
+                for task, rows in split_by_task(df, task_actor_only=not args.all_slots):
+                    for kind in kinds:
+                        sub = rows[rows["actor_kind"] == kind]
+                        if len(sub):
+                            panels.append((group.label, colors[gi], kind, sub,
+                                           task, rtag))
+                continue
+            for kind in kinds:
+                panels.append((group.label, colors[gi], kind,
+                               df[df["actor_kind"] == kind], None, rtag))
     if not panels:
         raise SystemExit(
             "[pose] no group produced any rows — nothing to plot.\n"
@@ -884,27 +1206,33 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
                                 robust=robust, ws=ws, scale=scale)
     _announce_view(ws, scale, xlim, ylim)
 
+    task_slugs = unique_slugs(sorted({p[4] for p in panels if p[4]}))
+    c_max = cell_count_max([p[3] for p in panels], xlim=xlim, ylim=ylim,
+                           bin_size=args.bin_size)
     written = []
-    for label, color, kind, sub in panels:
-        _report_offscreen(sub, xlim, ylim, f"{label} / {kind}")
-        report_panel(f"{label} / {kind}", sub)
+    for label, color, kind, sub, task, rtag in panels:
+        tag = " / ".join(x for x in (label, rtag, task, kind) if x)
+        _report_offscreen(sub, xlim, ylim, tag)
+        report_panel(tag, sub)
         fig, ax = _new_panel()
-        if args.hexbin:
-            hb = ax.hexbin(sub["px"], sub["py"], gridsize=45, cmap="viridis",
-                           mincnt=1, linewidths=0, extent=(*xlim, *ylim))
-            fig.colorbar(hb, ax=ax, label="count", shrink=0.85)
-        else:
-            # One style for both. The synthetic rows are no longer a stand-in
-            # for the whole run: `rebuild_start_rows` synthesizes only the
-            # boundaries that really are an `env.reset()` draw, and for those the
-            # uniform draw over `xyz_configs` IS the initial-state distribution
-            # — the same quantity the recorded rows carry. Drawing them as black
-            # crosses made a legitimate part of the distribution read as an
-            # annotation. The synthetic share is reported by `report_panel`.
-            ax.scatter(sub["px"], sub["py"], s=6, alpha=0.35, linewidths=0,
-                       color=color)
+        # One style for recorded and synthetic rows. The synthetic rows are no
+        # longer a stand-in for the whole run: `rebuild_start_rows` synthesizes
+        # only the boundaries that really are an `env.reset()` draw, and for
+        # those the uniform draw over `xyz_configs` IS the initial-state
+        # distribution — the same quantity the recorded rows carry. The
+        # synthetic share is reported by `report_panel`.
+        _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=args.density,
+                    bin_size=args.bin_size, hexbin=args.hexbin, color=color,
+                    count_max=c_max, dense_min=args.dense_min)
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
-        out = out_variant(out_base, slugs[label], kind)
+        parts = [slugs[label]] + ([rtag] if rtag else [])
+        if task:
+            # A directory per (group, range): 16 tasks x 2 kinds would bury
+            # the group-level figures if they all shared one folder.
+            task_dir = out_base.with_name(f"{out_base.stem}_{'_'.join(parts)}_per_task")
+            out = out_variant(task_dir / out_base.name, task_slugs[task], kind)
+        else:
+            out = out_variant(out_base, *parts, kind)
         written.append(_save_panel(fig, out))
     return written
 
@@ -992,7 +1320,39 @@ def main():
                         "counts, and the number of points outside the view is "
                         "reported on stderr.")
     p.add_argument("--hexbin", action="store_true",
-                   help="density hexbin instead of an episode-coloured scatter")
+                   help="viridis hexbin (overrides --density)")
+    p.add_argument("--density", default=None, choices=list(_DENSITY_MODES),
+                   help=f"how points that land close together are drawn. "
+                        f"'emphasis' (default): every point as in 'scatter', "
+                        f"plus an enlarged, darker marker on each --bin-size "
+                        f"cell holding >= --dense-min points. 'size': "
+                        f"neighbours within --bin-size merge into one marker "
+                        f"whose area is the count. 'shade': one "
+                        f"cell per --bin-size square, darker = more points (log "
+                        f"scale). 'scatter': every point, unmerged (the old look). "
+                        f"Config key `density`.")
+    p.add_argument("--bin-size", type=float, default=None,
+                   help=f"merge radius for --density size/shade, in metres "
+                        f"(default: size {DEFAULT_BIN_SIZE['size']}, shade "
+                        f"{DEFAULT_BIN_SIZE['shade']}). Config key `bin_size`.")
+    p.add_argument("--per-task", action="store_true", default=None,
+                   help="one PNG per (task, actor kind) instead of one per kind, "
+                        "into a `..._per_task/` directory; combine with "
+                        "--step-range to see each task's distribution over one "
+                        "stretch of training. Only the task's own object / "
+                        "receptacle is drawn (see --all-slots). Rows without a "
+                        "task (synthetic start draws) are left out, so on a run "
+                        "recorded before the phase split use --phase end. "
+                        "Config key `per_task`.")
+    p.add_argument("--dense-min", type=int, default=None,
+                   help=f"--density emphasis: a --bin-size cell needs at least "
+                        f"this many points to be enlarged. Default: automatic, "
+                        f"{DENSE_FRACTION:.1%} of the figure's points and at "
+                        f"least {DENSE_FLOOR}. Lower it to mark more stacks. "
+                        f"Config key `dense_min`.")
+    p.add_argument("--all-slots", action="store_true",
+                   help="--per-task: keep every slot of the envs running the "
+                        "task, distractors included")
     p.add_argument("--workspace", default=None, metavar="X0,X1,Y0,Y1",
                    help="overlay a workspace rectangle (e.g. the workspace_aabb "
                         "bounds you are validating). The bounds are negative, so "
@@ -1018,7 +1378,12 @@ def main():
                                                 args.workspace_scale, 3.0))
         args.step_range = cfg.option("step_range", args.step_range,
                                      DEFAULT_STEP_RANGE)
-        out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_segment_positions.png"
+        args.density = cfg.option("density", args.density, DEFAULT_DENSITY)
+        args.bin_size = float(cfg.option("bin_size", args.bin_size,
+                                         DEFAULT_BIN_SIZE[args.density]))
+        args.per_task = bool(cfg.option("per_task", args.per_task, False))
+        args.dense_min = cfg.option("dense_min", args.dense_min, DEFAULT_DENSE_MIN)
+        out =Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_segment_positions.png"
         for path in render_groups(cfg, out, args=args):
             print(f"[ok] wrote {path}", file=sys.stderr)
         return
@@ -1027,6 +1392,13 @@ def main():
         args.phase = "start"
     if args.workspace_scale is None:
         args.workspace_scale = 3.0
+    args.density = args.density or DEFAULT_DENSITY
+    if args.bin_size is None:
+        args.bin_size = DEFAULT_BIN_SIZE[args.density]
+    args.per_task = bool(args.per_task)
+    if args.step_range and "," in str(args.step_range):
+        raise SystemExit("several --step-range values are only supported with "
+                         "--config, where they share one view and count scale")
     csv_path = Path(args.csv) if args.csv else Path(args.run_dir) / "segment_pose.csv"
     ws = None if args.no_clip else workspace_extent([csv_path.parent])
     df = load_pose(csv_path)
@@ -1039,7 +1411,10 @@ def main():
     label = {"start": "segment-start", "end": "segment-end", "all": "segment-boundary"}[args.phase]
     for path in render(df, out, hexbin=args.hexbin, workspace=workspace,
                        label=label, robust=not args.no_clip, ws=ws,
-                       scale=args.workspace_scale):
+                       scale=args.workspace_scale, density=args.density,
+                       bin_size=args.bin_size, per_task=args.per_task,
+                       task_actor_only=not args.all_slots,
+                       dense_min=args.dense_min):
         print(f"[ok] wrote {path}", file=sys.stderr)
 
 
