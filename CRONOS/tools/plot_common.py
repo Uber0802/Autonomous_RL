@@ -56,7 +56,7 @@ _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 TOOL_OPTION_KEYS = {
     # plot_segment_positions.py
     "actor_kind", "phase", "workspace_scale", "step_range", "density",
-    "bin_size", "per_task", "dense_min",
+    "bin_size", "per_task", "dense_min", "color_by",
     # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
     # plot_sequence_eval.py

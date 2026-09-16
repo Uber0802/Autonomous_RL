@@ -474,7 +474,16 @@ eval. Use `--eval-at-start` for rotation eval of a checkpoint loaded by `main.py
 
 ### Visualization
 
-CRONOS ships two complementary plotting tools — one per-run live dashboard, one cross-run aggregator.
+CRONOS ships a per-run live dashboard plus tools that read a run's CSVs directly
+and compare several runs from one `--config` JSON:
+
+| Question | Tool | Reads |
+|---|---|---|
+| Is this run healthy right now? | `plot_run_trends.py` | wandb + `eval_success.csv` |
+| How does training success evolve, segment by segment? | `plot_rollout_success.py` | `rollout_success.csv` |
+| Where do objects start / end up? | `plot_segment_positions.py` | `segment_pose.csv` |
+| Does success depend on a task's position in the sequence? | `plot_sequence_eval.py` | `eval_per_trial.csv` |
+| Eval success curves across runs | `plot_eval_success.py` | `eval_success.csv` |
 
 #### Per-run live dashboard — `tools/plot_run_trends.py`
 
@@ -572,42 +581,123 @@ is caught by a second guard on the measured piece length.
 [rollout] baseline T320: drawn whole — episode_len=320 < 1280 (T1280+ only)
 ```
 
-#### Per-segment position scatter — `tools/plot_segment_positions.py`
+#### Per-segment position distribution — `tools/plot_segment_positions.py`
 
-Actor positions from `segment_pose.csv`. Each boundary is recorded twice — once
-**before** its HSR/EER resets (`phase=end`, the steady state the policy produced)
-and once **after** (`phase=start`, the initial state the next segment begins
-from, and after a full `env.reset()` at an episode boundary). `--phase` defaults
-to `start`, which is the distribution the forward policy actually faces.
+Top-down xy positions of the objects (`obj`) and receptacles (`recep`) from
+`segment_pose.csv`. Each boundary is recorded twice — once **before** its
+HSR/EER resets (`phase=end`, the steady state the policy produced) and once
+**after** (`phase=start`, the initial state the next segment begins from, and
+after a full `env.reset()` at an episode boundary). `--phase` defaults to
+`start`, which is the distribution the forward policy actually faces.
 
 ```bash
 python tools/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
+python tools/plot_segment_positions.py --config my_runs.json            # several groups
 ```
 
-One column per `actor_kind` (`obj` / `recep` / `gripper`); row 1 is an xy scatter
-coloured by episode (so drift over training is visible), row 2 is a `pz`
-histogram with the `low_z = 0.7` detector threshold marked and the fraction below
-it in the panel title — a direct read on how often objects are ending up off the
-table.
+**One PNG per figure, never a grid** (`<...>_obj.png`, `<...>_recep.png`, one pair
+per group in `--config` mode). There are no px / py axis labels — every figure
+is the same top-down table view — and no title; the counts that used to be in
+the title (points, synthetic share, fraction below `low_z = 0.7`) are printed on
+stderr. Every figure one invocation writes shares **one view range and one count
+scale**, which is what makes separate PNGs comparable.
+
+**Density.** The spawn lattice stacks thousands of poses on one xy, so points
+that land close together are merged into `--bin-size` cells:
+
+| `--density` | Look |
+|---|---|
+| `emphasis` (default) | every point as a plain scatter, plus an enlarged, darker marker on each cell holding ≥ `--dense-min` points — the figure reads like a scatter and only the stacks (spawn / reset sites an untouched object never left) stand out. The key bottom-left gives the counts |
+| `size` | one marker per cell, area ∝ count |
+| `shade` | one filled cell per `--bin-size` square, darker = more (log scale) |
+| `scatter` | every point, unmerged; coloured by episode for a single run |
+
+`--dense-min` defaults to 0.6 % of a figure's points (at least 5): about 50 for a
+whole-run T2560 figure, 5 for a per-task one.
+
+**What to draw.**
+
+| Flag | Output |
+|---|---|
+| *(none)* | one figure per actor kind (per group) |
+| `--per-task` | one figure per (task, kind) in a `..._per_task/` directory, showing only the task's own object / receptacle (matched by model name). Add `--all-slots` to keep every actor of the envs running the task. Rows without a task (synthetic start draws) are left out, so on a pre-`phase` run use `--phase end` |
+| `--color-by item` | `--config` only. Objects only, one colour per (object, step range): object 1 / range 1, object 1 / range 2, object 2 / range 1, … One figure per group (`..._obj_by_item.png`); combines with `--per-task` |
+| `--color-by scene` | `--config` only. For every scene (YAML group): one figure per object, one per receptacle, and one of the whole scene — 5 for a 2×2 scene — each with one colour per step range. Written to `..._by_scene/<scene>_<n>_<actor>.png` |
+
+`--color-by` takes the actor order from the **scene config**: object *k* of a
+scene is the *k*-th entry of its `obj:` list (receptacles: `recep:`), mapped to
+`model_name` through ManiSkill's `assets/carrot/more_{carrot,plate}/model_db.json`,
+and scenes own env ranges in `num_envs` order. The config is the run's
+`experiment_config.yaml` snapshot, or else `run_config.json`'s `config_path` as it
+is in this checkout now (stderr says which). PyYAML is used when installed;
+otherwise a small parser reads the `groups:` keys it needs.
+
+**Comparing stretches of training.** In `--config` mode `--step-range` takes
+several comma-separated ranges; each becomes its own figure (or colour, with
+`--color-by`), all on one view and count scale, with `_steps<LO>-<HI>` in the
+filename:
+
+```bash
+python tools/plot_segment_positions.py --config q2.json --phase end \
+    --step-range 0:163840,163841:327680 --color-by scene
+```
 
 | Flag | Description |
 |---|---|
-| `--config` | JSON with several groups of runs; one column per group. See [Comparing runs](#comparing-several-runs) |
+| `--config` | JSON with several groups of runs. See [Comparing runs](#comparing-several-runs) |
 | `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
 | `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
-| `--step-range LO:HI` | Keep only boundaries whose `total_steps` falls in the range, so one training segment of a resumed run can be plotted on its own. **The default is not the whole run** (`DEFAULT_STEP_RANGE` in the tool), so a longer run is cropped unless you widen it or pass `--step-range all`. Either side may be left open (`:HI`, `LO:`). What it kept is always reported on stderr. Config key: `step_range` |
+| `--step-range LO:HI[,LO:HI...]` | Keep only boundaries whose `total_steps` falls in the range. **The default is not the whole run** (`DEFAULT_STEP_RANGE` in the tool), so a longer run is cropped unless you widen it or pass `--step-range all`. Either side may be left open (`:HI`, `LO:`). Several ranges: `--config` only. What it kept is always reported on stderr |
 | `--segment` / `--episode-range LO:HI` / `--last-episodes N` | Narrow in time |
 | `--forward-only` | Join `rollout_success.csv` on (episode, segment, env) and keep only forward segments — worth using under a mode with LSR (`LSR`, `HSR+LSR`, `noep+LSR`), where half the segment ends are reset-goal states. A no-op without LSR |
-| `--hexbin` | Density hexbin instead of the episode-coloured scatter |
+| `--density` / `--bin-size` / `--dense-min` | See *Density* above |
+| `--per-task` / `--all-slots` / `--color-by` | See *What to draw* above |
+| `--hexbin` | viridis hexbin (overrides `--density`) |
+| `--workspace-scale` | View size as a multiple of the preset's spawn region (default 3) |
+| `--no-clip` | Plot the full coordinate range instead of a view robust to escaped actors |
 | `--workspace=X0,X1,Y0,Y1` | Overlay a rectangle, e.g. `workspace_aabb` bounds being validated. Use the `=` form — the bounds are negative and argparse would read them as a flag |
 
+Config keys (CLI wins): `actor_kind`, `phase`, `step_range` (string, comma list
+allowed), `workspace_scale`, `density`, `bin_size`, `dense_min`, `per_task`,
+`color_by`.
+
 Hidden slots (a group declaring fewer objects than the batch-wide N) are written
-as NaN by design and are dropped, with the count reported.
+as NaN by design and are dropped, with the count reported. The gripper is
+recorded but not plotted (EER pins it).
+
+#### Sequence-eval success by position — `tools/plot_sequence_eval.py`
+
+Bar charts from a standalone sequential eval's `eval_per_trial.csv`: x = the
+task's position in the round (1–4, `task_idx + 1`), one bar per (group, domain).
+**In-domain bars are filled, out-of-domain bars hollow**, in the group's colour;
+the error bar is ±1 std across a group's series (drawn only with > 1 series).
+
+```bash
+python tools/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
+python tools/plot_sequence_eval.py --config my_evals.json --seq-kind random
+```
+
+| Output | Contents |
+|---|---|
+| `<name>_seq_position.png` | pooled over every task |
+| `<name>_seq_position_per_task/<name>_seq_position_<task>.png` | one per task (`--no-per-task` to skip) |
+| `<name>_seq_position.csv` | every plotted number, with `n_series` and `n_trials` |
+
+| Flag | Default | Description |
+|---|---|---|
+| `--metric` | `success` | `success` (each task on its own) \| `success_chained` (AND along the round) \| `grasp` \| `obj_grasped` |
+| `--seq-kind` | `all` | `training` (the trained rotations) \| `random` (untrained cycles) \| `all` |
+| `--out-dir` / `--name` | run dir / `eval` | where and under which prefix to write |
+
+Training runs have no `eval_per_trial.csv`; point it at an eval glob dir. In
+`--config` mode the `runs` entries are eval glob dirs, and a list entry is a set
+of round shards of one eval.
 
 #### Comparing several runs — `--config`
 
-Both per-segment tools take a `--config` JSON describing several experiment
-groups. A group is one curve (success) or one column (positions); each entry in
+The per-run tools take a `--config` JSON describing several experiment
+groups. A group is one curve (success), one set of figures (positions) or one
+bar colour (sequence eval); each entry in
 its `runs` list is one series, typically a seed. **A `runs` entry that is itself
 a list is a resume chain** — those run dirs are stitched into one continuous
 series, with the child winning at any overlapping `total_steps`.
@@ -641,7 +731,7 @@ A config routinely points at runs that cannot answer the question asked of them:
 an eval-only run writes no `rollout_success.csv`, `--no-record-segment-pose`
 writes no `segment_pose.csv`, a run still in its first episode has files that
 exist but are empty, and an older run may predate a column the current code
-reads. In `--config` mode all four plot tools name each such run on stderr and
+reads. In `--config` mode every plot tool names each such run on stderr and
 skip it, so one of them does not cost every other group its figure:
 
 ```
@@ -671,9 +761,13 @@ per-env respawn, so a T80 run (128 episodes × 64 envs = 8,192 draws) and a T256
 one (4 × 64 = 256) produce clouds of the right relative density instead of a
 misleading uniform one.
 
-Synthetic points are drawn as black `×` and counted separately in the panel
-title; they are never merged into the recorded cloud. `--no-synth` skips such
-runs instead, `--synth-seed` makes the draw reproducible.
+Only the boundaries that really are an `env.reset()` draw are synthesized; every
+other start is carried over from the previous segment's recorded end when the
+boundary provably moved nothing (no HSR, no EER). With EER on, every start is
+synthesized. Synthetic points are drawn like recorded ones and their share is
+reported on stderr; they carry no task, so `--per-task` leaves them out.
+`--no-synth` skips them instead, `--synth-seed` makes the draw reproducible.
+Synthesis needs `envs.suite` importable (numpy + transforms3d).
 
 For the shipped 2×2 preset that table is 432 ordered configs = 18 distinct
 four-point geometries × 4! slot permutations, occupying just 16 xy positions
@@ -941,7 +1035,8 @@ without modifying AutoRL. Full analysis in
 |---|---|
 | `tools/plot_run_trends.py` | Per-run live 4-panel dashboard (see [Visualization](#visualization)) |
 | `tools/plot_rollout_success.py` | Per-segment (per-80-step) rollout success rate from `rollout_success.csv` |
-| `tools/plot_segment_positions.py` | Per-segment actor position distribution from `segment_pose.csv` |
+| `tools/plot_segment_positions.py` | Per-segment actor position distribution from `segment_pose.csv` (per task, per scene, several step ranges) |
+| `tools/plot_sequence_eval.py` | Sequence-eval success by task position (bars, ID filled / OOD hollow) from `eval_per_trial.csv` |
 | `tools/plot_eval_success.py` | Cross-run aggregator over `eval_success.csv` files |
 | `tools/mcnemar_pair.py` | Paired McNemar gate over `eval_per_trial.csv` |
 | `tools/rebuild_eval_outputs.py` | Rebuild standalone-eval derived files from per-trial rows; merge round shards of one eval |

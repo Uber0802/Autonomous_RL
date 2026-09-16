@@ -47,6 +47,11 @@ least `--dense-min` points, so the figure reads as before and only the stacks
 proportional to the count; `shade` fills the cell from light to dark on a log
 scale; `scatter` is the old unmerged look, coloured by episode for a single run.
 
+`--color-by item` (objects only, one colour per object x step range) and
+`--color-by scene` (per scene: one figure per object and receptacle plus the
+whole scene, one colour per step range) take the actor order from the scene
+config's `obj:` / `recep:` lists — see `scene_actor_table`.
+
 `--step-range` takes several comma-separated ranges in `--config` mode
 (`0:163840,163841:327680`): one figure per range, all on one view and one
 count scale, with `_steps<LO>-<HI>` in the filename. One count scale is shared by every figure
@@ -98,7 +103,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from plot_common import (NoData, default_colors, load_plot_config,  # noqa: E402
-                         out_variant, read_run_config, read_table,
+                         out_variant, read_run_config, read_table, slugify,
                          unique_slugs, warn)
 
 # `envs/unsuitable.py::LowZDetector.z_threshold` — the height below which HSR
@@ -684,7 +689,10 @@ def load_group_poses(run_dirs, args, *, label: str = "") -> pd.DataFrame:
             warn(f"group '{label}': {e}" if label else str(e))
             continue
         df["synthetic"] = False
-        frames.append(ensure_start_rows(run_dir, df, args, required=False))
+        df = ensure_start_rows(run_dir, df, args, required=False)
+        if getattr(args, "color_by", "none") in ("item", "scene"):
+            df = annotate_scene_items(df, run_dir)
+        frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -893,6 +901,25 @@ def _emphasis_style(color, c_max: int, dense_min: int):
     return style
 
 
+def emphasis_legend(ax, *, color, c_max: int, dense_min: int,
+                    bin_size: float) -> None:
+    """The `emphasis` size / shade key, bottom left, as a separate artist so a
+    second (colour) legend can sit next to it."""
+    style = _emphasis_style(color, c_max, dense_min)
+    refs = sorted({dense_min,
+                   max(dense_min, int(round(np.sqrt(dense_min * c_max)))),
+                   max(dense_min, c_max)})
+    handles = []
+    for v in refs:
+        sv, cv = style(np.array([v]))
+        handles.append(ax.scatter([], [], s=sv, c=cv, linewidths=0.4,
+                                  edgecolors="white"))
+    ax.add_artist(ax.legend(handles, [f"{v}" for v in refs],
+                            title=f"points / {bin_size * 1000:g} mm",
+                            loc="lower left", fontsize=7, title_fontsize=7,
+                            labelspacing=1.3, borderpad=0.8, framealpha=0.8))
+
+
 def cell_count_max(frames, *, xlim, ylim, bin_size: float) -> int:
     """Largest per-cell count over several figures' rows, inside the view.
 
@@ -913,7 +940,7 @@ def cell_count_max(frames, *, xlim, ylim, bin_size: float) -> int:
 def _draw_cloud(fig, ax, sub: pd.DataFrame, *, xlim, ylim, density: str,
                 bin_size: float, hexbin: bool, color="tab:blue",
                 episode_range=None, count_max=None,
-                dense_min=DEFAULT_DENSE_MIN) -> None:
+                dense_min=DEFAULT_DENSE_MIN, count_legend: bool = True) -> None:
     """The distribution itself, in one of the density encodings.
 
     emphasis every point exactly as `scatter` draws it, plus one enlarged,
@@ -965,17 +992,9 @@ def _draw_cloud(fig, ax, sub: pd.DataFrame, *, xlim, ylim, density: str,
         s_, c_ = style(dense["count"].to_numpy())
         ax.scatter(dense["x"], dense["y"], s=s_, c=c_, linewidths=0.4,
                    edgecolors="white", zorder=3)
-        refs = sorted({dense_min, max(dense_min, int(round(np.sqrt(dense_min * c_max)))),
-                       max(dense_min, c_max)})
-        handles = []
-        for v in refs:
-            sv, cv = style(np.array([v]))
-            handles.append(ax.scatter([], [], s=sv, c=cv, linewidths=0.4,
-                                      edgecolors="white"))
-        ax.add_artist(ax.legend(handles, [f"{v}" for v in refs],
-                                title=f"points / {bin_size * 1000:g} mm",
-                                loc="lower left", fontsize=7, title_fontsize=7,
-                                labelspacing=1.3, borderpad=0.8, framealpha=0.8))
+        if count_legend:
+            emphasis_legend(ax, color=color, c_max=c_max, dense_min=dense_min,
+                            bin_size=bin_size)
         return
     if density == "size":
         # Area, not radius, is proportional to the count: that is what the eye
@@ -1140,6 +1159,362 @@ def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
                   f"not missing data", file=sys.stderr)
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace)
         written.append(_save_panel(fig, out_variant(out_base, kind)))
+    return written
+
+
+# ---------------------------------------------------------------------------
+# --color-by item / scene: which scene and which of its actors each row is,
+# from the scene config
+# ---------------------------------------------------------------------------
+
+_CRONOS_ROOT = Path(__file__).resolve().parents[1]
+# The tables `envs/bridge_multi.py::_prep_init` indexes: YAML `obj: [7, 2]` /
+# `recep: [1, 2]` are 1-based into their key order, and the keys are what
+# `segment_pose.csv` records as `model_name`.
+_ASSET_DIR = _CRONOS_ROOT.parent / "ManiSkill" / "mani_skill" / "assets" / "carrot"
+_MODEL_DB = {"obj": _ASSET_DIR / "more_carrot" / "model_db.json",
+             "recep": _ASSET_DIR / "more_plate" / "model_db.json"}
+
+
+def _read_scene_groups(path: Path) -> list:
+    """The `groups:` list of a scene config: [{name, num_envs, obj, recep}, ...].
+
+    Uses PyYAML when it is installed. The plot environment does not otherwise
+    need it (`scripts/requirements_plot.txt`), so without it a line parser
+    reads just those four keys, which is all the actor order needs.
+    """
+    import re
+    text = path.read_text()
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        return (yaml.safe_load(text) or {}).get("groups") or []
+    groups, inside = [], False
+    for line in text.splitlines():
+        s = line.split("#", 1)[0].rstrip()
+        if not s.strip():
+            continue
+        if re.match(r"^groups\s*:", s):
+            inside = True
+            continue
+        if inside and re.match(r"^\S", s):
+            inside = False
+        if not inside:
+            continue
+        m = re.match(r"^\s*-\s*name\s*:\s*[\"']?([^\"']*)[\"']?\s*$", s)
+        if m:
+            groups.append({"name": m.group(1).strip()})
+            continue
+        m = re.match(r"^\s*(num_envs|obj|recep)\s*:\s*(.+)$", s)
+        if m and groups:
+            key, val = m.groups()
+            nums = [int(v) for v in re.findall(r"-?\d+", val)]
+            groups[-1][key] = nums[0] if key == "num_envs" else nums
+    return groups
+
+
+def scene_config_path(run_dir: Path):
+    """The run's scene config: its own `experiment_config.yaml` snapshot, else
+    `run_config.json`'s `config_path` as it is in this checkout now."""
+    snap = Path(run_dir) / "experiment_config.yaml"
+    if snap.exists():
+        return snap, True
+    rc = read_run_config(run_dir) or {}
+    raw = rc.get("config_path")
+    if not raw:
+        return None, False
+    for cand in (Path(raw), _CRONOS_ROOT / raw):
+        if cand.exists():
+            return cand, False
+    return None, False
+
+
+def scene_actor_table(run_dir: Path):
+    """`(env, actor_kind, model_name) -> (scene, item)` from the scene config.
+
+    `scene` is the YAML group name; `item` is the actor's 1-based position in
+    that group's `obj:` / `recep:` list — "object 1" of group_A is its first
+    `obj:` entry, whatever slot the env put it in. Env ranges follow the
+    groups' `num_envs` in file order, as `envs/config.py::get_group_starts`
+    lays them out. Returns None (with a warning) when any of that is missing.
+    """
+    path, is_snapshot = scene_config_path(run_dir)
+    if path is None:
+        warn(f"{Path(run_dir).name}: no scene config found (no "
+             f"experiment_config.yaml, run_config.json config_path missing here)")
+        return None
+    keys = {}
+    for kind, db in _MODEL_DB.items():
+        if not db.exists():
+            warn(f"{kind} model table not found at {db}")
+            return None
+        keys[kind] = list(json.loads(db.read_text()))
+    rows, start = [], 0
+    for gi, g in enumerate(_read_scene_groups(path)):
+        n = int(g.get("num_envs") or 0)
+        if n <= 0 or not g.get("obj"):
+            warn(f"{path}: group {g.get('name')!r} lacks num_envs / obj — "
+                 f"cannot place its envs")
+            return None
+        scene = str(g.get("name") or f"group_{gi}")
+        for kind in ("obj", "recep"):
+            for item, idx in enumerate(g.get(kind) or [], start=1):
+                if not 1 <= int(idx) <= len(keys[kind]):
+                    warn(f"{path}: {kind} index {idx} outside the model table")
+                    return None
+                name = keys[kind][int(idx) - 1]
+                rows += [(env, kind, name, scene, item)
+                         for env in range(start, start + n)]
+        start += n
+    rc = read_run_config(run_dir) or {}
+    if rc.get("num_envs") and int(rc["num_envs"]) != start:
+        warn(f"{path}: groups cover {start} envs, the run had {rc['num_envs']}")
+    if not is_snapshot:
+        print(f"[scene] {Path(run_dir).name}: actor order from {path} (the file "
+              f"as it is now — the run left no experiment_config.yaml snapshot)",
+              file=sys.stderr)
+    return pd.DataFrame(rows, columns=["env", "actor_kind", "model_name",
+                                       "scene", "item"])
+
+
+def annotate_scene_items(df: pd.DataFrame, run_dir: Path) -> pd.DataFrame:
+    """Add `scene` and `item` to the obj / recep rows. Rows the scene config
+    does not explain fall back to scene `?` and `slot + 1`, with a count."""
+    table = scene_actor_table(run_dir)
+    if table is None:
+        warn(f"{Path(run_dir).name}: actor order falls back to slot order, "
+             f"scenes unknown")
+        return df.assign(scene="?", item=df["slot"] + 1)
+    out = df.merge(table, on=["env", "actor_kind", "model_name"], how="left")
+    miss = out["item"].isna() & out["actor_kind"].isin(_KIND_ORDER)
+    if miss.any():
+        warn(f"{Path(run_dir).name}: {int(miss.sum())} rows not in the scene "
+             f"config — using slot order for them")
+    out["item"] = out["item"].fillna(out["slot"] + 1).astype(int)
+    out["scene"] = out["scene"].fillna("?")
+    return out
+
+
+def step_range_label(value: str) -> str:
+    rng = parse_step_range(value)
+    if rng is None:
+        return "all steps"
+    fmt = lambda v: "" if not np.isfinite(v) else f"{v:,.0f}"
+    return f"steps {fmt(rng[0])}–{fmt(rng[1])}"
+
+
+def render_groups_by_item(cfg, out_base: Path, *, args) -> list:
+    """`--color-by item`: objects only, one colour per (object, step range).
+
+    One figure per group holds every step range and every object of the
+    scene: with two ranges and two objects that is four colours, ordered
+    object 1 / range 1, object 1 / range 2, object 2 / range 1, ... Object
+    numbers come from the scene config (`scene_actor_table`), so "object 1" is the
+    first `obj:` entry of each group even when groups are pooled. `--per-task`
+    gives each task its own figure; a task moves one object, so it shows that
+    object's colours only.
+    """
+    import copy
+    if args.hexbin or args.density == "shade":
+        raise SystemExit("--color-by item needs a point density mode "
+                         "(emphasis, size or scatter), not shade / hexbin")
+    ranges = split_step_ranges(args.step_range)
+    n_r = len(ranges)
+    r_labels = [step_range_label(r) for r in ranges]
+    palette = default_colors(10)
+    color_of = lambda item, ri: palette[((item - 1) * n_r + ri) % len(palette)]
+    slugs = unique_slugs([g.label for g in cfg.groups])
+
+    figs = []   # (group label, task or None, [(item, range idx, rows)])
+    for group in cfg.groups:
+        runs = [d for chain in group.chains for d in chain]
+        loaded = load_group_poses(runs, args, label=group.label)
+        if loaded.empty:
+            warn(f"group '{group.label}' produced no rows")
+            continue
+        loaded = loaded[loaded["actor_kind"] == "obj"]
+        per_range = []
+        for rng_text in ranges:
+            r_args = copy.copy(args)
+            r_args.step_range = rng_text
+            per_range.append(apply_filters(loaded, r_args,
+                                           Path(runs[0]) / "segment_pose.csv",
+                                           required=False))
+        if all(d.empty for d in per_range):
+            warn(f"group '{group.label}': every row was filtered out")
+            continue
+        if args.per_task:
+            by_task = [dict(split_by_task(d, task_actor_only=not args.all_slots))
+                       if len(d) else {} for d in per_range]
+            for task in sorted(set().union(*by_task)):
+                layers = [(int(item), ri, rows)
+                          for ri, tasks in enumerate(by_task) if task in tasks
+                          for item, rows in tasks[task].groupby("item")]
+                figs.append((group.label, task, sorted(layers, key=lambda l: l[:2])))
+            continue
+        layers = [(int(item), ri, rows)
+                  for ri, d in enumerate(per_range) if len(d)
+                  for item, rows in d.groupby("item")]
+        figs.append((group.label, None, sorted(layers, key=lambda l: l[:2])))
+    if not figs:
+        raise SystemExit("[pose] --color-by item: no group produced obj rows")
+
+    every = [rows for _, _, layers in figs for _, _, rows in layers]
+    robust = not args.no_clip
+    ws = None if args.no_clip else workspace_extent(
+        [d for g in cfg.groups for ch in g.chains for d in ch])
+    xlim, ylim = _shared_limits(pd.concat(every), robust=robust, ws=ws,
+                                scale=args.workspace_scale)
+    _announce_view(ws, args.workspace_scale, xlim, ylim)
+    c_max = cell_count_max(every, xlim=xlim, ylim=ylim, bin_size=args.bin_size)
+    task_slugs = unique_slugs(sorted({t for _, t, _ in figs if t}))
+
+    from matplotlib.lines import Line2D
+    written = []
+    for label, task, layers in figs:
+        # One threshold per figure, from ALL its points, so "enlarged" means the
+        # same count for every colour in it and the same as in the single-colour
+        # figure of the same data.
+        # Per step range, since one range is what the single-colour figure holds.
+        n_ranges = len({ri for _, ri, _ in layers})
+        dense_min = resolve_dense_min(
+            args.dense_min, sum(len(rows) for _, _, rows in layers) // n_ranges)
+        fig, ax = _new_panel()
+        handles = []
+        for item, ri, rows in layers:
+            tag = " / ".join(x for x in (label, r_labels[ri], task, f"obj{item}") if x)
+            _report_offscreen(rows, xlim, ylim, tag)
+            report_panel(tag, rows)
+            color = color_of(item, ri)
+            _draw_cloud(fig, ax, rows, xlim=xlim, ylim=ylim, density=args.density,
+                        bin_size=args.bin_size, hexbin=False, color=color,
+                        count_max=c_max, dense_min=dense_min, count_legend=False)
+            names = sorted({_model_core(m) for m in rows["model_name"]})
+            what = names[0] if len(names) == 1 else f"object {item}"
+            handles.append(Line2D([], [], ls="", marker="o", ms=6, color=color,
+                                  label=f"{what} · {r_labels[ri]}"))
+        if args.density == "emphasis":
+            emphasis_legend(ax, color="0.45", c_max=c_max, dense_min=dense_min,
+                            bin_size=args.bin_size)
+        # Above the axes: four colours spread over the whole cloud, so no
+        # corner inside it is free. The axes' own legend (not add_artist), so
+        # `bbox_inches="tight"` keeps it in the saved image.
+        ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.01),
+                  ncol=2, fontsize=7, frameon=False, handletextpad=0.2,
+                  columnspacing=1.0)
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
+        if task:
+            task_dir = out_base.with_name(
+                f"{out_base.stem}_{slugs[label]}_by_item_per_task")
+            out = out_variant(task_dir / out_base.name, task_slugs[task], "obj")
+        else:
+            out = out_variant(out_base, slugs[label], "obj_by_item")
+        written.append(_save_panel(fig, out))
+    return written
+
+
+def render_scenes(cfg, out_base: Path, *, args) -> list:
+    """`--color-by scene`: per scene, one figure per actor plus one of them all.
+
+    For every scene (YAML group) of every config group, in the scene config's
+    order:
+
+        1..N      object 1..N          (`obj:` list)
+        N+1..N+M  receptacle 1..M      (`recep:` list)
+        last      every actor of the scene together
+
+    so a 2x2 scene gives 5 figures. Each figure has one colour per step range
+    (`--step-range A,B` -> two colours), which makes it a before/after of the
+    same actor. View and count scale are shared by every figure written.
+    """
+    import copy
+    if args.hexbin or args.density == "shade":
+        raise SystemExit("--color-by scene needs a point density mode "
+                         "(emphasis, size or scatter), not shade / hexbin")
+    ranges = split_step_ranges(args.step_range)
+    r_labels = [step_range_label(r) for r in ranges]
+    palette = default_colors(max(2, len(ranges)))
+    slugs = unique_slugs([g.label for g in cfg.groups])
+
+    figs = []   # (group label, scene, fig no., name, [(range idx, rows)])
+    for group in cfg.groups:
+        runs = [d for chain in group.chains for d in chain]
+        loaded = load_group_poses(runs, args, label=group.label)
+        if loaded.empty:
+            warn(f"group '{group.label}' produced no rows")
+            continue
+        loaded = loaded[loaded["actor_kind"].isin(_KIND_ORDER)]
+        per_range = []
+        for rng_text in ranges:
+            r_args = copy.copy(args)
+            r_args.step_range = rng_text
+            r_args.actor_kind = "all"
+            per_range.append(apply_filters(loaded, r_args,
+                                           Path(runs[0]) / "segment_pose.csv",
+                                           required=False))
+        scenes = list(dict.fromkeys(loaded["scene"]))   # config order
+        for scene in scenes:
+            actors = (loaded[loaded["scene"] == scene][["actor_kind", "item", "model_name"]]
+                      .drop_duplicates())
+            actors = actors.assign(k=actors["actor_kind"].map(_KIND_ORDER.index))
+            n = 0
+            for (kind, item), names in actors.groupby(["k", "item"], sort=True):
+                kind = _KIND_ORDER[kind]
+                n += 1
+                cores = sorted({_model_core(m) for m in names["model_name"]})
+                name = f"{'obj' if kind == 'obj' else 'recep'}{item}-{'+'.join(cores)}"
+                layers = [(ri, d[(d["scene"] == scene) & (d["actor_kind"] == kind)
+                                 & (d["item"] == item)])
+                          for ri, d in enumerate(per_range) if len(d)]
+                figs.append((group.label, scene, n, name,
+                             [(ri, rows) for ri, rows in layers if len(rows)]))
+            layers = [(ri, d[d["scene"] == scene])
+                      for ri, d in enumerate(per_range) if len(d)]
+            figs.append((group.label, scene, n + 1, "all",
+                         [(ri, rows) for ri, rows in layers if len(rows)]))
+    figs = [f for f in figs if f[4]]
+    if not figs:
+        raise SystemExit("[pose] --color-by scene: nothing to plot")
+
+    every = [rows for *_, layers in figs for _, rows in layers]
+    ws = None if args.no_clip else workspace_extent(
+        [d for g in cfg.groups for ch in g.chains for d in ch])
+    xlim, ylim = _shared_limits(pd.concat(every), robust=not args.no_clip,
+                                ws=ws, scale=args.workspace_scale)
+    _announce_view(ws, args.workspace_scale, xlim, ylim)
+    c_max = cell_count_max(every, xlim=xlim, ylim=ylim, bin_size=args.bin_size)
+
+    from matplotlib.lines import Line2D
+    written = []
+    for label, scene, n, name, layers in figs:
+        dense_min = resolve_dense_min(
+            args.dense_min, sum(len(r) for _, r in layers) // len(layers))
+        fig, ax = _new_panel()
+        handles = []
+        what = "all actors" if name == "all" else name.split("-", 1)[1]
+        for ri, rows in layers:
+            tag = f"{label} / {scene} / {name} / {r_labels[ri]}"
+            _report_offscreen(rows, xlim, ylim, tag)
+            report_panel(tag, rows)
+            _draw_cloud(fig, ax, rows, xlim=xlim, ylim=ylim, density=args.density,
+                        bin_size=args.bin_size, hexbin=False,
+                        color=palette[ri % len(palette)], count_max=c_max,
+                        dense_min=dense_min, count_legend=False)
+            handles.append(Line2D([], [], ls="", marker="o", ms=6,
+                                  color=palette[ri % len(palette)],
+                                  label=f"{what} · {r_labels[ri]}"))
+        if args.density == "emphasis":
+            emphasis_legend(ax, color="0.45", c_max=c_max, dense_min=dense_min,
+                            bin_size=args.bin_size)
+        ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.01),
+                  ncol=len(handles), fontsize=7, frameon=False,
+                  handletextpad=0.2, columnspacing=1.0)
+        _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
+        scene_dir = out_base.with_name(f"{out_base.stem}_{slugs[label]}_by_scene")
+        out = scene_dir / f"{slugify(scene)}_{n}_{slugify(name)}.png"
+        written.append(_save_panel(fig, out))
     return written
 
 
@@ -1347,9 +1722,19 @@ def main():
     p.add_argument("--dense-min", type=int, default=None,
                    help=f"--density emphasis: a --bin-size cell needs at least "
                         f"this many points to be enlarged. Default: automatic, "
-                        f"{DENSE_FRACTION:.1%} of the figure's points and at "
+                        f"{DENSE_FRACTION * 100:.1f}%% of the figure's points and at "
                         f"least {DENSE_FLOOR}. Lower it to mark more stacks. "
                         f"Config key `dense_min`.")
+    p.add_argument("--color-by", default=None, choices=["none", "item", "scene"],
+                   help="--config mode. 'item': draw objects only, one colour per "
+                        "(object, step range) — object 1 / range 1, object 1 / "
+                        "range 2, object 2 / range 1, ... — with the object "
+                        "order taken from the scene config's `obj:` list. One "
+                        "figure per group (<...>_<group>_obj_by_item.png). "
+                        "'scene': for every scene, one figure per object and "
+                        "receptacle plus one of the whole scene, one colour per "
+                        "step range (<...>_<group>_by_scene/). "
+                        "Config key `color_by`.")
     p.add_argument("--all-slots", action="store_true",
                    help="--per-task: keep every slot of the envs running the "
                         "task, distractors included")
@@ -1383,8 +1768,11 @@ def main():
                                          DEFAULT_BIN_SIZE[args.density]))
         args.per_task = bool(cfg.option("per_task", args.per_task, False))
         args.dense_min = cfg.option("dense_min", args.dense_min, DEFAULT_DENSE_MIN)
+        args.color_by = cfg.option("color_by", args.color_by, "none")
         out =Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_segment_positions.png"
-        for path in render_groups(cfg, out, args=args):
+        renderer = {"item": render_groups_by_item,
+                    "scene": render_scenes}.get(args.color_by, render_groups)
+        for path in renderer(cfg, out, args=args):
             print(f"[ok] wrote {path}", file=sys.stderr)
         return
 
@@ -1396,6 +1784,9 @@ def main():
     if args.bin_size is None:
         args.bin_size = DEFAULT_BIN_SIZE[args.density]
     args.per_task = bool(args.per_task)
+    if args.color_by not in (None, "none"):
+        raise SystemExit("--color-by item needs --config (it colours by step "
+                         "range and object across one shared figure)")
     if args.step_range and "," in str(args.step_range):
         raise SystemExit("several --step-range values are only supported with "
                          "--config, where they share one view and count scale")
