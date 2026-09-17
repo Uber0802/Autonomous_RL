@@ -56,8 +56,9 @@ identify a group by.
 Only for T1280 and longer (`--no-reset-split` / `--no-per-group` to opt out).
 At `segment_len = 80` an episode holds `episode_len / 80` segments, so T1280 is
 the first horizon whose 16 make a shape; T320's 4 and T80's 1 do not, and those
-runs are drawn whole with the reason on stderr. A resume chain is only as
-splittable as its coarsest leg. A run whose resets fire faster than the horizon
+runs are drawn whole with the reason on stderr. In a resume chain the decision
+is per leg: a T320 -> T2560 curriculum (CL) has every T2560 inter-reset piece in
+its own colour, and its T320 leg drawn whole in grey. A run whose resets fire faster than the horizon
 implies — HSR soft-resets at segment boundaries — is caught by a second guard on
 the measured piece length.
 
@@ -91,7 +92,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot_common import (CURVE_LEGEND, RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E402
-                         RESET_SPLIT_MIN_PIECE, X_LABEL, NoData, concat_chain,
+                         RESET_SPLIT_MIN_PIECE, SHORT_HORIZON_COLOR, X_LABEL,
+                         NoData, concat_chain, piece_colors,
                          default_colors, load_plot_config, new_curve_figure,
                          out_variant, piece_labels, plot_group_curve,
                          plot_reset_segmented_curve, prepend_origin,
@@ -291,9 +293,11 @@ class GroupCurve:
     resets: np.ndarray
     n_series: int
     # Shortest `episode_len` among the group's runs, or None if no run said.
-    # Shortest, not mean: a resume chain that spans T320 -> T2560 is only as
-    # splittable as its coarsest leg.
     episode_len: Optional[float]
+    # `episode_len` of the run that produced each x (min across series), so a
+    # T320 -> T2560 curriculum chain is split only on its T2560 leg. `inf` =
+    # the run did not say (split on piece length alone); NaN = a gap point.
+    horizons: Optional[np.ndarray] = None
 
 
 def _episode_len(run_dir: Path, frame: pd.DataFrame) -> Optional[float]:
@@ -354,8 +358,10 @@ def collect_group(group, *, direction: str, metric: str,
             frame = segment_means(df, "total_steps")
             if frame.empty:
                 continue
-            frames.append(frame)
-            ep_lens.append(_episode_len(run_dir, frame))
+            ep_len = _episode_len(run_dir, frame)
+            frames.append(frame.assign(
+                horizon=np.inf if ep_len is None else ep_len))
+            ep_lens.append(ep_len)
         merged = concat_chain(frames, "total_steps")
         if len(merged):
             series.append(merged)
@@ -379,6 +385,11 @@ def collect_group(group, *, direction: str, metric: str,
          for k, s in enumerate(series)],
         axis=1,
     ).sort_index().median(axis=1).reindex(wide.index)
+    hor = pd.concat(
+        [s.set_index("total_steps")["horizon"].rename(k)
+         for k, s in enumerate(series)],
+        axis=1,
+    ).sort_index().min(axis=1).reindex(wide.index).to_numpy(dtype=float)
     if smooth > 1:
         wide = wide.rolling(smooth, min_periods=1).mean()
     mean, std = wide.mean(axis=1), wide.std(axis=1)
@@ -393,38 +404,85 @@ def collect_group(group, *, direction: str, metric: str,
         # would invent a reset boundary at the very first recorded segment for
         # any run that starts mid-way (a resume).
         resets = np.concatenate(([resets[0] if resets.size else np.nan], resets))
+        hor = np.concatenate((hor[:1], hor))
     # Segments no series recorded are a hole, not a straight line between the
     # points around them.
-    x, mean_y, std_y, resets = break_gaps(x, mean_y, std_y, resets)
+    x, mean_y, std_y, resets, hor = break_gaps(x, mean_y, std_y, resets, hor)
 
     known = [e for e in ep_lens if e is not None]
     return GroupCurve(label=group.label, x=x, mean=mean_y, std=std_y,
                       resets=resets, n_series=n,
-                      episode_len=min(known) if known else None)
+                      episode_len=min(known) if known else None,
+                      horizons=hor)
 
 
 def reset_split_plan(curve: GroupCurve):
-    """`(pieces, reason_it_was_declined)` — exactly one of the two is meaningful.
+    """`(plan, reason_it_was_declined)` — exactly one of the two is meaningful.
+
+    `plan` is `(pieces, colors, labels)`. Only the stretches whose runs have
+    `episode_len >= RESET_SPLIT_MIN_EPISODE_LEN` are split at their resets, one
+    colour per piece; a shorter-horizon stretch (the T320 leg of a T320 ->
+    T2560 curriculum) is one piece in `SHORT_HORIZON_COLOR`. A group with no
+    long-horizon stretch is drawn whole.
 
     Declining is the normal outcome for a short-horizon run and is reported, not
     silently applied: a T320 curve drawn whole next to a split T2560 one is only
     readable if the figure says which it is.
     """
-    pieces = reset_pieces(curve.resets)
+    n = curve.x.size
+    hor = curve.horizons
+    if hor is None:
+        hor = np.full(n, np.inf if curve.episode_len is None else curve.episode_len)
+    # Gap points belong to the stretch before them.
+    hor = pd.Series(hor).ffill().bfill().to_numpy(dtype=float)
+    if np.isinf(hor).any():
+        warn(f"group '{curve.label}': episode_len unknown for part of the curve "
+             f"(no run_config.json and the CSV gave no segments-per-episode); "
+             f"splitting it on piece length alone")
+    long = hor >= RESET_SPLIT_MIN_EPISODE_LEN
+    if not long.any():
+        known = hor[np.isfinite(hor)]
+        shown = f"{known.max():g}" if known.size else "?"
+        return None, (f"episode_len={shown} < {RESET_SPLIT_MIN_EPISODE_LEN} "
+                      f"(T{RESET_SPLIT_MIN_EPISODE_LEN}+ only)")
+
+    # Contiguous stretches of one class; long ones are cut at their resets.
+    pieces, is_long = [], []
+    edges = np.flatnonzero(np.diff(long.astype(int))) + 1
+    for lo, hi in zip(np.r_[0, edges], np.r_[edges, n]):
+        if long[lo]:
+            for a, b in reset_pieces(curve.resets[lo:hi]):
+                pieces.append((lo + a, lo + b))
+                is_long.append(True)
+        else:
+            pieces.append((lo, hi))
+            is_long.append(False)
+    long_pieces = [pc for pc, lg in zip(pieces, is_long) if lg]
     if len(pieces) < 2:
         return None, "no reset boundary inside the plotted range"
-    if curve.episode_len is not None and curve.episode_len < RESET_SPLIT_MIN_EPISODE_LEN:
-        return None, (f"episode_len={curve.episode_len:g} < "
-                      f"{RESET_SPLIT_MIN_EPISODE_LEN} (T{RESET_SPLIT_MIN_EPISODE_LEN}+ only)")
-    if curve.episode_len is None:
-        warn(f"group '{curve.label}': episode_len unknown (no run_config.json and "
-             f"the CSV gave no segments-per-episode); splitting on piece length alone")
-    median_piece = float(np.median([hi - lo for lo, hi in pieces]))
+    median_piece = float(np.median([hi - lo for lo, hi in long_pieces]))
     if median_piece < RESET_SPLIT_MIN_PIECE:
         return None, (f"resets every {median_piece:g} segments on average, under "
                       f"{RESET_SPLIT_MIN_PIECE} — the pieces would be shorter than "
                       f"the trend inside them")
-    return pieces, None
+
+    long_colors = iter(piece_colors(len(long_pieces)))
+    long_labels = iter(piece_labels(curve.x, curve.resets, long_pieces))
+    colors, labels = [], []
+    short_named = set()
+    for (lo, hi), lg in zip(pieces, is_long):
+        if lg:
+            colors.append(next(long_colors))
+            name = next(long_labels)
+            if name is not None and not np.isinf(hor[lo]):
+                name = f"T{hor[lo]:g} {name}"
+            labels.append(name)
+        else:
+            colors.append(SHORT_HORIZON_COLOR)
+            tag = f"T{hor[lo]:g}" if np.isfinite(hor[lo]) else "short horizon"
+            labels.append(None if tag in short_named else f"{tag} (not split)")
+            short_named.add(tag)
+    return (pieces, colors, labels), None
 
 
 def render_main(curves, colors, out_path: Path, *, metric: str) -> Path:
@@ -450,15 +508,16 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     the single entry instead; carrying both would print it twice.
     """
     fig, ax = new_curve_figure()
-    pieces, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
-    if pieces:
+    plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
+    if plan:
+        pieces, colors, labels = plan
         plot_reset_segmented_curve(
             ax, curve.x, curve.mean, curve.std, pieces=pieces,
-            labels=piece_labels(curve.x, curve.resets, pieces),
-            n_series=curve.n_series)
-        print(f"[rollout] {curve.label}: split into {len(pieces)} inter-reset "
-              f"pieces (episode_len="
-              f"{'?' if curve.episode_len is None else f'{curve.episode_len:g}'})",
+            labels=labels, colors=colors, n_series=curve.n_series)
+        n_short = sum(c == SHORT_HORIZON_COLOR for c in colors)
+        print(f"[rollout] {curve.label}: split into {len(pieces) - n_short} "
+              f"inter-reset pieces"
+              + (f" + {n_short} short-horizon stretch drawn whole" if n_short else ""),
               file=sys.stderr)
     else:
         plot_group_curve(ax, curve.x, curve.mean, curve.std, color=color,
@@ -466,7 +525,7 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
         print(f"[rollout] {curve.label}: drawn whole — {declined}", file=sys.stderr)
     x_max = float(curve.x.max()) if curve.x.size else 0.0
     style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
-    if pieces:
+    if plan:
         ax.legend(title=curve.label, **CURVE_LEGEND)
     return save_curve_figure(fig, out_path)
 

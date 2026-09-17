@@ -17,13 +17,11 @@ one set per metric:
                                                     one per task
 
 x = position in the sequence, one bar per group at each position, with both
-domains in it: **in-domain is the filled bar, out-of-domain the hollow outline
-drawn over it** at the same x, in the group's colour. In-domain usually scores
-higher, so the outline's top sits inside the fill; the fill is a lighter tint
-of the hue so that edge stays visible, and an out-of-domain score above the
-in-domain one shows as outline above the fill. Bars are
-the mean over a group's series (seeds); the error bar is ±1 std across them and
-is drawn only when a group has more than one series.
+domains in it, aligned at the same x: **out-of-domain is the solid bar,
+in-domain the diagonally hatched bar drawn over it**, in the group's colour
+(the hatch a darker shade, so it stays visible over the solid part). In-domain
+usually scores higher and shows as hatching above the solid bar. Bars are the
+mean over a group's series (seeds); no spread is drawn or written.
 
 `<name>_seq_position.csv` carries every plotted number (a `metric` column
 tells the metrics apart), plus `n_trials`.
@@ -89,9 +87,14 @@ ALL_TASKS = "__all__"
 BAR_FIGSIZE = (6.4, 4.8)
 BAR_YLIM = (0.0, 1.02)
 BAR_EDGE_WIDTH = 1.8
-# In-domain fill tint: light enough that the out-of-domain outline drawn over
-# it stays visible.
-IN_DOMAIN_ALPHA = 0.5
+IN_DOMAIN_HATCH = "///"
+
+
+def hatch_color(color, factor: float = 0.55):
+    """A darker shade of `color` for the in-domain hatch, so it stays visible
+    where it crosses the same group's solid out-of-domain bar."""
+    from matplotlib.colors import to_rgb
+    return tuple(c * factor for c in to_rgb(color))
 
 
 def load_trials(run_dir: Path, *, required: bool) -> pd.DataFrame:
@@ -196,7 +199,7 @@ def collect(cfg: PlotConfig, *, metrics, seq_kind: str,
             required: bool) -> pd.DataFrame:
     """Every group's rates, aggregated over its series, for every metric.
 
-    Columns: metric, group, eval_kind, task, position, mean, std, n_series,
+    Columns: metric, group, eval_kind, task, position, mean, n_series,
     n_trials. A (metric, group, eval_kind, task, position) with no trial in any
     series has no row at all — "no data" is never written as a 0.
     """
@@ -233,13 +236,13 @@ def collect(cfg: PlotConfig, *, metrics, seq_kind: str,
             "  The [warn] lines above name the groups. Each `runs` entry must be a\n"
             "  standalone eval's glob/ dir holding eval_per_trial.csv (training\n"
             "  runs have none), and --seq-kind / --metric must exist in it.")
-    cols = ["metric", "group", "eval_kind", "task", "position", "mean", "std",
+    cols = ["metric", "group", "eval_kind", "task", "position", "mean",
             "n_series", "n_trials"]
     return pd.concat(rows, ignore_index=True)[cols]
 
 
 def aggregate_group(label: str, series, metric: str):
-    """One group's per-(eval_kind, task, position) mean/std over its series, or
+    """One group's per-(eval_kind, task, position) mean over its series, or
     None when no series has a value for `metric`.
 
     Each bar is the mean over the series that ran it; a series that did not
@@ -262,9 +265,6 @@ def aggregate_group(label: str, series, metric: str):
     stacked = pd.concat([s.assign(series=i) for i, s in enumerate(per_series)])
     agg = (stacked.groupby(["eval_kind", "task", "position"])
                       .agg(mean=("rate", "mean"),
-                           # ddof=0 would report a spread of 0 for one series;
-                           # NaN is what "not measured" is, and draws no bar.
-                           std=("rate", lambda v: v.std(ddof=1) if len(v) > 1 else np.nan),
                            n_series=("series", "nunique"),
                            n_trials=("n_trials", "sum"))
                       .reset_index())
@@ -274,7 +274,7 @@ def aggregate_group(label: str, series, metric: str):
 def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 metric: str, legend_title=None):
     """One bar chart: x = position, one bar per group at each, holding both
-    domains (in-domain filled, out-of-domain hollow outline on top).
+    domains (out-of-domain solid, in-domain hatched on top).
 
     `color_of` maps every group to its colour (so a group keeps its hue across
     figures); a group with no row in `table` gets no bar slot and no legend
@@ -298,10 +298,7 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
             sub = (table[(table["group"] == group) & (table["eval_kind"] == domain)]
                    .set_index("position").reindex(positions))
             offset = (gi - (n_bars - 1) / 2) * width
-            filled = domain == "in_domain"
-            # The two domains share the bar; their error bars sit a little
-            # apart so they do not draw over each other.
-            err_dx = (-1 if filled else 1) * width * 0.15 if len(domains) > 1 else 0.0
+            in_domain = domain == "in_domain"
             # A position this (group, domain) never ran gets no bar rather
             # than a zero-height one, which would read as "always failed".
             ran = sub["mean"].notna().to_numpy()
@@ -309,25 +306,21 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 continue
             xs = (x0 + offset)[ran]
             ys = sub["mean"].to_numpy(dtype=float)[ran]
-            yerr = sub["std"].to_numpy(dtype=float)[ran]
-            if filled:
-                ax.bar(xs, ys, width=width * 0.92, color=color,
-                       alpha=IN_DOMAIN_ALPHA, linewidth=0, zorder=2)
-            else:
+            if in_domain:
                 ax.bar(xs, ys, width=width * 0.92, facecolor="none",
-                       edgecolor=color, linewidth=BAR_EDGE_WIDTH, zorder=3)
-            if not np.isnan(yerr).all():
-                ax.errorbar(xs + err_dx, ys, yerr=np.nan_to_num(yerr),
-                            fmt="none", ecolor="0.25" if filled else color,
-                            elinewidth=1.0, capsize=2.5, zorder=4)
+                       edgecolor=hatch_color(color), hatch=IN_DOMAIN_HATCH,
+                       linewidth=BAR_EDGE_WIDTH, zorder=3)
+            else:
+                ax.bar(xs, ys, width=width * 0.92, color=color, linewidth=0,
+                       zorder=2)
             # A measured 0 is a flat bar the axis hides; mark it so it reads
             # as "always failed", distinct from an absent bar (not run).
             zero = ys == 0.0
             if zero.any():
                 ax.plot(xs[zero], ys[zero], linestyle="none", marker="_",
                         markersize=max(4.0, 260 * width * 0.92 / len(positions)),
-                        markeredgewidth=2.4, color=color, zorder=5, clip_on=False,
-                        alpha=IN_DOMAIN_ALPHA if filled else 1.0)
+                        markeredgewidth=2.4, zorder=5, clip_on=False,
+                        color=hatch_color(color) if in_domain else color)
 
     ax.set_xticks(x0, [str(p) for p in positions])
     ax.set_xlabel("position in sequence")
@@ -339,10 +332,11 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     # Two keys: colour = group (omitted for a single group, where it would label
     # the only hue), fill = domain.
     from matplotlib.patches import Patch
-    handles = [Patch(facecolor="0.45", alpha=IN_DOMAIN_ALPHA, linewidth=0,
-                     label=_DOMAIN_LABEL[d]) if d == "in_domain" else
-               Patch(facecolor="none", edgecolor="0.45", linewidth=BAR_EDGE_WIDTH,
-                     label=_DOMAIN_LABEL[d]) for d in domains]
+    handles = [Patch(facecolor="none", edgecolor="0.3", hatch=IN_DOMAIN_HATCH,
+                     linewidth=BAR_EDGE_WIDTH, label=_DOMAIN_LABEL[d])
+               if d == "in_domain" else
+               Patch(facecolor="0.55", linewidth=0, label=_DOMAIN_LABEL[d])
+               for d in domains]
     if len(groups) > 1:
         handles = [Patch(facecolor=c, edgecolor=c, label=g)
                    for g, c in zip(groups, colors)] + handles
@@ -446,8 +440,8 @@ def main():
     seq_kind = cfg.option("seq_kind", args.seq_kind, "all")
 
     table = collect(cfg, metrics=metrics, seq_kind=seq_kind, required=required)
-    print(f"[seq] metrics={metrics}, seq_kind={seq_kind}; error bar = ±1 std "
-          f"across series", file=sys.stderr)
+    print(f"[seq] metrics={metrics}, seq_kind={seq_kind}; bar = mean across "
+          f"series", file=sys.stderr)
     report(table)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = cfg.out_dir / f"{cfg.name}_seq_position.csv"

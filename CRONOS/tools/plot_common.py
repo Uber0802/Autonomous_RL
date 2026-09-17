@@ -505,8 +505,20 @@ def piece_colors(n: int):
     one group, and the legend's title names it, so the hue is free to carry the
     reset index instead. The first four entries are the maximally-separated
     head of `tab10` (blue, orange, green, red).
+
+    Greys are left out: `SHORT_HORIZON_COLOR` marks the unsplit short-horizon
+    stretch of a curriculum chain, and a piece must not be mistaken for it.
     """
-    return default_colors(n)
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap("tab10" if n <= 9 else "tab20")
+    palette = [c for c in (cmap(i) for i in range(cmap.N))
+               if max(c[:3]) - min(c[:3]) > 0.05]
+    return [palette[i % len(palette)] for i in range(n)]
+
+
+# The part of a curve whose runs are too short-horizon to split (the T320 leg
+# of a T320 -> T2560 curriculum) is drawn whole in this colour.
+SHORT_HORIZON_COLOR = "0.45"
 
 
 def reset_pieces(resets):
@@ -558,7 +570,7 @@ def piece_labels(x, resets, pieces, *, max_labelled: int = 10):
 
 def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
                                pieces=None, labels=None, n_series=None,
-                               mark_resets=True):
+                               mark_resets=True, colors=None):
     """One group's curve, split at its resets, a distinct colour per piece.
 
     Same line width, band and clipping as `plot_group_curve` — only the colour
@@ -568,6 +580,8 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
     Pieces are drawn joined: each starts at its predecessor's last point, so the
     line is continuous and the colour change alone marks the reset. The dotted
     rule sits between the two points, which is where the reset actually happened.
+
+    `colors` gives each piece its colour (default: `piece_colors`).
     """
     import numpy as np
     x = np.asarray(x, dtype=float)
@@ -577,7 +591,7 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
         pieces = reset_pieces(resets if resets is not None else np.zeros_like(x))
     if labels is None:
         labels = [None] * len(pieces)
-    shades = piece_colors(len(pieces))
+    shades = list(colors) if colors is not None else piece_colors(len(pieces))
     band = std is not None and (n_series is None or n_series > 1)
     for i, (lo, hi) in enumerate(pieces):
         start = lo - 1 if i else lo          # join to the previous piece
