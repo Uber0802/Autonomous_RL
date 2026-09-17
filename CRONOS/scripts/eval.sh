@@ -19,6 +19,13 @@
 # argument override it. Resolved values land in <glob>/eval_plan.json before rollout.
 # Resume an interrupted eval:  ... - <cuda> 4 --eval-resume <old glob dir>
 #
+# Policy (OpenVLA or SpatialVLA) is not set here: eval_only.py takes policy,
+# vla_path, vla_unnorm_key, vla_temperature_eval and vla_lora_rank from the
+# checkpoint's training run_config (then the config YAML, then per-policy
+# defaults). Override any of them with extra flags, e.g. for a checkpoint without
+# a run_config:
+#   bash scripts/eval.sh <ckpt> - 0 4 --policy spatialvla
+#
 # Output directory: defaults to a sibling `eval/` of the checkpoint's run, i.e.
 # the eval lands inside the same run tree as the checkpoint it evaluates instead
 # of wherever the shell happened to be. Override with:
@@ -83,8 +90,6 @@ python eval_only.py \
     --name "CRONOS-eval" \
     --seed 0 \
     --env-id PickPlaceNxM-v1 \
-    --vla-path openvla/openvla-7b \
-    --vla-unnorm-key bridge_orig \
     "${CONFIG_ARGS[@]}" \
     --segment-len 80 \
     --num-eval-episode $NUM_EVAL_EP \

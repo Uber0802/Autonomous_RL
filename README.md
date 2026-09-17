@@ -427,6 +427,14 @@ bash scripts/eval.sh /path/to/glob/episode_0128 - 0 4 --eval-resume /path/to/eva
 `--num-envs` is **not** needed — it is the sum of per-group `num_envs`, and eval
 refuses a batch that does not match it (no padding envs).
 
+**OpenVLA and SpatialVLA** use the same command. `policy`, `vla_path`,
+`vla_unnorm_key`, `vla_temperature_eval` and `vla_lora_rank` come from the
+checkpoint's training `run_config` (then the config YAML, then defaults matching
+`train.sh` — SpatialVLA: `bridge_orig/1.0.0`, greedy decoding). Pass
+`--policy spatialvla` etc. after the 4th argument only to override, e.g. for a
+checkpoint without a run_config. The resolved values and their sources are printed
+at startup and stored in `eval_plan.json`.
+
 **Coverage** (`four_group_sequential_2x2`, one pose set, per domain, per scene):
 training round 64 trials (16 per task), random rounds 320 trials (80 per task),
 4 start poses; 245,760 env-steps for all scenes and both domains. `serial` gives
@@ -463,7 +471,8 @@ Eval flags (the bracketed name is the `eval:` key):
 | `--record-video` / `--video-envs-per-block` | true / -1 | videos, first K envs of each block |
 | `--record-eval-pose` / `--eval-pose-phase` | true / `both` | pose CSV |
 | `--segment-len` | 80 | Steps per task rollout |
-| `--vla-temperature-eval` | 0.6 | Sampling temperature for the policy |
+| `--policy` / `--vla-path` / `--vla-unnorm-key` / `--vla-temperature-eval` / `--vla-lora-rank` | from the checkpoint | override the training policy settings |
+| `--action-chunk` | 1 | SpatialVLA open-loop chunk length |
 
 Removed: `--eval-sequences`, `--eval-training-sequence`, and the YAML keys
 `num_sequences`, `include_training_sequence`, `training_orders`, `random_orders`,
@@ -630,7 +639,12 @@ scene is the *k*-th entry of its `obj:` list (receptacles: `recep:`), mapped to
 and scenes own env ranges in `num_envs` order. The config is the run's
 `experiment_config.yaml` snapshot, or else `run_config.json`'s `config_path` as it
 is in this checkout now (stderr says which). PyYAML is used when installed;
-otherwise a small parser reads the `groups:` keys it needs.
+otherwise a small parser reads the `groups:` keys it needs. Fallbacks, each
+announced with `[warn]`: without the config, scenes come from the run's
+`rollout_success.csv` (`group` per env) and the actor order from the slot index;
+without the model tables, models are matched by their number prefix
+(`007_ketchup bottle_1` → 7). Rows no source can place are drawn as scene
+`unknown` — if a figure is named `unknown_…`, read the warnings.
 
 **Comparing stretches of training.** In `--config` mode `--step-range` takes
 several comma-separated ranges; each becomes its own figure (or colour, with
@@ -674,8 +688,11 @@ the error bar is ±1 std across a group's series (drawn only with > 1 series).
 
 ```bash
 python tools/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
-python tools/plot_sequence_eval.py --config my_evals.json --seq-kind random
+python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json --seq-kind random
 ```
+
+A ready-to-edit config is [`tools/plot_sequence_example.json`](CRONOS/tools/plot_sequence_example.json);
+it also shows a group whose seed was evaluated as two round shards.
 
 | Output | Contents |
 |---|---|

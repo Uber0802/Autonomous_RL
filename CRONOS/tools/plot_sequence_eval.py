@@ -7,7 +7,7 @@ files are laid out for: **does the success rate depend on where in the sequence
 the task sits?**
 
     python tools/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
-    python tools/plot_sequence_eval.py --config tools/plot_runs_example.json
+    python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json
 
 Figures (one PNG each, never a grid — the convention of the other plot tools):
 

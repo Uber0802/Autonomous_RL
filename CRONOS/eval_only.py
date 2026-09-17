@@ -37,7 +37,8 @@ from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler
 import envs.bridge_multi  # Trigger environment registration
 from evaluation.plan import build_plan, build_scenes, checkpoint_progress, plan_fingerprint, resolve_eval_settings
-from evaluation.provenance import check_against_training, resolve_config_path, scene_definition
+from evaluation.provenance import (check_against_training, resolve_config_path, resolve_policy_args,
+                                   scene_definition)
 from evaluation.sequential import SequentialEvaluator
 
 
@@ -87,6 +88,12 @@ class EvalArgs:
     num_groups: int = 0
 
     # --- VLA model ---
+    # policy / vla_path / vla_unnorm_key / vla_temperature_eval / vla_lora_rank are
+    # resolved per field: explicit CLI flag > the checkpoint's training run_config >
+    # the config YAML > per-policy defaults (openvla: bridge_orig, temperature 0.6;
+    # spatialvla: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge, bridge_orig/1.0.0,
+    # temperature 0.0 — as scripts/train.sh). The defaults written here only
+    # matter when a flag is passed. See evaluation/provenance.py.
     policy: str = "openvla"                 # {"openvla", "spatialvla"} — picks the policy class
     vla_path: str = "openvla/openvla-7b"
     vla_load_path: str = ""
@@ -172,6 +179,12 @@ class EvalRunner:
         yaml_config = load_cronos_config(args.config_path)
         check_against_training(yaml_config, self.provenance, load_cronos_config, args.allow_config_mismatch)
         print(f"[eval] training config check: {self.provenance['check']}")
+        # Policy settings must be known before the policy is built.
+        self.provenance["policy_args"] = resolve_policy_args(args, sys.argv[1:], args.vla_load_path, yaml_config)
+        pa = self.provenance["policy_args"]
+        print("[eval] policy: " + ", ".join(f"{k}={v!r} ({pa['sources'][k]})" for k, v in pa["values"].items()))
+        for w in pa["warnings"]:
+            print(f"[eval] WARNING: {w}")
         import shutil as _shutil
         if not (args.eval_resume and (self.glob_dir / "experiment_config.yaml").exists()):
             _shutil.copy2(args.config_path, self.glob_dir / "experiment_config.yaml")

@@ -366,6 +366,16 @@ class CronosRunner:
             if self.yaml_config.groups and not self._cli_provided("env_m"):
                 args.env_m = max(len(g.recep) for g in self.yaml_config.groups)
 
+        if (args.eval_single or args.eval_sequential) and args.vla_load_path:
+            # Standalone eval: use the policy settings the checkpoint was trained
+            # with (CLI still wins), as eval_only.py does.
+            from evaluation.provenance import resolve_policy_args
+            self._eval_policy_args = resolve_policy_args(args, sys.argv[1:], args.vla_load_path,
+                                                         self.yaml_config)
+            for w in self._eval_policy_args["warnings"]:
+                print(f"[eval] WARNING: {w}")
+            self._dump_run_config()   # the first dump predates the resolution
+
         # Initialize Policy (matching AutoRL order: policy before env).
         # `--policy` switch: pick the adapter at construction time. Each
         # adapter exposes the same surface (`get_action`, `evaluate_actions`,
@@ -912,6 +922,8 @@ class CronosRunner:
         from envs.config import load_cronos_config
         provenance = dict(config_path=a.config_path, config_source="cli", checkpoint=a.vla_load_path,
                           **find_training_config(a.vla_load_path, Path(__file__).resolve().parent))
+        if getattr(self, "_eval_policy_args", None):
+            provenance["policy_args"] = self._eval_policy_args
         if self.yaml_config is not None:
             check_against_training(self.yaml_config, provenance, load_cronos_config, a.allow_config_mismatch)
         scenes = build_scenes(self.scheduler.group_states, a.num_envs,

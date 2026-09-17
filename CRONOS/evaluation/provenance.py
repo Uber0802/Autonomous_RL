@@ -140,3 +140,73 @@ def check_against_training(eval_cfg, provenance: dict, load_fn, allow_mismatch: 
             "\nEval uses the training config by default — drop --config-path, or pass "
             "--allow-config-mismatch to evaluate on a different environment on purpose.")
     return provenance
+
+
+# ---------------------------------------------------------------------------
+# Policy settings: which VLA the checkpoint was trained with
+# ---------------------------------------------------------------------------
+
+# Fields that must match training for an eval to mean anything. Resolution per
+# field: explicit CLI flag > checkpoint run_config (training args) > config YAML
+# (`policy`, `vla_path`, `vla_unnorm_key`) > per-policy default below.
+POLICY_FIELDS = ("policy", "vla_path", "vla_unnorm_key", "vla_temperature_eval", "vla_lora_rank")
+
+# Per-policy defaults, mirroring scripts/train.sh's VLA_ARGS so a checkpoint
+# without a run_config is still evaluated the way train.sh would have trained it.
+POLICY_DEFAULTS = {
+    "openvla": dict(vla_path="openvla/openvla-7b", vla_unnorm_key="bridge_orig",
+                    vla_temperature_eval=0.6, vla_lora_rank=32),
+    "spatialvla": dict(vla_path="IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge",
+                       vla_unnorm_key="bridge_orig/1.0.0", vla_temperature_eval=0.0, vla_lora_rank=32),
+}
+_YAML_POLICY_KEYS = ("policy", "vla_path", "vla_unnorm_key")
+
+
+def resolve_policy_args(args, argv, ckpt_dir: str, yaml_cfg=None) -> dict:
+    """Set `args.<POLICY_FIELDS>` and return a record of values, sources and warnings.
+
+    The checkpoint's run_config is only trusted for a field when it was written
+    by the same policy the eval resolves to — a run_config from an OpenVLA run
+    says nothing about SpatialVLA's unnorm key. Run configs from before the
+    `policy` field existed are OpenVLA runs.
+    """
+    from evaluation.plan import cli_flag_given
+
+    rc = _read_run_config(Path(ckpt_dir)) if ckpt_dir else None
+    rc = rc or {}
+    rc_policy = rc.get("policy", "openvla") if rc else None
+    values, sources, warnings = {}, {}, []
+
+    def pick(field, default):
+        if cli_flag_given(field, argv):
+            return getattr(args, field), "cli"
+        if rc and field in rc and (field == "policy" or rc_policy == values.get("policy")):
+            return rc[field], "checkpoint run_config"
+        if yaml_cfg is not None and field in _YAML_POLICY_KEYS and getattr(yaml_cfg, field, None) is not None:
+            yaml_policy = getattr(yaml_cfg, "policy", None) or "openvla"
+            if field == "policy" or yaml_policy == values.get("policy"):
+                return getattr(yaml_cfg, field), "config yaml"
+        return default, "default"
+
+    values["policy"], sources["policy"] = pick("policy", "openvla")
+    if values["policy"] not in POLICY_DEFAULTS:
+        raise ValueError(f"unknown policy {values['policy']!r}; expected one of {sorted(POLICY_DEFAULTS)}")
+    for field in POLICY_FIELDS[1:]:
+        values[field], sources[field] = pick(field, POLICY_DEFAULTS[values["policy"]][field])
+
+    if rc:
+        if rc_policy != values["policy"]:
+            warnings.append(f"checkpoint was trained with policy={rc_policy!r} but eval uses "
+                            f"{values['policy']!r}; training settings were not used")
+        else:
+            for field in POLICY_FIELDS[1:]:
+                if field in rc and sources[field] == "cli" and rc[field] != values[field]:
+                    warnings.append(f"{field}={values[field]!r} from the command line differs from "
+                                    f"training ({rc[field]!r})")
+    else:
+        warnings.append("checkpoint has no run_config; policy settings come from "
+                        + ("the config / defaults" if ckpt_dir else "the command line / defaults"))
+
+    for field, value in values.items():
+        setattr(args, field, value)
+    return dict(values=values, sources=sources, warnings=warnings)

@@ -1231,26 +1231,43 @@ def scene_config_path(run_dir: Path):
     return None, False
 
 
+def _model_index_maps() -> dict:
+    """kind -> {model_name: 1-based index in its model table}, or None for a
+    kind whose table is not on disk (ManiSkill assets not downloaded)."""
+    out = {}
+    for kind, db in _MODEL_DB.items():
+        out[kind] = ({name: i for i, name in enumerate(json.loads(db.read_text()), 1)}
+                     if db.exists() else None)
+    return out
+
+
+def _model_number(name: str):
+    """`007_ketchup bottle_1` -> 7. Every key of both shipped tables starts
+    with its own 1-based position, which is the fallback when a table is
+    missing."""
+    import re
+    m = re.match(r"^(\d+)_", str(name))
+    return int(m.group(1)) if m else None
+
+
 def scene_actor_table(run_dir: Path):
-    """`(env, actor_kind, model_name) -> (scene, item)` from the scene config.
+    """`(env, actor_kind, model_idx) -> (scene, item)` from the scene config.
 
     `scene` is the YAML group name; `item` is the actor's 1-based position in
     that group's `obj:` / `recep:` list — "object 1" of group_A is its first
-    `obj:` entry, whatever slot the env put it in. Env ranges follow the
-    groups' `num_envs` in file order, as `envs/config.py::get_group_starts`
-    lays them out. Returns None (with a warning) when any of that is missing.
+    `obj:` entry, whatever slot the env put it in. `model_idx` is the value
+    written in that list. Env ranges follow the groups' `num_envs` in file
+    order, as `envs/config.py::get_group_starts` lays them out. Returns None
+    (with a warning) when the config cannot be found or read.
     """
     path, is_snapshot = scene_config_path(run_dir)
     if path is None:
-        warn(f"{Path(run_dir).name}: no scene config found (no "
-             f"experiment_config.yaml, run_config.json config_path missing here)")
+        rc = read_run_config(run_dir) or {}
+        warn(f"{Path(run_dir).name}: scene config not found — no "
+             f"experiment_config.yaml in the run dir, and config_path="
+             f"{rc.get('config_path')!r} exists neither as given nor under "
+             f"{_CRONOS_ROOT}")
         return None
-    keys = {}
-    for kind, db in _MODEL_DB.items():
-        if not db.exists():
-            warn(f"{kind} model table not found at {db}")
-            return None
-        keys[kind] = list(json.loads(db.read_text()))
     rows, start = [], 0
     for gi, g in enumerate(_read_scene_groups(path)):
         n = int(g.get("num_envs") or 0)
@@ -1258,43 +1275,86 @@ def scene_actor_table(run_dir: Path):
             warn(f"{path}: group {g.get('name')!r} lacks num_envs / obj — "
                  f"cannot place its envs")
             return None
-        scene = str(g.get("name") or f"group_{gi}")
+        scene = str(g.get("name") or f"scene{gi}")
         for kind in ("obj", "recep"):
             for item, idx in enumerate(g.get(kind) or [], start=1):
-                if not 1 <= int(idx) <= len(keys[kind]):
-                    warn(f"{path}: {kind} index {idx} outside the model table")
-                    return None
-                name = keys[kind][int(idx) - 1]
-                rows += [(env, kind, name, scene, item)
+                rows += [(env, kind, int(idx), scene, item)
                          for env in range(start, start + n)]
         start += n
+    if not rows:
+        warn(f"{path}: no `groups:` found")
+        return None
     rc = read_run_config(run_dir) or {}
     if rc.get("num_envs") and int(rc["num_envs"]) != start:
         warn(f"{path}: groups cover {start} envs, the run had {rc['num_envs']}")
-    if not is_snapshot:
-        print(f"[scene] {Path(run_dir).name}: actor order from {path} (the file "
-              f"as it is now — the run left no experiment_config.yaml snapshot)",
-              file=sys.stderr)
-    return pd.DataFrame(rows, columns=["env", "actor_kind", "model_name",
+    note = "" if is_snapshot else (" (the file as it is now — the run left no "
+                                   "experiment_config.yaml snapshot)")
+    print(f"[scene] {Path(run_dir).name}: scenes and actor order from {path}{note}",
+          file=sys.stderr)
+    return pd.DataFrame(rows, columns=["env", "actor_kind", "model_idx",
                                        "scene", "item"])
 
 
+def env_groups_from_rollout(run_dir: Path):
+    """env -> YAML group name, from the run's own `rollout_success.csv`, which
+    records the group of every env. The fallback when the config is gone."""
+    path = Path(run_dir) / "rollout_success.csv"
+    try:
+        r = pd.read_csv(path, usecols=["env_idx", "group"])
+    except (FileNotFoundError, ValueError, pd.errors.EmptyDataError):
+        return None
+    r = r.dropna().drop_duplicates()
+    if r.empty or r["env_idx"].duplicated().any():
+        return None
+    return r.rename(columns={"env_idx": "env", "group": "scene"})
+
+
 def annotate_scene_items(df: pd.DataFrame, run_dir: Path) -> pd.DataFrame:
-    """Add `scene` and `item` to the obj / recep rows. Rows the scene config
-    does not explain fall back to scene `?` and `slot + 1`, with a count."""
+    """Add `scene` and `item` to the obj / recep rows.
+
+    Preferred source is the scene config (`scene_actor_table`). When it cannot
+    be read, the scene comes from `rollout_success.csv` and the item order from
+    the slot index — which is the config order for the shipped presets, but is
+    not checked against it. Whatever is still unknown is labelled `unknown`,
+    and every fallback is announced on stderr.
+    """
+    name = Path(run_dir).name
+    maps = _model_index_maps()
+    df = df.copy()
+    idx = pd.Series(np.nan, index=df.index)
+    for kind, table in maps.items():
+        sel = df["actor_kind"] == kind
+        if table is None:
+            warn(f"{name}: {_MODEL_DB[kind]} not found — matching {kind} models "
+                 f"to the config by their number prefix")
+            idx[sel] = df.loc[sel, "model_name"].map(_model_number)
+        else:
+            idx[sel] = df.loc[sel, "model_name"].map(table)
+    df["model_idx"] = idx
+
     table = scene_actor_table(run_dir)
-    if table is None:
-        warn(f"{Path(run_dir).name}: actor order falls back to slot order, "
-             f"scenes unknown")
-        return df.assign(scene="?", item=df["slot"] + 1)
-    out = df.merge(table, on=["env", "actor_kind", "model_name"], how="left")
-    miss = out["item"].isna() & out["actor_kind"].isin(_KIND_ORDER)
-    if miss.any():
-        warn(f"{Path(run_dir).name}: {int(miss.sum())} rows not in the scene "
-             f"config — using slot order for them")
+    if table is not None:
+        out = df.merge(table, on=["env", "actor_kind", "model_idx"], how="left")
+    else:
+        out = df.assign(scene=np.nan, item=np.nan)
+
+    groups = env_groups_from_rollout(run_dir)
+    miss_scene = out["scene"].isna() & out["actor_kind"].isin(_KIND_ORDER)
+    if miss_scene.any():
+        if groups is not None:
+            out = out.merge(groups.rename(columns={"scene": "_scene_rs"}),
+                            on="env", how="left")
+            out["scene"] = out["scene"].fillna(out.pop("_scene_rs"))
+            warn(f"{name}: {int(miss_scene.sum())} rows took their scene from "
+                 f"rollout_success.csv and their object order from the slot index "
+                 f"(not checked against the scene config)")
+        else:
+            warn(f"{name}: {int(miss_scene.sum())} rows have no scene — neither "
+                 f"the scene config nor rollout_success.csv names it; they are "
+                 f"drawn as scene 'unknown'")
+    out["scene"] = out["scene"].fillna("unknown")
     out["item"] = out["item"].fillna(out["slot"] + 1).astype(int)
-    out["scene"] = out["scene"].fillna("?")
-    return out
+    return out.drop(columns=["model_idx"])
 
 
 def step_range_label(value: str) -> str:

@@ -52,6 +52,7 @@ flag counts only if it is on the command line (including `--no-…`).
 | `video_envs_per_block` | `--video-envs-per-block` | `-1` | first K envs of each block (1 = one video per order per round) |
 | `record_pose` | `--record-eval-pose` | `true` | `eval_segment_pose.csv` |
 | `pose_phase` | `--eval-pose-phase` | `both` | `start` / `end` / `both` |
+| — | `--policy`, `--vla-path`, `--vla-unnorm-key`, `--vla-temperature-eval`, `--vla-lora-rank` | from the checkpoint (§2b) | override the training policy settings |
 | — | `--eval-resume <glob>` | — | continue an interrupted eval in its directory (§6) |
 | — | `--allow-config-mismatch` | false | evaluate a config whose scenes differ from training (§2a) |
 
@@ -76,6 +77,33 @@ stops eval before the model loads. For old checkpoints without a snapshot, the
 comparison is against the recorded file as it is now, and the plan says so. The
 reduced-env configs under `configs/eval/` differ in `num_envs` and need
 `--allow-config-mismatch`.
+
+### 2b. Policy settings = the training run's (OpenVLA or SpatialVLA)
+
+`evaluation/provenance.py::resolve_policy_args` sets `policy, vla_path,
+vla_unnorm_key, vla_temperature_eval, vla_lora_rank` before the model loads,
+per field: explicit CLI flag > the checkpoint's training `run_config` > the config
+YAML (`policy`, `vla_path`, `vla_unnorm_key`) > per-policy defaults mirroring
+`scripts/train.sh`:
+
+| policy | vla_path | vla_unnorm_key | vla_temperature_eval |
+|---|---|---|---|
+| `openvla` | `openvla/openvla-7b` | `bridge_orig` | 0.6 |
+| `spatialvla` | `IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge` | `bridge_orig/1.0.0` | 0.0 (greedy) |
+
+So `scripts/eval.sh <ckpt>` evaluates a SpatialVLA checkpoint with no extra flags.
+The run_config is used only when its policy is the one being evaluated (a
+run_config without `policy` is an OpenVLA run). A CLI value that differs from
+training, a policy mismatch, or a checkpoint without run_config is printed as a
+warning and recorded in `eval_plan.json → provenance.policy_args`, and every
+resolved value is part of the fingerprint. Note that
+`configs/spatialvla_2x2_train.yaml` does not set `vla_temperature_eval`, so runs
+launched from it without `train.sh` trained with main.py's 0.6 — the run_config
+records which. `main.py --eval-single/--eval-sequential` applies the same
+resolution.
+
+`--action-chunk K` (SpatialVLA open-loop chunks) is an eval-only choice and is
+not taken from training.
 
 ## 3. Rounds
 

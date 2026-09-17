@@ -594,6 +594,86 @@ class TestProvenance(unittest.TestCase):
             resolve_config_path("", str(self.root / "nowhere"), self.root)
 
 
+class TestPolicyArgs(unittest.TestCase):
+    """evaluation.provenance.resolve_policy_args: which VLA settings eval uses."""
+
+    def args(self):
+        # eval_only.EvalArgs defaults
+        return SimpleNamespace(policy="openvla", vla_path="openvla/openvla-7b", vla_unnorm_key="bridge_orig",
+                               vla_temperature_eval=0.6, vla_lora_rank=32)
+
+    def ckpt(self, d, run_config):
+        c = Path(d) / "glob" / "episode_0008"
+        c.mkdir(parents=True)
+        if run_config is not None:
+            import yaml
+            (c / "run_config.yaml").write_text(yaml.safe_dump(run_config))
+        return str(c)
+
+    SPATIAL_RC = dict(policy="spatialvla", vla_path="IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge",
+                      vla_unnorm_key="bridge_orig/1.0.0", vla_temperature_eval=0.0, vla_lora_rank=32)
+
+    def test_spatialvla_checkpoint_needs_no_flags(self):
+        from evaluation.provenance import resolve_policy_args
+        with tempfile.TemporaryDirectory() as d:
+            a = self.args()
+            rec = resolve_policy_args(a, [], self.ckpt(d, self.SPATIAL_RC))
+            self.assertEqual((a.policy, a.vla_unnorm_key, a.vla_temperature_eval),
+                             ("spatialvla", "bridge_orig/1.0.0", 0.0))
+            self.assertEqual(set(rec["sources"].values()), {"checkpoint run_config"})
+            self.assertEqual(rec["warnings"], [])
+
+    def test_cli_wins_and_is_flagged(self):
+        from evaluation.provenance import resolve_policy_args
+        with tempfile.TemporaryDirectory() as d:
+            a = self.args()
+            a.vla_temperature_eval = 0.6
+            rec = resolve_policy_args(a, ["--vla-temperature-eval", "0.6"], self.ckpt(d, self.SPATIAL_RC))
+            self.assertEqual((a.policy, a.vla_temperature_eval), ("spatialvla", 0.6))
+            self.assertEqual(rec["sources"]["vla_temperature_eval"], "cli")
+            self.assertTrue(any("differs from training" in w for w in rec["warnings"]))
+
+    def test_other_policy_ignores_checkpoint_settings(self):
+        from evaluation.provenance import resolve_policy_args
+        with tempfile.TemporaryDirectory() as d:
+            a = self.args()
+            a.policy = "spatialvla"
+            rc = dict(policy="openvla", vla_path="openvla/openvla-7b", vla_unnorm_key="bridge_orig",
+                      vla_temperature_eval=0.6)
+            rec = resolve_policy_args(a, ["--policy", "spatialvla"], self.ckpt(d, rc))
+            self.assertEqual((a.vla_unnorm_key, a.vla_temperature_eval), ("bridge_orig/1.0.0", 0.0))
+            self.assertTrue(any("trained with policy='openvla'" in w for w in rec["warnings"]))
+
+    def test_old_run_config_without_policy_is_openvla(self):
+        from evaluation.provenance import resolve_policy_args
+        with tempfile.TemporaryDirectory() as d:
+            a = self.args()
+            resolve_policy_args(a, [], self.ckpt(d, dict(vla_path="/my/openvla", vla_temperature_eval=1.0)))
+            self.assertEqual((a.policy, a.vla_path, a.vla_temperature_eval), ("openvla", "/my/openvla", 1.0))
+
+    def test_yaml_then_defaults_without_run_config(self):
+        from evaluation.provenance import resolve_policy_args
+        with tempfile.TemporaryDirectory() as d:
+            a = self.args()
+            cfg = load_cronos_config(ROOT / "configs/spatialvla_2x2_train.yaml")
+            rec = resolve_policy_args(a, [], self.ckpt(d, None), cfg)
+            self.assertEqual((a.policy, a.vla_unnorm_key, a.vla_temperature_eval),
+                             ("spatialvla", "bridge_orig/1.0.0", 0.0))
+            self.assertEqual(rec["sources"]["policy"], "config yaml")
+            self.assertEqual(rec["sources"]["vla_temperature_eval"], "default")
+            self.assertTrue(any("no run_config" in w for w in rec["warnings"]))
+            b = self.args()
+            resolve_policy_args(b, [], "")
+            self.assertEqual((b.policy, b.vla_unnorm_key, b.vla_temperature_eval), ("openvla", "bridge_orig", 0.6))
+
+    def test_unknown_policy(self):
+        from evaluation.provenance import resolve_policy_args
+        a = self.args()
+        a.policy = "rt2"
+        with self.assertRaisesRegex(ValueError, "unknown policy"):
+            resolve_policy_args(a, ["--policy", "rt2"], "")
+
+
 class FakeT:
     """Minimal tensor stand-in with .detach().cpu().numpy()."""
     def __init__(self, a): self.a = a
