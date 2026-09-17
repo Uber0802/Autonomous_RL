@@ -44,7 +44,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (CURVE_FIGSIZE, GAP_FACTOR, NoData,  # noqa: E402
+from plot_common import (CURVE_FIGSIZE, NoData, gap_mask,  # noqa: E402
                          default_colors, sample_step, starts_at_origin,
                          new_curve_figure, plot_group_curve, prepend_origin,
                          read_table, resolve_out_dir, save_curve_figure,
@@ -183,6 +183,12 @@ def load_run_csv(csv_path: str,
         df = df[df["group"].isin(cronos_group_filter)].copy()
     if task_filter:
         df = df[df["task"].isin(task_filter)].copy()
+    # This file's own eval cadence on each x axis, carried per row so a resume
+    # chain whose legs eval at different intervals (T320 every 4 episodes,
+    # T2560 every episode) judges holes against the right one.
+    for x_axis in ("total_steps", "total_resets"):
+        step = sample_step(df[x_axis].to_numpy(dtype=float)) if len(df) else None
+        df[f"_step_{x_axis}"] = np.nan if step is None else step
     return df
 
 
@@ -230,13 +236,16 @@ def per_run_series(df: pd.DataFrame, eval_kind: str, x_axis: str,
     If the run never logged this `eval_kind`, returns an empty frame.
     """
     sub = df[df["eval_kind"] == eval_kind]
+    step_col = f"_step_{x_axis}"
     if sub.empty:
-        return pd.DataFrame(columns=[x_axis, metric])
+        return pd.DataFrame(columns=[x_axis, metric, step_col])
+    if step_col not in sub.columns:
+        sub = sub.assign(**{step_col: np.nan})
     means = (sub
-             .groupby(["episode", x_axis], as_index=False)[metric]
-             .mean()
+             .groupby(["episode", x_axis], as_index=False)
+             .agg(**{metric: (metric, "mean"), step_col: (step_col, "first")})
              .sort_values(x_axis))
-    return means[[x_axis, metric]].reset_index(drop=True)
+    return means[[x_axis, metric, step_col]].reset_index(drop=True)
 
 
 def per_run_series_per_task(df: pd.DataFrame, eval_kind: str, x_axis: str,
@@ -269,8 +278,8 @@ def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
     A grid point a run did not measure is NaN in that run's row, never a
     value bridged from its neighbours: before its first eval when its
     beginning is missing (only a run that starts at its first eval round is
-    anchored at (0, 0)), and inside any hole wider than `GAP_FACTOR` eval
-    intervals. Callers average with nan-aware reductions, so such a point is
+    anchored at (0, 0)), and inside any hole `gap_mask` finds — judged against
+    each leg's own eval interval. Callers average with nan-aware reductions, so such a point is
     the mean of the runs that have it, and NaN (a break in the line) when none
     do.
     """
@@ -281,14 +290,17 @@ def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
     for s in usable:
         x = s[x_axis].to_numpy(dtype=float)
         y = s[metric].to_numpy(dtype=float)
+        step_col = f"_step_{x_axis}"
+        step = (s[step_col].to_numpy(dtype=float) if step_col in s.columns
+                else np.full(x.size, np.nan))
         mask = np.isfinite(x) & np.isfinite(y)
-        x, y = x[mask], y[mask]
+        x, y, step = x[mask], y[mask], step[mask]
         if x.size == 0:
             continue
-        step = sample_step(x)
         if x[0] > 0.0 and starts_at_origin(x, step):
             x = np.concatenate(([0.0], x))
             y = np.concatenate(([0.0], y))
+            step = np.concatenate((step[:1], step))
         prepped.append((x, y, step))
     if not prepped:
         return np.empty((0,)), np.empty((0, n_points))
@@ -302,12 +314,12 @@ def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
     for x, y, step in prepped:
         row = np.interp(grid, x, y)
         row[(grid < x[0]) | (grid > x[-1])] = np.nan
-        if step is not None:
+        if x.size > 1:
             # Grid points strictly inside a hole between two evals.
+            holes = gap_mask(x, step)
             i = np.clip(np.searchsorted(x, grid, side="right"), 1, x.size - 1)
-            hole = (x[i] - x[i - 1]) > GAP_FACTOR * step
             inside = (grid > x[i - 1]) & (grid < x[i])
-            row[hole & inside] = np.nan
+            row[holes[i - 1] & inside] = np.nan
         rows.append(row)
     return grid, np.stack(rows, axis=0)
 

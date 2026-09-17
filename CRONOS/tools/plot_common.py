@@ -254,6 +254,36 @@ def sample_step(x):
     return float(np.median(d)) if d.size else None
 
 
+def _local_steps(x, step):
+    """`step` as an array aligned with `x`: a scalar is broadcast, an array
+    (one run's own cadence per point — a resume chain changes cadence between
+    legs) has its NaNs filled with the series-wide estimate."""
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    if step is None or np.ndim(step) == 0:
+        step = sample_step(x) if step is None else step
+        return np.full(x.size, np.nan if step is None else float(step))
+    step = np.asarray(step, dtype=float)
+    fallback = sample_step(x)
+    return np.where(np.isfinite(step), step,
+                    np.nan if fallback is None else fallback)
+
+
+def gap_mask(x, step=None):
+    """Boolean per spacing of `x` (length `x.size - 1`): True where the spacing
+    is a hole, i.e. wider than `GAP_FACTOR` × the cadence of the runs on both
+    sides of it (the larger of the two, so a chain that switches from a
+    coarse to a fine cadence is not read as holes)."""
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    if x.size < 2:
+        return np.zeros(0, dtype=bool)
+    st = _local_steps(x, step)
+    with np.errstate(invalid="ignore"):
+        thr = GAP_FACTOR * np.fmax(st[:-1], st[1:])
+        return np.diff(x) > thr          # NaN threshold -> False
+
+
 def starts_at_origin(x, step=None) -> bool:
     """Whether the series begins at its first sampling point, so that (0, 0)
     is the measurement just before it rather than across a hole.
@@ -269,8 +299,8 @@ def starts_at_origin(x, step=None) -> bool:
         return False
     if x[0] <= 0.0:
         return True
-    step = sample_step(x) if step is None else step
-    return step is None or x[0] <= GAP_FACTOR * step
+    first = _local_steps(x, step)[0]
+    return not np.isfinite(first) or x[0] <= GAP_FACTOR * first
 
 
 def prepend_origin(x, mean, std=None, step=None):
@@ -288,7 +318,7 @@ def prepend_origin(x, mean, std=None, step=None):
     Nothing is prepended when the series already starts at or before 0, or
     when its beginning is missing (see `starts_at_origin`): the curve then
     starts at its first real point instead of being joined to the origin.
-    `step` overrides the spacing estimated from `x`.
+    `step` overrides the spacing estimated from `x` (scalar, or per point).
     """
     import numpy as np
     x = np.asarray(x, dtype=float)
@@ -307,15 +337,15 @@ def break_gaps(x, *ys, step=None):
     """Insert a NaN point inside every hole of `x`, so a line is not drawn
     across missing samples. Returns `(x, *ys)` with the same number of arrays.
 
-    A hole is a spacing wider than `GAP_FACTOR` × the typical step (`step`, or
-    the one estimated from `x`). Arrays passed as None stay None.
+    A hole is what `gap_mask` says: a spacing wider than `GAP_FACTOR` × the
+    cadence around it (`step`: scalar or per point; estimated from `x` when
+    None). Arrays passed as None stay None.
     """
     import numpy as np
     x = np.asarray(x, dtype=float)
-    step = sample_step(x) if step is None else step
-    if step is None or x.size < 2:
+    if x.size < 2:
         return (x, *ys)
-    gaps = np.flatnonzero(np.diff(x) > GAP_FACTOR * step) + 1
+    gaps = np.flatnonzero(gap_mask(x, step)) + 1
     if gaps.size == 0:
         return (x, *ys)
     mids = 0.5 * (x[gaps - 1] + x[gaps])
