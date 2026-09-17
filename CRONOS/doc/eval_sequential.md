@@ -170,6 +170,20 @@ Implemented in [`../envs/rng_streams.py`](../envs/rng_streams.py). The env accep
 `options["layout_ids"]` and otherwise keeps its `torch.randint` draw, so training
 is unaffected.
 
+**What `--seed` does in eval.** It is only the default for the three stream seeds
+(`sequence_seed`, `layout_seed`, `policy_seed`). Its other uses have no effect on
+results: the global `random`/`numpy`/`torch` seeding at startup (the loop reseeds
+torch per round and draws nothing else), `rand_episode_id` (overlay index is 0 for
+any value ≤ 1000), the wrapper's `reset(seed=seed*1000+i)` (reseeds an episode RNG
+this env does not use), and the policy constructor's value-head/LoRA init (both
+replaced by the checkpoint). It is **not** taken from the checkpoint, and matching
+the training seed has no meaning: eval draws from its own streams, so even the same
+number gives different start states than training had. Keep one eval seed for
+every checkpoint you want to compare — they then see identical rounds; use
+`pose_sets` (or a different `layout_seed`) for more start states.
+`scripts/eval.sh` passes `--seed 0`; a later `--seed N` among the extra flags
+wins (tyro keeps the last occurrence), or set the three `--eval-*-seed` flags.
+
 ## 4. Start poses
 
 An env's start pose depends only on its **pose set** and its **slot** inside its

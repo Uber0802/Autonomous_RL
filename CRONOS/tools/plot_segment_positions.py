@@ -7,16 +7,17 @@ native granularity.
 A boundary is not one instant, which is what the `phase` column records:
 
     start   the state the segment BEGINS from — after that boundary's HSR
-            respawn and EER `reset_robot()` (whose `_settle(0.5)` also nudges
-            objects), and after the full `env.reset()` at an episode boundary.
+            respawn and EER `reset_robot()`, and after the full `env.reset()`
+            at an episode boundary.
             This is the initial-state distribution the forward policy faces,
             and what `--backward-goal` (perturbation) is meant to widen.
     end     the steady state the policy produced, before any of those resets.
             Anchor `workspace_aabb` bounds from this one.
 
 `--phase` defaults to `start`. They are not interchangeable: `--reset-robot` is
-on by default in every reset mode, so the gripper always differs between them
-and the objects often do.
+on by default in every reset mode, so the gripper always differs between them,
+and HSR respawns move the objects. `reset_robot()` itself leaves the objects
+where they are.
 
 A run recorded before the `phase` split holds only `end` rows, and `--phase
 start` then rebuilds them: the start of segment s is the recorded end of s-1
@@ -506,24 +507,17 @@ def _segments_per_episode(rc: dict):
 def _carryover_is_exact(rc: dict):
     """Whether the end of one segment IS the start of the next, exactly.
 
-    Between the `phase="end"` record and the next segment's first step the train
-    loop runs exactly two things that can move an actor, and nothing else:
-
-        --reset-unsuitable   HSR respawns the flagged envs to a fresh draw
-        --reset-robot        EER's `reset_robot()`, whose `_settle(0.5)` also
-                             lets objects drift
-
-    With both off, the boundary only reassigns the task and no `env.step` runs,
-    so the poses are unchanged and the carry-over is exact rather than merely
-    close. LSR is irrelevant here: `set_backward_goals` swaps the goal, not the
-    poses.
+    Between the `phase="end"` record and the next segment's first step the only
+    thing that moves an object is `--reset-unsuitable` (HSR respawns the flagged
+    envs to a fresh draw). `--reset-robot` (EER) re-homes the robot only; the
+    objects stay where the segment left them, so it does not break the
+    carry-over. LSR is irrelevant too: `set_backward_goals` swaps the goal, not
+    the poses.
 
     Returns `(exact, reason_if_not)`.
     """
     if rc.get("reset_unsuitable"):
         return False, "reset_unsuitable=True — HSR respawns flagged envs at the boundary"
-    if rc.get("reset_robot"):
-        return False, "reset_robot=True — EER's _settle(0.5) nudges objects"
     return True, ""
 
 

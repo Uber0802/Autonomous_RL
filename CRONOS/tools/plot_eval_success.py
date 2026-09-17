@@ -44,7 +44,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (CURVE_FIGSIZE, NoData, default_colors,  # noqa: E402
+from plot_common import (CURVE_FIGSIZE, GAP_FACTOR, NoData,  # noqa: E402
+                         default_colors, sample_step, starts_at_origin,
                          new_curve_figure, plot_group_curve, prepend_origin,
                          read_table, resolve_out_dir, save_curve_figure,
                          style_curve_axes, warn)
@@ -264,28 +265,50 @@ def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
     series_list: list of single-metric frames from `per_run_series`.
     Returns (x_grid, stacked) where stacked has shape (N_runs, n_points).
     Runs that are entirely empty are dropped.
+
+    A grid point a run did not measure is NaN in that run's row, never a
+    value bridged from its neighbours: before its first eval when its
+    beginning is missing (only a run that starts at its first eval round is
+    anchored at (0, 0)), and inside any hole wider than `GAP_FACTOR` eval
+    intervals. Callers average with nan-aware reductions, so such a point is
+    the mean of the runs that have it, and NaN (a break in the line) when none
+    do.
     """
     usable = [s for s in series_list if not s.empty]
     if not usable:
         return np.empty((0,)), np.empty((0, n_points))
-    # Prepend a (0, 0) start point so the curves all anchor at the origin.
     prepped = []
     for s in usable:
-        x = np.concatenate(([0.0], s[x_axis].to_numpy(dtype=float)))
-        y = np.concatenate(([0.0], s[metric].to_numpy(dtype=float)))
-        prepped.append((x, y))
-    # Common grid: min of left edges (== 0) to min of right edges.
+        x = s[x_axis].to_numpy(dtype=float)
+        y = s[metric].to_numpy(dtype=float)
+        mask = np.isfinite(x) & np.isfinite(y)
+        x, y = x[mask], y[mask]
+        if x.size == 0:
+            continue
+        step = sample_step(x)
+        if x[0] > 0.0 and starts_at_origin(x, step):
+            x = np.concatenate(([0.0], x))
+            y = np.concatenate(([0.0], y))
+        prepped.append((x, y, step))
+    if not prepped:
+        return np.empty((0,)), np.empty((0, n_points))
+    # Common grid: 0 to min of right edges.
     x_min = 0.0
-    x_max = min(x.max() for x, _ in prepped)
+    x_max = min(x.max() for x, _, _ in prepped)
     if x_clip is not None:
         x_max = min(x_max, float(x_clip))
     grid = np.linspace(x_min, x_max, n_points)
     rows = []
-    for x, y in prepped:
-        # Clip y to finite values only (np.interp handles monotone x already).
-        mask = np.isfinite(y)
-        rows.append(np.interp(grid, x[mask], y[mask],
-                              left=y[mask][0], right=y[mask][-1]))
+    for x, y, step in prepped:
+        row = np.interp(grid, x, y)
+        row[(grid < x[0]) | (grid > x[-1])] = np.nan
+        if step is not None:
+            # Grid points strictly inside a hole between two evals.
+            i = np.clip(np.searchsorted(x, grid, side="right"), 1, x.size - 1)
+            hole = (x[i] - x[i - 1]) > GAP_FACTOR * step
+            inside = (grid > x[i - 1]) & (grid < x[i])
+            row[hole & inside] = np.nan
+        rows.append(row)
     return grid, np.stack(rows, axis=0)
 
 
@@ -298,10 +321,11 @@ def moving_average(y: np.ndarray, window: int) -> np.ndarray:
     for i in range(len(y)):
         lo = max(0, i - half)
         hi = min(len(y), i + half + 1)
+        if not np.isfinite(y[i]):
+            continue            # a hole stays a hole; neighbours do not fill it
         seg = y[lo:hi]
         seg = seg[np.isfinite(seg)]
-        if seg.size > 0:
-            out[i] = seg.mean()
+        out[i] = seg.mean()
     return out
 
 
@@ -372,23 +396,33 @@ def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
                         n_points=cfg.n_interp_points, x_clip=x_clip)
                     if stacked.size == 0:
                         continue
-                    mean = stacked.mean(axis=0)
-                    std = stacked.std(axis=0, ddof=0)
-                    n_runs = stacked.shape[0]
-                    for x_v, m_v, s_v in zip(grid, mean, std):
+                    # NaN = that run did not measure this x; the mean is over
+                    # the runs that did, and NaN where none did.
+                    have = np.isfinite(stacked)
+                    counts = have.sum(axis=0)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        total = np.where(have, stacked, 0.0).sum(axis=0)
+                        mean = np.where(counts > 0, total / np.maximum(counts, 1), np.nan)
+                        sq = np.where(have, (stacked - mean) ** 2, 0.0).sum(axis=0)
+                        std = np.where(counts > 0, np.sqrt(sq / np.maximum(counts, 1)), np.nan)
+                    for x_v, m_v, s_v, c in zip(grid, mean, std, counts):
                         long_rows.append({
                             "group": spec.label, "eval_kind": eval_kind,
                             "x_axis": x_axis, "x_value": float(x_v),
                             "metric": metric, "mean": float(m_v),
-                            "std": float(s_v), "n_runs": n_runs,
+                            "std": float(s_v), "n_runs": int(c),
                         })
+                    last = np.flatnonzero(counts > 0)
+                    if last.size == 0:
+                        continue
+                    last = last[-1]
                     summary_rows.append({
                         "group": spec.label, "eval_kind": eval_kind,
                         "x_axis": x_axis, "metric": metric,
-                        "final_x": float(grid[-1]),
-                        "final_mean": float(mean[-1]),
-                        "final_std": float(std[-1]),
-                        "n_runs": n_runs,
+                        "final_x": float(grid[last]),
+                        "final_mean": float(mean[last]),
+                        "final_std": float(std[last]),
+                        "n_runs": int(counts[last]),
                     })
         if len(long_rows) == rows_before:
             # The CSVs loaded but nothing survived. Report the group's own
@@ -438,7 +472,7 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
         x = g_sub["x_value"].to_numpy()
         m = moving_average(g_sub["mean"].to_numpy(), cfg.smoothing_window)
         s = moving_average(g_sub["std"].to_numpy(), cfg.smoothing_window)
-        n = int(g_sub["n_runs"].iloc[0])
+        n = int(g_sub["n_runs"].max())
         x, m, s = prepend_origin(x, m, s)
         plot_group_curve(ax, x, m, s, color=_group_color(cfg, i, palette),
                          label=spec.label, n_series=n)

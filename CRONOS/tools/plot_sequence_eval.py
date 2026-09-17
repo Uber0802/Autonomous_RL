@@ -16,9 +16,12 @@ one set per metric:
     <name>_seq_position_<metric>_per_task/<name>_seq_position_<metric>_<task>.png
                                                     one per task
 
-x = position in the sequence, one bar per (group, domain) at each position.
-**In-domain bars are filled, out-of-domain bars hollow**, in the group's colour,
-so a group keeps one hue and the domain is read from the fill alone. Bars are
+x = position in the sequence, one bar per group at each position, with both
+domains in it: **in-domain is the filled bar, out-of-domain the hollow outline
+drawn over it** at the same x, in the group's colour. In-domain usually scores
+higher, so the outline's top sits inside the fill; the fill is a lighter tint
+of the hue so that edge stays visible, and an out-of-domain score above the
+in-domain one shows as outline above the fill. Bars are
 the mean over a group's series (seeds); the error bar is ±1 std across them and
 is drawn only when a group has more than one series.
 
@@ -85,7 +88,10 @@ ALL_TASKS = "__all__"
 
 BAR_FIGSIZE = (6.4, 4.8)
 BAR_YLIM = (0.0, 1.02)
-BAR_EDGE_WIDTH = 1.6
+BAR_EDGE_WIDTH = 1.8
+# In-domain fill tint: light enough that the out-of-domain outline drawn over
+# it stays visible.
+IN_DOMAIN_ALPHA = 0.5
 
 
 def load_trials(run_dir: Path, *, required: bool) -> pd.DataFrame:
@@ -267,7 +273,8 @@ def aggregate_group(label: str, series, metric: str):
 
 def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 metric: str, legend_title=None):
-    """One bar chart: x = position, one bar per (group, domain) at each.
+    """One bar chart: x = position, one bar per group at each, holding both
+    domains (in-domain filled, out-of-domain hollow outline on top).
 
     `color_of` maps every group to its colour (so a group keeps its hue across
     figures); a group with no row in `table` gets no bar slot and no legend
@@ -281,17 +288,20 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     colors = [color_of[g] for g in groups]
     domains = [d for d in _DOMAINS if d in set(table["eval_kind"])]
     positions = sorted(table["position"].unique())
-    n_bars = len(groups) * len(domains)
+    n_bars = len(groups)
     width = 0.8 / max(1, n_bars)
     fig, ax = plt.subplots(figsize=BAR_FIGSIZE)
     x0 = np.arange(len(positions), dtype=float)
 
     for gi, (group, color) in enumerate(zip(groups, colors)):
-        for di, domain in enumerate(domains):
+        for domain in domains:
             sub = (table[(table["group"] == group) & (table["eval_kind"] == domain)]
                    .set_index("position").reindex(positions))
-            offset = (gi * len(domains) + di - (n_bars - 1) / 2) * width
+            offset = (gi - (n_bars - 1) / 2) * width
             filled = domain == "in_domain"
+            # The two domains share the bar; their error bars sit a little
+            # apart so they do not draw over each other.
+            err_dx = (-1 if filled else 1) * width * 0.15 if len(domains) > 1 else 0.0
             # A position this (group, domain) never ran gets no bar rather
             # than a zero-height one, which would read as "always failed".
             ran = sub["mean"].notna().to_numpy()
@@ -300,18 +310,24 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
             xs = (x0 + offset)[ran]
             ys = sub["mean"].to_numpy(dtype=float)[ran]
             yerr = sub["std"].to_numpy(dtype=float)[ran]
-            ax.bar(xs, ys, width=width * 0.92,
-                   color=color if filled else "white", edgecolor=color,
-                   linewidth=BAR_EDGE_WIDTH, zorder=2,
-                   yerr=None if np.isnan(yerr).all() else np.nan_to_num(yerr),
-                   error_kw={"ecolor": "0.25", "elinewidth": 1.0, "capsize": 2.5})
+            if filled:
+                ax.bar(xs, ys, width=width * 0.92, color=color,
+                       alpha=IN_DOMAIN_ALPHA, linewidth=0, zorder=2)
+            else:
+                ax.bar(xs, ys, width=width * 0.92, facecolor="none",
+                       edgecolor=color, linewidth=BAR_EDGE_WIDTH, zorder=3)
+            if not np.isnan(yerr).all():
+                ax.errorbar(xs + err_dx, ys, yerr=np.nan_to_num(yerr),
+                            fmt="none", ecolor="0.25" if filled else color,
+                            elinewidth=1.0, capsize=2.5, zorder=4)
             # A measured 0 is a flat bar the axis hides; mark it so it reads
             # as "always failed", distinct from an absent bar (not run).
             zero = ys == 0.0
             if zero.any():
                 ax.plot(xs[zero], ys[zero], linestyle="none", marker="_",
                         markersize=max(4.0, 260 * width * 0.92 / len(positions)),
-                        markeredgewidth=2.4, color=color, zorder=3, clip_on=False)
+                        markeredgewidth=2.4, color=color, zorder=5, clip_on=False,
+                        alpha=IN_DOMAIN_ALPHA if filled else 1.0)
 
     ax.set_xticks(x0, [str(p) for p in positions])
     ax.set_xlabel("position in sequence")
@@ -323,9 +339,9 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     # Two keys: colour = group (omitted for a single group, where it would label
     # the only hue), fill = domain.
     from matplotlib.patches import Patch
-    handles = [Patch(facecolor="0.45", edgecolor="0.45", linewidth=BAR_EDGE_WIDTH,
+    handles = [Patch(facecolor="0.45", alpha=IN_DOMAIN_ALPHA, linewidth=0,
                      label=_DOMAIN_LABEL[d]) if d == "in_domain" else
-               Patch(facecolor="white", edgecolor="0.45", linewidth=BAR_EDGE_WIDTH,
+               Patch(facecolor="none", edgecolor="0.45", linewidth=BAR_EDGE_WIDTH,
                      label=_DOMAIN_LABEL[d]) for d in domains]
     if len(groups) > 1:
         handles = [Patch(facecolor=c, edgecolor=c, label=g)

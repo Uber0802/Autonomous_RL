@@ -111,9 +111,18 @@ from `(seed, episode)`, and restore every dedicated generator from the checkpoin
 - **Eval "deterministic" still samples.** `get_action(..., deterministic=True)`
   uses `vla_temperature_eval = 0.6`, not argmax. Eval outcomes are stochastic.
   **[read]**
-- **Object scale ignores `--seed`.** `_load_scene` draws one scale per model with
-  `self.np_random`, seeded by ManiSkill's fixed construction seeds (`2022 + i`); the
-  scale is shared by all envs. **[read]**
+- **Object scale is drawn from an unseeded generator — harmless today.**
+  `_load_scene` calls `self.np_random.choice(scale_list)` once per model at
+  construction. ManiSkill does not define `np_random`, so this is gymnasium's lazy
+  property, seeded from OS entropy on first use — not by `--seed` and not by
+  ManiSkill's `2022 + i` seeds. No model in `more_carrot` / `more_plate`
+  `model_db.json` (CRONOS or AutoRL) has a `scale` list, so every draw is from
+  `[1.0]` and the result is fixed. **[local]** Adding a multi-scale model would make
+  object size differ between processes; seed that draw explicitly first. (An
+  earlier version of this note said the fixed construction seeds applied; they do
+  not.) Construction is the only reconfigure: `reconfiguration_freq` is 0, so the
+  wrapper's `reset(seed=[seed*1000+i])` reseeds only the episode RNG, which this
+  env does not use. **[read]**
 - **Overlay/background is not random** in the shipped configs: an int `background`,
   or `background: default` derived from the fixed `rand_episode_id`. **[read]**
 - **Fan-out offset carries across episodes.** `TaskScheduler._fan_out_offsets`

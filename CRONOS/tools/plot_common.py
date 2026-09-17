@@ -239,7 +239,41 @@ def new_curve_figure(figsize=None):
     return plt.subplots(figsize=tuple(figsize or CURVE_FIGSIZE))
 
 
-def prepend_origin(x, mean, std=None):
+# A spacing wider than this many typical sample steps is a hole in the data
+# (missing segments / eval rounds), not the sampling interval.
+GAP_FACTOR = 1.5
+
+
+def sample_step(x):
+    """The series' typical x spacing (median of the positive differences), or
+    None when it has fewer than two distinct points."""
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    d = np.diff(np.unique(x))
+    return float(np.median(d)) if d.size else None
+
+
+def starts_at_origin(x, step=None) -> bool:
+    """Whether the series begins at its first sampling point, so that (0, 0)
+    is the measurement just before it rather than across a hole.
+
+    A series whose first point sits more than `GAP_FACTOR` steps from 0 lost its
+    beginning (a resumed child without its parent, early segments missing), and
+    joining it to the origin would draw a ramp nobody measured. A single-point
+    series has no step to judge by and keeps the anchor.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return False
+    if x[0] <= 0.0:
+        return True
+    step = sample_step(x) if step is None else step
+    return step is None or x[0] <= GAP_FACTOR * step
+
+
+def prepend_origin(x, mean, std=None, step=None):
     """Extend a curve back to (0, 0).
 
     Both figures start from an untrained policy, so the origin is a measured
@@ -251,19 +285,45 @@ def prepend_origin(x, mean, std=None):
     left edge. Anchoring at (0, 0) makes the left edge mean the same thing in
     every panel of both tools.
 
-    Nothing is prepended when the series already starts at or before 0.
+    Nothing is prepended when the series already starts at or before 0, or
+    when its beginning is missing (see `starts_at_origin`): the curve then
+    starts at its first real point instead of being joined to the origin.
+    `step` overrides the spacing estimated from `x`.
     """
     import numpy as np
     x = np.asarray(x, dtype=float)
     mean = np.asarray(mean, dtype=float)
     std = None if std is None else np.asarray(std, dtype=float)
-    if x.size == 0 or x[0] <= 0.0:
+    if x.size == 0 or x[0] <= 0.0 or not starts_at_origin(x, step):
         return (x, mean) if std is None else (x, mean, std)
     x = np.concatenate(([0.0], x))
     mean = np.concatenate(([0.0], mean))
     if std is None:
         return x, mean
     return x, mean, np.concatenate(([0.0], std))
+
+
+def break_gaps(x, *ys, step=None):
+    """Insert a NaN point inside every hole of `x`, so a line is not drawn
+    across missing samples. Returns `(x, *ys)` with the same number of arrays.
+
+    A hole is a spacing wider than `GAP_FACTOR` × the typical step (`step`, or
+    the one estimated from `x`). Arrays passed as None stay None.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    step = sample_step(x) if step is None else step
+    if step is None or x.size < 2:
+        return (x, *ys)
+    gaps = np.flatnonzero(np.diff(x) > GAP_FACTOR * step) + 1
+    if gaps.size == 0:
+        return (x, *ys)
+    mids = 0.5 * (x[gaps - 1] + x[gaps])
+    out = [np.insert(x, gaps, mids)]
+    for y in ys:
+        out.append(None if y is None else
+                   np.insert(np.asarray(y, dtype=float), gaps, np.nan))
+    return tuple(out)
 
 
 def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
@@ -462,11 +522,17 @@ def reset_pieces(resets):
     if r.size == 0:
         return []
     bounds = [0]
+    last = r[0]
     for i in range(1, r.size):
-        # NaN (an older CSV without the column, or a gap in a resume chain)
-        # is not a boundary: an unknown reset count is not evidence of a reset.
-        if np.isfinite(r[i]) and np.isfinite(r[i - 1]) and r[i] > r[i - 1]:
+        # NaN (an older CSV without the column, a gap in a resume chain, or a
+        # `break_gaps` hole) is not a boundary: an unknown reset count is not
+        # evidence of a reset. Across it, the next known count is compared with
+        # the last known one.
+        if not np.isfinite(r[i]):
+            continue
+        if np.isfinite(last) and r[i] > last:
             bounds.append(i)
+        last = r[i]
     bounds.append(r.size)
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
@@ -525,7 +591,7 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
             ax.fill_between(xs, np.clip(ms - ss, CURVE_YLIM[0], 1.0),
                             np.clip(ms + ss, 0.0, 1.0),
                             color=shades[i], alpha=CURVE_BAND_ALPHA, linewidth=0)
-        if mark_resets and i:
+        if mark_resets and i and np.isfinite(x[lo - 1]):
             # Darker than the grid it sits on: the rule marks an event, and at
             # the grid's own weight it read as one more gridline.
             ax.axvline(0.5 * (x[lo - 1] + x[lo]), color="0.45", linewidth=0.9,

@@ -95,6 +95,7 @@ from plot_common import (CURVE_LEGEND, RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E40
                          default_colors, load_plot_config, new_curve_figure,
                          out_variant, piece_labels, plot_group_curve,
                          plot_reset_segmented_curve, prepend_origin,
+                         break_gaps, sample_step,
                          read_run_config, read_table, reset_pieces,
                          save_curve_figure, style_curve_axes, unique_slugs,
                          warn)
@@ -184,13 +185,18 @@ def _plot_series(ax, frame, x_key, col, label, color, smooth, raw_alpha=0.25):
     ok = ~np.isnan(y)
     if not ok.any():
         return
-    ax.plot(x[ok], y[ok], marker=".", markersize=3, linewidth=0.7,
-            alpha=raw_alpha, color=color)
+    # One step estimate for every line of the panel, so they break at the
+    # same holes (missing segments are not joined across).
+    step = sample_step(x[ok])
+    ax.plot(*break_gaps(x[ok], y[ok], step=step), marker=".", markersize=3,
+            linewidth=0.7, alpha=raw_alpha, color=color)
     if smooth > 1 and ok.sum() >= smooth:
         ma = pd.Series(y[ok]).rolling(smooth, min_periods=1).mean().to_numpy()
-        ax.plot(x[ok], ma, linewidth=2.0, color=color, label=f"{label} (MA{smooth})")
+        ax.plot(*break_gaps(x[ok], ma, step=step), linewidth=2.0, color=color,
+                label=f"{label} (MA{smooth})")
     else:
-        ax.plot(x[ok], y[ok], linewidth=1.4, color=color, label=label)
+        ax.plot(*break_gaps(x[ok], y[ok], step=step), linewidth=1.4,
+                color=color, label=label)
 
 
 def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
@@ -387,6 +393,9 @@ def collect_group(group, *, direction: str, metric: str,
         # would invent a reset boundary at the very first recorded segment for
         # any run that starts mid-way (a resume).
         resets = np.concatenate(([resets[0] if resets.size else np.nan], resets))
+    # Segments no series recorded are a hole, not a straight line between the
+    # points around them.
+    x, mean_y, std_y, resets = break_gaps(x, mean_y, std_y, resets)
 
     known = [e for e in ep_lens if e is not None]
     return GroupCurve(label=group.label, x=x, mean=mean_y, std=std_y,
