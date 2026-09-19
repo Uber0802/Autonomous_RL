@@ -12,8 +12,9 @@
     "(or under $RUN_OUT_DIR when that is set). Training glob dirs have no",
     "eval_per_trial.csv and are skipped with a [warn].",
     "",
-    "Each entry in `groups` is one bar colour; each bar holds both domains,",
-    "aligned: out-of-domain solid, in-domain hatched (///) drawn over it.",
+    "Each entry in `groups` is one bar colour. The pooled figures hold one",
+    "domain each; a per-task figure holds both in one bar, aligned:",
+    "out-of-domain solid, in-domain hatched (///) drawn over it.",
     "Each entry in a group's `runs` is one series",
     "(typically the eval of one seed's checkpoint); the bar is the mean",
     "across them. A `runs` entry that is a LIST is several round shards of ONE",
@@ -22,14 +23,15 @@
     "with tools/rebuild_eval_outputs.py.",
     "",
     "Writes to `out_dir` (empty = next to this file):",
-    "    <name>_seq_position_<metric>.png            pooled over every task",
-    "    <name>_seq_position_<metric>_per_task/...   one PNG per task",
+    "    <name>_seq_position_<metric>_<kind>_<domain>.png   pooled over tasks",
+    "    <name>_seq_position_<metric>_<kind>_per_task/...   one PNG per task",
     "    <name>_seq_position.csv                     every plotted number",
     "",
     "metric:   one or a list of: success (each task on its own) |",
     "          success_chained (a failed task fails every later one) |",
     "          grasp | obj_grasped -- one figure set per metric",
-    "seq_kind: all | training (the trained rotations) | random (untrained cycles)",
+    "seq_kind: each (default: training and random get their own figures) |",
+    "          pooled (averaged together) | training | random",
     "Both can be overridden on the command line (--metric, --seq-kind).",
     "",
     "Any top-level key starting with '_' is ignored, so this block can stay."
@@ -39,7 +41,7 @@
   "name": "seq_eval_T2560",
 
   "metric": ["success", "success_chained"],
-  "seq_kind": "all",
+  "seq_kind": "each",
 
   "groups": [
     {
