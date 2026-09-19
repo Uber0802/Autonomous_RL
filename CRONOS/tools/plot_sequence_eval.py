@@ -10,28 +10,30 @@ the task sits?**
     python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json
 
 Figures (one PNG each, never a grid — the convention of the other plot tools),
-one set per metric and round kind (`seq_kind`: `training` / `random`):
+one set per metric and round kind (`seen` = the orders training ran,
+`unseen` = the untrained ones; recorded as `training` / `random`):
 
     <name>_seq_position_<metric>_<kind>_in_domain.png       pooled over tasks,
     <name>_seq_position_<metric>_<kind>_out_of_domain.png   one per domain
     <name>_seq_position_<metric>_<kind>_per_task/…_<task>.png
                                                     one per task, both domains
 
-So `--seq-kind each` (the default) on a two-domain eval writes four pooled
-figures per metric — {in-domain, out-of-domain} × {training, random} — plus the
-two per-task folders. `--seq-kind pooled` goes back to one set with the round
-kinds averaged together; naming one kind keeps only it.
+So the default on a two-domain eval writes **eight** pooled figures —
+{in-domain, out-of-domain} × {seen, unseen} × {success, success_chained} —
+plus the per-task folders. `--seq-kind pooled` goes back to one set per metric
+with the round kinds averaged together; naming one kind keeps only it.
 
 x = position in the sequence, one bar per group at each position. A pooled
-figure holds one domain; a per-task figure holds both in the same bar, aligned
-at the same x: **out-of-domain is the solid bar, in-domain the diagonally
-hatched bar drawn over it**, in the group's colour (the hatch a darker shade,
+figure holds one domain and its bars are solid; a per-task figure holds both
+domains in the same bar, aligned at the same x: **out-of-domain is the solid
+bar, in-domain the diagonally hatched bar drawn over it**, in the group's colour (the hatch a darker shade,
 so it stays visible over the solid part). In-domain usually scores higher and
 shows as hatching above the solid bar. Bars are the mean over a group's series
 (seeds); no spread is drawn or written.
 
 `<name>_seq_position.csv` carries every plotted number (`metric` and `seq_kind`
-columns tell the figures apart), plus `n_trials`.
+columns tell the figures apart; `seq_kind` keeps the recorded `training` /
+`random` spelling that the figures call seen / unseen), plus `n_trials`.
 
 Metrics (`--metric`, config `metric`; one or several, default
 `success success_chained` — both ways of scoring a sequence):
@@ -44,10 +46,11 @@ Metrics (`--metric`, config `metric`; one or several, default
     grasp, obj_grasped  latched within the task slot
 
 `--seq-kind` (config `seq_kind`) decides what happens to the round kinds:
-`each` (default) gives `training` rounds (the rotations training ran) and
-`random` rounds (untrained cycles) their own figures — which is what answers
-whether an untrained order costs more — `pooled` averages them into one set
-(the full 24-order design), and naming one kind keeps only it.
+`each` (default) gives the **seen** rounds (`training`: the rotations training
+ran) and the **unseen** ones (`random`: untrained cycles) their own figures —
+which is what answers whether an untrained order costs more — `pooled` averages
+them into one set (the full 24-order design), and naming one kind (`seen` /
+`unseen`, or the recorded `training` / `random`) keeps only it.
 
 The average figure pools trials, not task means: with every task at every
 position equally often (a complete design) the two are identical, and on an
@@ -86,6 +89,14 @@ _SEQ_KINDS = ("training", "random")
 # `--seq-kind pooled`: every round kind in one figure set, the pre-split
 # behaviour. Also the label those pooled rows carry.
 POOLED = "pooled"
+# What a round kind is called in figures and filenames. `eval_per_trial.csv`
+# (and this tool's own CSV) keep the recorded `training` / `random`; the
+# figures say what those mean — the orders training saw, and orders it did not.
+SEQ_LABEL = {"training": "seen", "random": "unseen", POOLED: "all"}
+SEQ_LEGEND = {"training": "seen sequence", "random": "unseen sequence",
+              POOLED: "all sequences"}
+# Accepted spellings of a round kind on the command line / in the config.
+SEQ_ALIASES = {"seen": "training", "unseen": "random", "all": POOLED}
 _DOMAINS = ("in_domain", "out_of_domain")
 _DOMAIN_LABEL = {"in_domain": "in-domain", "out_of_domain": "out-of-domain"}
 _DEFAULT_METRICS = ("success", "success_chained")
@@ -298,8 +309,8 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     """One bar chart: x = position, one bar per group at each.
 
     Both domains of `table` go in the same bar (out-of-domain solid, in-domain
-    hatched on top); pass a one-domain `table` for a figure about that domain
-    alone, where the fill then only says which domain it is.
+    hatched on top); a one-domain `table` draws solid bars, since nothing has
+    to be told apart inside the bar.
 
     `color_of` maps every group to its colour (so a group keeps its hue across
     figures); a group with no row in `table` gets no bar slot and no legend
@@ -323,7 +334,9 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
             sub = (table[(table["group"] == group) & (table["eval_kind"] == domain)]
                    .set_index("position").reindex(positions))
             offset = (gi - (n_bars - 1) / 2) * width
-            in_domain = domain == "in_domain"
+            # The hatch only has to tell the two domains apart where they
+            # share a bar; a one-domain figure draws its bars solid.
+            hatched = domain == "in_domain" and len(domains) > 1
             # A position this (group, domain) never ran gets no bar rather
             # than a zero-height one, which would read as "always failed".
             ran = sub["mean"].notna().to_numpy()
@@ -331,7 +344,7 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 continue
             xs = (x0 + offset)[ran]
             ys = sub["mean"].to_numpy(dtype=float)[ran]
-            if in_domain:
+            if hatched:
                 ax.bar(xs, ys, width=width * 0.92, facecolor="none",
                        edgecolor=hatch_color(color), hatch=IN_DOMAIN_HATCH,
                        linewidth=BAR_EDGE_WIDTH, zorder=3)
@@ -345,7 +358,7 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 ax.plot(xs[zero], ys[zero], linestyle="none", marker="_",
                         markersize=max(4.0, 260 * width * 0.92 / len(positions)),
                         markeredgewidth=2.4, zorder=5, clip_on=False,
-                        color=hatch_color(color) if in_domain else color)
+                        color=hatch_color(color) if hatched else color)
 
     ax.set_xticks(x0, [str(p) for p in positions])
     ax.set_xlabel("position in sequence")
@@ -406,7 +419,8 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
             kt = table[(table["metric"] == metric) & (table["seq_kind"] == kind)]
             if kt.empty:
                 continue
-            stem = f"{cfg.name}_seq_position_{metric}_{kind}"
+            tag = SEQ_LABEL.get(kind, kind)
+            stem = f"{cfg.name}_seq_position_{metric}_{tag}"
             pooled = kt[kt["task"] == ALL_TASKS]
             for domain in _DOMAINS:
                 dt = pooled[pooled["eval_kind"] == domain]
@@ -414,7 +428,9 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
                     continue
                 written.append(render_bars(
                     dt, color_of, cfg.out_dir / f"{stem}_{domain}.png",
-                    metric=metric, legend_title=_DOMAIN_LABEL[domain]))
+                    metric=metric,
+                    legend_title=f"{_DOMAIN_LABEL[domain]}\n"
+                                 f"{SEQ_LEGEND.get(kind, kind)}"))
             if per_task:
                 task_dir = cfg.out_dir / f"{stem}_per_task" / f"{stem}.png"
                 for task in tasks:
@@ -424,7 +440,8 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
                     written.append(render_bars(
                         kt[kt["task"] == task], color_of,
                         out_variant(task_dir, slugs[task]),
-                        metric=metric, legend_title=task))
+                        metric=metric,
+                        legend_title=f"{task}\n{SEQ_LEGEND.get(kind, kind)}"))
     return [w for w in written if w is not None]
 
 
@@ -435,7 +452,7 @@ def report(table: pd.DataFrame) -> None:
             ["metric", "seq_kind", "group", "eval_kind"], sort=False):
         cells = "  ".join(f"p{int(r.position)}={r.mean:.3f}"
                           for r in sub.sort_values("position").itertuples())
-        print(f"[seq] {metric:<16s} {kind:<9s} {group} / "
+        print(f"[seq] {metric:<16s} {SEQ_LABEL.get(kind, kind):<7s} {group} / "
               f"{_DOMAIN_LABEL.get(domain, domain):<13s} {cells}", file=sys.stderr)
 
 
@@ -457,10 +474,11 @@ def main():
                    help="one or more; default: success success_chained (each "
                         "task on its own, and failed-once-failed-after)")
     p.add_argument("--seq-kind", default=None,
-                   choices=["each", POOLED, *_SEQ_KINDS],
-                   help=f"which rounds to use: 'each' (default) gives every "
-                        f"kind its own figures, {POOLED!r} pools them into one "
-                        f"set, or name one kind to keep only it")
+                   choices=["each", POOLED, *_SEQ_KINDS, *SEQ_ALIASES],
+                   help="which rounds to use: 'each' (default) gives the seen "
+                        "(training) and unseen (random) orders their own "
+                        "figures, 'pooled' puts them in one set, or name one "
+                        "kind — 'seen'/'training' or 'unseen'/'random'")
     p.add_argument("--no-per-task", dest="per_task", action="store_false",
                    help="write only the average figure")
     args = p.parse_args()
@@ -489,8 +507,9 @@ def main():
                          f"choose from {list(_METRICS)} (pass --metric to "
                          f"override the config)")
     seq_kind = cfg.option("seq_kind", args.seq_kind, "each")
-    if seq_kind == "all":
-        seq_kind = POOLED        # the pre-split spelling
+    # 'seen' / 'unseen' are what the figures say; 'all' was the pre-split
+    # spelling of 'pooled'.
+    seq_kind = SEQ_ALIASES.get(seq_kind, seq_kind)
     if seq_kind not in ("each", POOLED, *_SEQ_KINDS):
         raise SystemExit(f"seq_kind {seq_kind!r} is not one of "
                          f"{['each', POOLED, *_SEQ_KINDS]}")
