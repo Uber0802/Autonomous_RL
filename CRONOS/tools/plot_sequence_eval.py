@@ -1,10 +1,12 @@
-"""Sequence-eval success by task position, as bars, from `eval_per_trial.csv`.
+"""Sequence-eval success by task position and by task, as bars, from
+`eval_per_trial.csv`.
 
 A sequential eval round runs every task slot in a row without resetting, so the
 same task is met at position 1, 2, 3 and 4 (`task_idx` 0..3) across the round's
-orders — see `doc/eval_sequential.md` §3. This tool asks the one question those
+orders — see `doc/eval_sequential.md` §3. This tool asks the question those
 files are laid out for: **does the success rate depend on where in the sequence
-the task sits?**
+the task sits?** — and, with the positions pooled away, the plain one next to
+it: **how often does each task succeed at all?**
 
     python tools/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
     python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json
@@ -35,6 +37,22 @@ shows as hatching above the solid bar. Bars are the mean over a group's series
 columns tell the figures apart; `seq_kind` keeps the recorded `training` /
 `random` spelling that the figures call seen / unseen), plus `n_trials`.
 
+The second series pools the positions away instead, to answer the other
+question: **how well is each task done, wherever in the round it sits?**
+
+    <name>_seq_task_<metric>_<kind>.png                   x = task, both domains
+    <name>_seq_task_<metric>_<kind>_per_scene/…_<scene>.png     with --per-scene
+
+x = task, one bar per group at each, over every trial of that task whatever its
+position — the task's overall rate in these rounds, order and all. Both domains
+share a bar exactly as the per-task position figures do: out-of-domain solid,
+in-domain hatched over it. `--per-scene` adds one figure per scene (`group` in
+`eval_per_trial.csv`, the YAML scene the env belongs to) holding that scene's
+tasks; the pooled-over-scenes figure is written either way, and is not the mean
+of the per-scene ones but the mean over their trials, so a scene with more envs
+weighs more. `<name>_seq_task.csv` carries these numbers, the pooled rows under
+`scene = __all__`.
+
 Metrics (`--metric`, config `metric`; one or several, default
 `success success_chained` — both ways of scoring a sequence):
 
@@ -60,8 +78,8 @@ Overlapping runs: when the shards of one series both hold the same trial
 (same domain, pass, round, slot and env), the trial's value is the mean over
 the shards that ran it; a trial only one shard ran counts as that shard's
 value. Across series (seeds) every bar is likewise the mean over the series
-that ran that (task, position) — a series that did not is left out, not
-counted as zero.
+that ran that (task, position) — or that task, in the second series — and a
+series that did not is left out, not counted as zero.
 
 Missing input follows the other tools: in `--config` mode a run without a usable
 `eval_per_trial.csv` is warned about and skipped; `--run-dir` fails loudly.
@@ -107,11 +125,14 @@ _TRIAL_KEY = ["eval_kind", "pass_label", "seq_idx", "task_idx", "env_idx",
               "task", "seq_kind"]
 _ROUND_KEY = ["eval_kind", "pass_label", "seq_idx", "env_idx"]
 ALL_TASKS = "__all__"
+ALL_SCENES = "__all__"
 
 BAR_FIGSIZE = (6.4, 4.8)
 BAR_YLIM = (0.0, 1.02)
 BAR_EDGE_WIDTH = 1.8
 IN_DOMAIN_HATCH = "///"
+# Task names are whole phrases, so the per-task figures lean their tick labels.
+TASK_X_ROTATE = 20.0
 
 
 def hatch_color(color, factor: float = 0.55):
@@ -145,6 +166,14 @@ def load_trials(run_dir: Path, *, required: bool) -> pd.DataFrame:
             "out_of_domain", "in_domain")
     if "seq_kind" not in df.columns:
         df["seq_kind"] = "unknown"
+    # `group` in this file is the SCENE (the YAML group an env belongs to);
+    # `group` in a plot config is an experiment series. Only one of the two may
+    # travel under that name inside this tool, so the scene is renamed here and
+    # `group` means the config's group everywhere below.
+    if "group" not in df.columns:
+        df["group"] = ""
+    df["scene"] = (df["group"].fillna("").astype(str)
+                   .replace("", "unknown"))
     if "pass_label" not in df.columns:
         df["pass_label"] = ""
     df["pass_label"] = df["pass_label"].fillna("").astype(str)
@@ -199,8 +228,10 @@ def load_series(chain, *, label: str, required: bool) -> pd.DataFrame:
     metrics = [m for m in _METRICS if m in df.columns]
     overlap = df.duplicated(subset=_TRIAL_KEY, keep=False)
     # mean() skips NaN only: a 0 (failed) counts, a missing value does not.
+    # `scene` is a property of the trial, not a measurement: the shards agree on
+    # it (it follows env_idx within a pass), so the first one's is kept.
     merged = (df.groupby(_TRIAL_KEY, as_index=False, sort=False, dropna=False)
-                [metrics].mean())
+                .agg({**{m: "mean" for m in metrics}, "scene": "first"}))
     n_overlap = int(df[overlap].drop_duplicates(subset=_TRIAL_KEY).shape[0])
     print(f"[series] group '{label}': {n_overlap} trials held by more than one "
           f"run ({int(overlap.sum())} rows) — averaged", file=sys.stderr)
@@ -208,6 +239,7 @@ def load_series(chain, *, label: str, required: bool) -> pd.DataFrame:
 
 
 _KEY = ["seq_kind", "eval_kind", "task", "position"]
+_TASK_KEY = ["seq_kind", "eval_kind", "scene", "task"]
 
 
 def position_rates(df: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -222,13 +254,29 @@ def position_rates(df: pd.DataFrame, metric: str) -> pd.DataFrame:
     return pd.concat([pooled, per_task], ignore_index=True)
 
 
-def collect(cfg: PlotConfig, *, metrics, seq_kind: str,
-            required: bool) -> pd.DataFrame:
-    """Every group's rates, aggregated over its series, for every metric.
+def task_rates(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Per-series rates with the position pooled away:
+    (seq_kind, eval_kind, scene, task) -> mean, plus the all-scene row under
+    `scene = ALL_SCENES`.
 
-    Columns: metric, group, seq_kind, eval_kind, task, position, mean,
-    n_series, n_trials. A key with no trial in any series has no row at all —
-    "no data" is never written as a 0.
+    Every trial of the task counts once, whatever slot it sat in, so the
+    all-scene row is the rate over that series' trials — not the mean of the
+    per-scene rates, which would give a 4-env scene the weight of a 16-env one.
+    """
+    d = df.dropna(subset=[metric])
+    per_scene = (d.groupby(_TASK_KEY)[metric]
+                  .agg(rate="mean", n_trials="size").reset_index())
+    pooled = (d.groupby(["seq_kind", "eval_kind", "task"])[metric]
+               .agg(rate="mean", n_trials="size").reset_index()
+               .assign(scene=ALL_SCENES))
+    return pd.concat([pooled, per_scene], ignore_index=True)
+
+
+def load_groups(cfg: PlotConfig, *, seq_kind: str, required: bool) -> dict:
+    """Every group's trials: label -> [(chain, df), ...], one entry per series.
+
+    Read once and handed to each `collect` call, so the two figure series are
+    built from the same rows rather than from two reads of the same files.
 
     `seq_kind` selects the rounds: one of `_SEQ_KINDS` keeps only those rounds,
     `POOLED` pools every kind into one set of figures, and `each` (the default)
@@ -251,17 +299,33 @@ def collect(cfg: PlotConfig, *, metrics, seq_kind: str,
                     continue
                 df = kept
             series[group.label].append((chain, df))
+    return series
 
+
+def collect(cfg: PlotConfig, series: dict, *, metrics, rates_fn, key,
+            pooled) -> pd.DataFrame:
+    """Every group's rates, aggregated over its series, for every metric.
+
+    Columns: metric, group, `key`, mean, n_series, n_trials. A key with no
+    trial in any series has no row at all — "no data" is never written as a 0.
+
+    `rates_fn` is what a series' rows are reduced to (`position_rates` or
+    `task_rates`) and `key` its keys; `pooled` names the (column, value) those
+    rates carry their pooled row under, which is what the per-group line counts
+    trials over.
+    """
+    pooled_col, pooled_val = pooled
     rows = []
     for metric in metrics:
         for group in cfg.groups:
-            agg = aggregate_group(group.label, series[group.label], metric)
+            agg = aggregate_group(group.label, series[group.label], metric,
+                                  rates_fn=rates_fn, key=key)
             if agg is None:
                 continue
             rows.append(agg.assign(metric=metric, group=group.label))
             print(f"[group] {metric:<16s} {group.label:<34s} "
                   f"{int(agg['series_total'].iloc[0])} series, "
-                  f"{int(agg.loc[agg['task'] == ALL_TASKS, 'n_trials'].sum())} trials",
+                  f"{int(agg.loc[agg[pooled_col] == pooled_val, 'n_trials'].sum())} trials",
                   file=sys.stderr)
     if not rows:
         raise SystemExit(
@@ -269,14 +333,13 @@ def collect(cfg: PlotConfig, *, metrics, seq_kind: str,
             "  The [warn] lines above name the groups. Each `runs` entry must be a\n"
             "  standalone eval's glob/ dir holding eval_per_trial.csv (training\n"
             "  runs have none), and --seq-kind / --metric must exist in it.")
-    cols = ["metric", "group", "seq_kind", "eval_kind", "task", "position",
-            "mean", "n_series", "n_trials"]
+    cols = ["metric", "group", *key, "mean", "n_series", "n_trials"]
     return pd.concat(rows, ignore_index=True)[cols]
 
 
-def aggregate_group(label: str, series, metric: str):
-    """One group's per-(seq_kind, eval_kind, task, position) mean, or
-    None when no series has a value for `metric`.
+def aggregate_group(label: str, series, metric: str, *, rates_fn, key):
+    """One group's per-`key` mean, or None when no series has a value for
+    `metric`.
 
     Each bar is the mean over the series that ran it; a series that did not
     contributes nothing (not a 0), and a series whose trials all failed
@@ -287,7 +350,7 @@ def aggregate_group(label: str, series, metric: str):
         if metric not in df.columns:
             warn(f"group '{label}': {chain[-1]} has no {metric!r} column")
             continue
-        rates = position_rates(df, metric)
+        rates = rates_fn(df, metric)
         if rates.empty:
             warn(f"group '{label}': {chain[-1]} has no non-empty {metric!r} value")
             continue
@@ -296,7 +359,7 @@ def aggregate_group(label: str, series, metric: str):
         warn(f"group '{label}' produced no {metric!r} rows")
         return None
     stacked = pd.concat([s.assign(series=i) for i, s in enumerate(per_series)])
-    agg = (stacked.groupby(_KEY)
+    agg = (stacked.groupby(key)
                       .agg(mean=("rate", "mean"),
                            n_series=("series", "nunique"),
                            n_trials=("n_trials", "sum"))
@@ -305,12 +368,18 @@ def aggregate_group(label: str, series, metric: str):
 
 
 def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
-                metric: str, legend_title=None):
-    """One bar chart: x = position, one bar per group at each.
+                metric: str, x_col: str = "position",
+                x_label: str = "position in sequence", x_rotate: float = 0.0,
+                legend_title=None):
+    """One bar chart: x = `x_col` (the position in the round, or the task), one
+    bar per group at each of its values.
 
     Both domains of `table` go in the same bar (out-of-domain solid, in-domain
     hatched on top); a one-domain `table` draws solid bars, since nothing has
     to be told apart inside the bar.
+
+    `table` must hold at most one row per (group, eval_kind, x) — the caller
+    picks the task, or the scene, the figure is about.
 
     `color_of` maps every group to its colour (so a group keeps its hue across
     figures); a group with no row in `table` gets no bar slot and no legend
@@ -323,21 +392,21 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     table = table[table["group"].isin(groups)]
     colors = [color_of[g] for g in groups]
     domains = [d for d in _DOMAINS if d in set(table["eval_kind"])]
-    positions = sorted(table["position"].unique())
+    xvals = sorted(table[x_col].unique())
     n_bars = len(groups)
     width = 0.8 / max(1, n_bars)
     fig, ax = plt.subplots(figsize=BAR_FIGSIZE)
-    x0 = np.arange(len(positions), dtype=float)
+    x0 = np.arange(len(xvals), dtype=float)
 
     for gi, (group, color) in enumerate(zip(groups, colors)):
         for domain in domains:
             sub = (table[(table["group"] == group) & (table["eval_kind"] == domain)]
-                   .set_index("position").reindex(positions))
+                   .set_index(x_col).reindex(xvals))
             offset = (gi - (n_bars - 1) / 2) * width
             # The hatch only has to tell the two domains apart where they
             # share a bar; a one-domain figure draws its bars solid.
             hatched = domain == "in_domain" and len(domains) > 1
-            # A position this (group, domain) never ran gets no bar rather
+            # An x this (group, domain) never ran gets no bar rather
             # than a zero-height one, which would read as "always failed".
             ran = sub["mean"].notna().to_numpy()
             if not ran.any():
@@ -356,12 +425,17 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
             zero = ys == 0.0
             if zero.any():
                 ax.plot(xs[zero], ys[zero], linestyle="none", marker="_",
-                        markersize=max(4.0, 260 * width * 0.92 / len(positions)),
+                        markersize=max(4.0, 260 * width * 0.92 / len(xvals)),
                         markeredgewidth=2.4, zorder=5, clip_on=False,
                         color=hatch_color(color) if hatched else color)
 
-    ax.set_xticks(x0, [str(p) for p in positions])
-    ax.set_xlabel("position in sequence")
+    ax.set_xticks(x0, [str(v) for v in xvals])
+    if x_rotate:
+        # Task names are sentences ("put carrot on plate"): upright they
+        # overlap, so they lean and end under their own tick.
+        plt.setp(ax.get_xticklabels(), rotation=x_rotate, ha="right",
+                 rotation_mode="anchor")
+    ax.set_xlabel(x_label)
     ax.set_ylabel(metric.replace("_", " "))
     ax.set_ylim(*BAR_YLIM)
     ax.grid(axis="y", alpha=CURVE_GRID_ALPHA, zorder=0)
@@ -392,6 +466,20 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     return out_path
 
 
+def group_colors(table: pd.DataFrame, cfg: PlotConfig) -> dict:
+    """group -> colour, assigned once over every group with any data, so a
+    group keeps its hue in every figure even where another group is skipped.
+    Both figure series carry the same groups, so both get the same map."""
+    groups = [g.label for g in cfg.groups if g.label in set(table["group"])]
+    return dict(zip(groups, default_colors(len(groups))))
+
+
+def figure_kinds(table: pd.DataFrame) -> list:
+    """The round kinds in `table`, in the order their figures are written."""
+    kinds = [k for k in (*_SEQ_KINDS, POOLED) if k in set(table["seq_kind"])]
+    return kinds + sorted(set(table["seq_kind"]) - set(kinds))   # e.g. 'unknown'
+
+
 def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
                per_task: bool) -> list:
     """Every figure. Per metric and round kind (`seq_kind`):
@@ -404,14 +492,10 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
     one bar, so a task's in-domain / out-of-domain gap is read without paging
     between figures.
     """
-    # Colours are assigned once over every group with any data, so a group has
-    # the same hue in every figure even where another group is skipped.
-    groups = [g.label for g in cfg.groups if g.label in set(table["group"])]
-    color_of = dict(zip(groups, default_colors(len(groups))))
+    color_of = group_colors(table, cfg)
     tasks = sorted(t for t in table["task"].unique() if t != ALL_TASKS)
     slugs = unique_slugs(tasks)
-    kinds = [k for k in (*_SEQ_KINDS, POOLED) if k in set(table["seq_kind"])]
-    kinds += sorted(set(table["seq_kind"]) - set(kinds))      # e.g. 'unknown'
+    kinds = figure_kinds(table)
 
     written = []
     for metric in metrics:
@@ -445,6 +529,49 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
     return [w for w in written if w is not None]
 
 
+def render_task_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
+                    per_scene: bool) -> list:
+    """Every position-free figure. Per metric and round kind (`seq_kind`):
+
+        x = task, both domains in one bar   <name>_seq_task_<metric>_<kind>.png
+        the same, one scene each            <name>_seq_task_<metric>_<kind>_per_scene/...
+
+    The pooled figure is the one to read for "which task is hard"; the
+    per-scene ones split it by the scene the env belongs to, since the same
+    task string is a different scene's objects and table.
+    """
+    color_of = group_colors(table, cfg)
+    scenes = sorted(s for s in table["scene"].unique() if s != ALL_SCENES)
+    slugs = unique_slugs(scenes)
+    kinds = figure_kinds(table)
+
+    written = []
+    for metric in metrics:
+        for kind in kinds:
+            kt = table[(table["metric"] == metric) & (table["seq_kind"] == kind)]
+            if kt.empty:
+                continue
+            tag = SEQ_LABEL.get(kind, kind)
+            stem = f"{cfg.name}_seq_task_{metric}_{tag}"
+            written.append(render_bars(
+                kt[kt["scene"] == ALL_SCENES], color_of,
+                cfg.out_dir / f"{stem}.png", metric=metric,
+                x_col="task", x_label="task", x_rotate=TASK_X_ROTATE,
+                legend_title=SEQ_LEGEND.get(kind, kind)))
+            if per_scene:
+                scene_dir = cfg.out_dir / f"{stem}_per_scene" / f"{stem}.png"
+                for scene in scenes:
+                    # The scene goes in the legend title, as the task does on a
+                    # per-task figure: no suptitle, and a folder of bar charts
+                    # must still say which scene each one is.
+                    written.append(render_bars(
+                        kt[kt["scene"] == scene], color_of,
+                        out_variant(scene_dir, slugs[scene]), metric=metric,
+                        x_col="task", x_label="task", x_rotate=TASK_X_ROTATE,
+                        legend_title=f"{scene}\n{SEQ_LEGEND.get(kind, kind)}"))
+    return [w for w in written if w is not None]
+
+
 def report(table: pd.DataFrame) -> None:
     """The average figure's numbers on stderr, one line per (group, domain)."""
     avg = table[table["task"] == ALL_TASKS]
@@ -456,10 +583,23 @@ def report(table: pd.DataFrame) -> None:
               f"{_DOMAIN_LABEL.get(domain, domain):<13s} {cells}", file=sys.stderr)
 
 
+def report_task(table: pd.DataFrame) -> None:
+    """The pooled-over-scenes task rates on stderr, one line per
+    (group, domain)."""
+    avg = table[table["scene"] == ALL_SCENES]
+    for (metric, kind, group, domain), sub in avg.groupby(
+            ["metric", "seq_kind", "group", "eval_kind"], sort=False):
+        cells = "  ".join(f"{r.task}={r.mean:.3f}"
+                          for r in sub.sort_values("task").itertuples())
+        print(f"[task] {metric:<16s} {SEQ_LABEL.get(kind, kind):<7s} {group} / "
+              f"{_DOMAIN_LABEL.get(domain, domain):<13s} {cells}", file=sys.stderr)
+
+
 def main():
     p = argparse.ArgumentParser(
         "plot_sequence_eval",
-        description="Sequence-eval success by task position (bars) from eval_per_trial.csv",
+        description="Sequence-eval success by task position, and by task "
+                    "whatever its position (bars), from eval_per_trial.csv",
     )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--run-dir", help="the eval's glob dir, holding eval_per_trial.csv")
@@ -480,7 +620,11 @@ def main():
                         "figures, 'pooled' puts them in one set, or name one "
                         "kind — 'seen'/'training' or 'unseen'/'random'")
     p.add_argument("--no-per-task", dest="per_task", action="store_false",
-                   help="write only the average figure")
+                   help="write only the average position figure")
+    p.add_argument("--per-scene", action="store_true",
+                   help="also split the per-task figures by scene (`group` in "
+                        "eval_per_trial.csv): one extra figure per scene, "
+                        "holding that scene's tasks")
     args = p.parse_args()
 
     if args.config:
@@ -514,15 +658,26 @@ def main():
         raise SystemExit(f"seq_kind {seq_kind!r} is not one of "
                          f"{['each', POOLED, *_SEQ_KINDS]}")
 
-    table = collect(cfg, metrics=metrics, seq_kind=seq_kind, required=required)
+    # One read of the eval files feeds both figure series: success by position,
+    # and success by task with the position pooled away.
+    series = load_groups(cfg, seq_kind=seq_kind, required=required)
+    table = collect(cfg, series, metrics=metrics, rates_fn=position_rates,
+                    key=_KEY, pooled=("task", ALL_TASKS))
+    task_table = collect(cfg, series, metrics=metrics, rates_fn=task_rates,
+                         key=_TASK_KEY, pooled=("scene", ALL_SCENES))
     print(f"[seq] metrics={metrics}, seq_kind={seq_kind}; bar = mean across "
           f"series", file=sys.stderr)
     report(table)
+    report_task(task_table)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = cfg.out_dir / f"{cfg.name}_seq_position.csv"
-    table.to_csv(csv_path, index=False)
-    print(f"[ok] wrote {csv_path}", file=sys.stderr)
-    for path in render_all(table, cfg, metrics=metrics, per_task=args.per_task):
+    for path, t in ((cfg.out_dir / f"{cfg.name}_seq_position.csv", table),
+                    (cfg.out_dir / f"{cfg.name}_seq_task.csv", task_table)):
+        t.to_csv(path, index=False)
+        print(f"[ok] wrote {path}", file=sys.stderr)
+    written = (render_all(table, cfg, metrics=metrics, per_task=args.per_task)
+               + render_task_all(task_table, cfg, metrics=metrics,
+                                 per_scene=args.per_scene))
+    for path in written:
         print(f"[ok] wrote {path}", file=sys.stderr)
 
 
