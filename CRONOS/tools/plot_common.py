@@ -242,7 +242,7 @@ CURVE_YLIM = (-0.02, 1.02)
 # `HEADROOM` of it, rounded up to a whole `STEP` so the ticks stay round, and
 # never below `MIN_TOP` — zooming in past a quarter of the range makes a low
 # curve look like a high one, which is the opposite of the point.
-CURVE_Y_HEADROOM = 0.10
+CURVE_Y_HEADROOM = 0.30
 CURVE_Y_STEP = 0.05
 CURVE_Y_MIN_TOP = 0.25
 CURVE_LINEWIDTH = 2.0
@@ -250,16 +250,28 @@ CURVE_BAND_ALPHA = 0.16
 CURVE_GRID_ALPHA = 0.3
 # Placement only — the type size comes from `legend_pt` via `curve_legend`.
 CURVE_LEGEND = {"loc": "upper left"}
+# ...unless the legend is put OUTSIDE the box, which is the only placement that
+# cannot cover a curve. `bbox_inches="tight"` in `save_curve_figure` grows the
+# saved image to include it, so nothing is clipped.
+CURVE_LEGEND_OUTSIDE = {"loc": "upper left", "bbox_to_anchor": (1.02, 1.0),
+                        "borderaxespad": 0.0}
 # A legend is only readable while it stays out of the curve's way: a
 # reset-split panel can carry ten entries, and ten full-size lines reach halfway
 # down a panel whose y bound is now fitted to the data. So past a few entries
 # the type steps back down — `(at most this many entries, notches below
 # LEGEND_PT)`, with anything longer three notches down.
 CURVE_LEGEND_STEPS = ((6, 0), (10, -2))
-# The plot box is forced square rather than left to `figsize`: the figure's own
-# margins depend on how wide the tick labels come out, so a square `figsize`
-# gives a visibly non-square box, and a different x range changes it again.
+# The plot box's height:width ratio is forced rather than left to `figsize`:
+# the figure's own margins depend on how wide the tick labels come out, so a
+# square `figsize` gives a visibly non-square box, and a different x range
+# changes it again.
 CURVE_BOX_ASPECT = 1.0
+# The rollout-success curves run over millions of environment steps and are
+# read left-to-right — where the resets fall, how each inter-reset piece rises
+# and drops. A square box spends that width on nothing and squeezes the
+# sixteen pieces of a T2560 run together; a flat one gives them room.
+FLAT_FIGSIZE = (11.0, 4.6)
+FLAT_BOX_ASPECT = 0.34
 
 X_LABEL = {
     "total_steps": "environment steps",
@@ -408,15 +420,20 @@ def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
         ax.fill_between(x, lo, hi, color=color, alpha=CURVE_BAND_ALPHA, linewidth=0)
 
 
-def curve_legend(n_entries: int = 1) -> dict:
-    """`CURVE_LEGEND` with the type size fitted to how many entries it holds."""
+def curve_legend(n_entries: int = 1, *, outside: bool = False) -> dict:
+    """`CURVE_LEGEND` with the type size fitted to how many entries it holds.
+
+    `outside=True` parks it beside the box instead of inside the upper-left
+    corner, for a panel whose curve reaches into that corner.
+    """
     steps = -3
     for limit, notches in CURVE_LEGEND_STEPS:
         if n_entries <= limit:
             steps = notches
             break
     size = legend_pt(steps)
-    return {**CURVE_LEGEND, "fontsize": size, "title_fontsize": size}
+    base = CURVE_LEGEND_OUTSIDE if outside else CURVE_LEGEND
+    return {**base, "fontsize": size, "title_fontsize": size}
 
 
 def axes_peak(ax) -> float:
@@ -467,13 +484,17 @@ def curve_ylim(peak: float):
 
 
 def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
-                     y_max=None, legend=True):
+                     y_max=None, legend=True, box_aspect=None,
+                     legend_outside=False):
     """Shared axis dressing. Call it AFTER every curve is drawn: the y bound is
     fitted to what is on the axes.
 
     `y_max` overrides the measured peak (for a figure whose scale must match
     another's); `legend=False` drops the legend, which is what a panel holding a
     single unsplit curve wants — its one entry would only repeat the filename.
+    `box_aspect` overrides `CURVE_BOX_ASPECT` (`FLAT_BOX_ASPECT` for a curve
+    read along its x range), and `legend_outside` moves the legend clear of the
+    box.
     """
     ax.set_xlabel(X_LABEL.get(x_axis, x_axis))
     ax.set_ylabel(y_label)
@@ -481,9 +502,10 @@ def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
     # Left edge pinned to 0 so the anchored origin is actually visible.
     ax.set_xlim(0.0, None if not x_max else float(x_max))
     ax.grid(alpha=CURVE_GRID_ALPHA)
-    ax.set_box_aspect(CURVE_BOX_ASPECT)
+    ax.set_box_aspect(CURVE_BOX_ASPECT if box_aspect is None else box_aspect)
     if legend:
-        ax.legend(**curve_legend(len(ax.get_legend_handles_labels()[0])))
+        ax.legend(**curve_legend(len(ax.get_legend_handles_labels()[0]),
+                                 outside=legend_outside))
 
 
 def save_curve_figure(fig, out_path) -> Path:

@@ -99,7 +99,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E402
+from plot_common import (FLAT_BOX_ASPECT, FLAT_FIGSIZE,  # noqa: E402
+                         RESET_SPLIT_MIN_EPISODE_LEN,
                          RESET_SPLIT_MIN_PIECE, SHORT_HORIZON_COLOR, X_LABEL,
                          NoData, concat_chain, curve_legend, legend_pt,
                          piece_colors,
@@ -247,7 +248,10 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
     ax0.set_ylabel("rate")
     ax0.set_ylim(-0.02, 1.02)
     ax0.grid(alpha=0.3)
-    ax0.legend(loc="upper left", fontsize=legend_pt(-1))
+    # Outside the box: these curves climb into the upper-left corner, which is
+    # where an inside legend would sit.
+    ax0.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+               fontsize=legend_pt(-1))
 
     if by != "none":
         ax1 = axes[1][0]
@@ -263,7 +267,8 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         ax1.set_ylabel("success rate")
         ax1.set_ylim(-0.02, 1.02)
         ax1.grid(alpha=0.3)
-        ax1.legend(loc="upper left", fontsize=legend_pt(-2), ncol=2)
+        ax1.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                   borderaxespad=0.0, fontsize=legend_pt(-2))
         ax1.set_title(f"per-segment success by {by}")
 
     axes[-1][0].set_xlabel(X_LABEL[x_key])
@@ -497,13 +502,14 @@ def reset_split_plan(curve: GroupCurve):
 
 def render_main(curves, colors, out_path: Path, *, metric: str) -> Path:
     """Every group on one axes, one hue each, each curve drawn whole."""
-    fig, ax = new_curve_figure()
+    fig, ax = new_curve_figure(FLAT_FIGSIZE)
     x_max = 0.0
     for curve, color in zip(curves, colors):
         plot_group_curve(ax, curve.x, curve.mean, curve.std, color=color,
                          label=curve.label, n_series=curve.n_series)
         x_max = max(x_max, float(curve.x.max()) if curve.x.size else 0.0)
-    style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
+    style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max,
+                     box_aspect=FLAT_BOX_ASPECT, legend_outside=True)
     return save_curve_figure(fig, out_path)
 
 
@@ -514,10 +520,11 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     When the curve is split the group's label goes in the legend's TITLE, since
     the pieces occupy the entries and the panel would otherwise not say which
     condition it shows (`save_curve_figure` deliberately writes no suptitle —
-    the run identity lives in the filename). When it is drawn whole there is no
-    legend at all: its one entry would be the group label, which the filename
-    already carries, and a box in the corner of an otherwise clean panel is a
-    poor trade for a caption the reader has anyway.
+    the run identity lives in the filename). It is parked beside the box rather
+    than inside it: these curves climb into the upper-left corner, so an inside
+    legend covers the very stretch it labels. When the curve is drawn whole
+    there is no legend at all — its one entry would be the group label, which
+    the filename already carries.
 
     A horizon switch — the T320 -> T2560 point of a curriculum chain — is marked
     with a solid grey rule either way, since it is what separates the two
@@ -526,7 +533,7 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     figure ("before the switch" / "after it"), and a legend enumerating reset
     indices next to it only competes with it.
     """
-    fig, ax = new_curve_figure()
+    fig, ax = new_curve_figure(FLAT_FIGSIZE)
     plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
     if plan:
         pieces, colors, labels = plan
@@ -549,10 +556,10 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
               + " (grey rule; legend dropped)", file=sys.stderr)
     x_max = float(curve.x.max()) if curve.x.size else 0.0
     style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max,
-                     legend=False)
+                     legend=False, box_aspect=FLAT_BOX_ASPECT)
     if plan and not rules:
         n_named = sum(l is not None for l in plan[2])
-        ax.legend(title=curve.label, **curve_legend(n_named))
+        ax.legend(title=curve.label, **curve_legend(n_named, outside=True))
     return save_curve_figure(fig, out_path)
 
 
