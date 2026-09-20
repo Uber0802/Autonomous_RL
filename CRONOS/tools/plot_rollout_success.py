@@ -47,9 +47,10 @@ within-stretch climb followed by the reset's drop reads as noise. Each piece
 gets its own colour — categorical, not a ramp, so four pieces are unmistakable
 and eight are still separable — and a dotted rule marks where the reset fell.
 The hue is free to carry the reset index because a per-group figure holds one
-group and the legend's title names it. A panel whose curve is NOT split carries
-no legend at all: its single entry would be the group label, which the filename
-already gives.
+group and the legend's title names it. A panel carries no legend at all when its
+curve is not split (the single entry would be the group label, which the
+filename already gives) or when a horizon switch marks it (the rule is what the
+figure is read by there).
 
 The split stays out of the main figure on purpose: there the hue is what tells
 the conditions apart, and spending it on the reset index would leave nothing to
@@ -61,9 +62,10 @@ the first horizon whose 16 make a shape; T320's 4 and T80's 1 do not, and those
 runs are drawn whole with the reason on stderr. In a resume chain the decision
 is per leg: a T320 -> T2560 curriculum (CL) has every T2560 inter-reset piece in
 its own colour, and its T320 leg drawn whole in grey. The switch itself — where
-the horizon changes, split or not — is marked with a solid black rule, heavier
+the horizon changes, split or not — is marked with a solid grey rule, heavier
 than the dotted reset rules, because the two sides of it were measured under
-different tasks rather than merely after a re-randomized batch.
+different tasks rather than merely after a re-randomized batch. That panel is
+then drawn without a legend.
 
 A run whose resets fire faster than the horizon implies — HSR soft-resets at
 segment boundaries — is caught by a second guard on the measured piece length.
@@ -517,8 +519,11 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     poor trade for a caption the reader has anyway.
 
     A horizon switch — the T320 -> T2560 point of a curriculum chain — is marked
-    with a solid black rule either way, since it is what separates the two
-    regimes the panel shows.
+    with a solid grey rule either way, since it is what separates the two
+    regimes the panel shows. On a panel that HAS one the legend is dropped
+    whether or not the curve is split: the rule is then the whole reading of the
+    figure ("before the switch" / "after it"), and a legend enumerating reset
+    indices next to it only competes with it.
     """
     fig, ax = new_curve_figure()
     plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
@@ -539,12 +544,12 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     rules = mark_horizon_changes(ax, curve.x, curve.horizons)
     if rules:
         print(f"[rollout] {curve.label}: horizon switch at "
-              + ", ".join(f"{v:.4g}" for v in rules) + " (black rule)",
-              file=sys.stderr)
+              + ", ".join(f"{v:.4g}" for v in rules)
+              + " (grey rule; legend dropped)", file=sys.stderr)
     x_max = float(curve.x.max()) if curve.x.size else 0.0
     style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max,
                      legend=False)
-    if plan:
+    if plan and not rules:
         n_named = sum(l is not None for l in plan[2])
         ax.legend(title=curve.label, **curve_legend(n_named))
     return save_curve_figure(fig, out_path)

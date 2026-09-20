@@ -736,9 +736,14 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
 # kind of event from a reset: a reset re-randomizes the batch, the switch
 # changes what the task IS, so everything left of it and everything right of it
 # were measured under different conditions. It gets the heaviest mark on the
-# figure, a solid black rule, and it is drawn whether or not the curve is split.
+# figure and it is drawn whether or not the curve is split.
+#
+# Heaviest, not darkest: weight carries the distinction from the dotted reset
+# rules, so the tone can stay grey. At full black a 2pt rule is the loudest
+# thing in the panel and reads as a border cutting the figure in two rather
+# than as an event inside it.
 
-HORIZON_RULE = {"color": "black", "linewidth": 2.2, "zorder": 2.5}
+HORIZON_RULE = {"color": "0.35", "linewidth": 2.2, "zorder": 2.5}
 
 
 def horizon_changes(x, horizons):
