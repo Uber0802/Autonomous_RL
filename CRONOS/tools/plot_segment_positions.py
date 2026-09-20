@@ -103,9 +103,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from plot_common import (NoData, default_colors, load_plot_config,  # noqa: E402
-                         out_variant, read_run_config, read_table, slugify,
-                         unique_slugs, warn)
+from plot_common import (NoData, default_colors, legend_pt,  # noqa: E402
+                         load_plot_config, out_variant, read_run_config,
+                         read_table, slugify, unique_slugs, warn)
 
 # `envs/unsuitable.py::LowZDetector.z_threshold` — the height below which HSR
 # treats an actor as fallen. Reported by `summarize()`; there is no pz figure.
@@ -821,7 +821,7 @@ def _finish_panel(ax, *, xlim, ylim, workspace) -> None:
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.25)
     if workspace:
-        ax.legend(loc="upper right", fontsize=7)
+        ax.legend(loc="upper right", fontsize=legend_pt(-2))
 
 
 _DENSITY_MODES = ("emphasis", "size", "shade", "scatter")
@@ -910,7 +910,8 @@ def emphasis_legend(ax, *, color, c_max: int, dense_min: int,
                                   edgecolors="white"))
     ax.add_artist(ax.legend(handles, [f"{v}" for v in refs],
                             title=f"points / {bin_size * 1000:g} mm",
-                            loc="lower left", fontsize=7, title_fontsize=7,
+                            loc="lower left", fontsize=legend_pt(-3),
+                            title_fontsize=legend_pt(-3),
                             labelspacing=1.3, borderpad=0.8, framealpha=0.8))
 
 
@@ -1002,7 +1003,8 @@ def _draw_cloud(fig, ax, sub: pd.DataFrame, *, xlim, ylim, density: str,
                               alpha=0.55, linewidths=0.4, edgecolors="white")
                    for v in refs]
         ax.add_artist(ax.legend(handles, [str(v) for v in refs], title="count",
-                                loc="lower left", fontsize=7, title_fontsize=7,
+                                loc="lower left", fontsize=legend_pt(-3),
+                                title_fontsize=legend_pt(-3),
                                 labelspacing=1.2, borderpad=0.8, framealpha=0.8))
     else:
         x_edges = np.arange(np.floor(xlim[0] / bin_size),
@@ -1456,8 +1458,8 @@ def render_groups_by_item(cfg, out_base: Path, *, args) -> list:
         # corner inside it is free. The axes' own legend (not add_artist), so
         # `bbox_inches="tight"` keeps it in the saved image.
         ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.01),
-                  ncol=2, fontsize=7, frameon=False, handletextpad=0.2,
-                  columnspacing=1.0)
+                  ncol=2, fontsize=legend_pt(-2), frameon=False,
+                  handletextpad=0.2, columnspacing=1.0)
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
         if task:
             task_dir = out_base.with_name(
@@ -1563,7 +1565,7 @@ def render_scenes(cfg, out_base: Path, *, args) -> list:
             emphasis_legend(ax, color="0.45", c_max=c_max, dense_min=dense_min,
                             bin_size=args.bin_size)
         ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.01),
-                  ncol=len(handles), fontsize=7, frameon=False,
+                  ncol=len(handles), fontsize=legend_pt(-2), frameon=False,
                   handletextpad=0.2, columnspacing=1.0)
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
         scene_dir = out_base.with_name(f"{out_base.stem}_{slugs[label]}_by_scene")

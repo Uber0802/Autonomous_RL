@@ -101,7 +101,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot_common import (RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E402
                          RESET_SPLIT_MIN_PIECE, SHORT_HORIZON_COLOR, X_LABEL,
-                         NoData, concat_chain, curve_legend, piece_colors,
+                         NoData, concat_chain, curve_legend, legend_pt,
+                         piece_colors,
                          default_colors, load_plot_config,
                          mark_horizon_changes, new_curve_figure,
                          out_variant, piece_labels, plot_group_curve,
@@ -246,7 +247,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
     ax0.set_ylabel("rate")
     ax0.set_ylim(-0.02, 1.02)
     ax0.grid(alpha=0.3)
-    ax0.legend(loc="upper left", fontsize=10)
+    ax0.legend(loc="upper left", fontsize=legend_pt(-1))
 
     if by != "none":
         ax1 = axes[1][0]
@@ -262,7 +263,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         ax1.set_ylabel("success rate")
         ax1.set_ylim(-0.02, 1.02)
         ax1.grid(alpha=0.3)
-        ax1.legend(loc="upper left", fontsize=7, ncol=2)
+        ax1.legend(loc="upper left", fontsize=legend_pt(-2), ncol=2)
         ax1.set_title(f"per-segment success by {by}")
 
     axes[-1][0].set_xlabel(X_LABEL[x_key])

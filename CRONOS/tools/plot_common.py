@@ -214,6 +214,24 @@ def default_colors(n: int):
 # both now use; the one thing added on top is that every curve is extended back
 # to the origin (see `prepend_origin`).
 
+# ---------------------------------------------------------------------------
+# Legend type size — ONE knob for every figure in tools/
+# ---------------------------------------------------------------------------
+#
+# Every legend in every tool is written as `legend_pt(n)`, n notches below this
+# base, so raising `LEGEND_PT` grows all of them together and keeps their
+# relative sizes: the main curve legends sit at the base, legends inside a
+# crowded panel or a small grid subplot sit one to three notches under it.
+# Change this number and re-run the tools; nothing else needs touching.
+LEGEND_PT = 11
+LEGEND_MIN_PT = 7          # below this the labels stop being readable in print
+
+
+def legend_pt(steps: int = 0) -> int:
+    """`LEGEND_PT` moved `steps` notches down the scale (negative = smaller)."""
+    return max(LEGEND_MIN_PT, LEGEND_PT + steps)
+
+
 CURVE_FIGSIZE = (6.4, 6.0)
 CURVE_DPI = 120
 # The clipping range for the ±std bands. Not the axes limit: that is fitted to
@@ -230,14 +248,14 @@ CURVE_Y_MIN_TOP = 0.25
 CURVE_LINEWIDTH = 2.0
 CURVE_BAND_ALPHA = 0.16
 CURVE_GRID_ALPHA = 0.3
-# Sized for a figure that lands in a paper at column width, where 8pt legend
-# text is set smaller than the caption under it.
-CURVE_LEGEND = {"loc": "upper left", "fontsize": 11, "title_fontsize": 11}
-# ...except that a legend is only readable while it stays out of the curve's
-# way. A reset-split panel can carry ten entries, and ten 11pt lines reach
-# halfway down a panel whose y bound is now fitted to the data, so past a few
-# entries the type steps back down.
-CURVE_LEGEND_STEPS = ((6, 11), (10, 9))
+# Placement only — the type size comes from `legend_pt` via `curve_legend`.
+CURVE_LEGEND = {"loc": "upper left"}
+# A legend is only readable while it stays out of the curve's way: a
+# reset-split panel can carry ten entries, and ten full-size lines reach halfway
+# down a panel whose y bound is now fitted to the data. So past a few entries
+# the type steps back down — `(at most this many entries, notches below
+# LEGEND_PT)`, with anything longer three notches down.
+CURVE_LEGEND_STEPS = ((6, 0), (10, -2))
 # The plot box is forced square rather than left to `figsize`: the figure's own
 # margins depend on how wide the tick labels come out, so a square `figsize`
 # gives a visibly non-square box, and a different x range changes it again.
@@ -392,13 +410,12 @@ def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
 
 def curve_legend(n_entries: int = 1) -> dict:
     """`CURVE_LEGEND` with the type size fitted to how many entries it holds."""
-    size = CURVE_LEGEND["fontsize"]
-    for limit, pt in CURVE_LEGEND_STEPS:
-        size = pt
+    steps = -3
+    for limit, notches in CURVE_LEGEND_STEPS:
         if n_entries <= limit:
+            steps = notches
             break
-    else:
-        size = 8
+    size = legend_pt(steps)
     return {**CURVE_LEGEND, "fontsize": size, "title_fontsize": size}
 
 

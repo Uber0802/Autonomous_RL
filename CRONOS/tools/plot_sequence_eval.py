@@ -99,8 +99,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot_common import (CURVE_DPI, CURVE_GRID_ALPHA, Group, NoData,  # noqa: E402
-                         PlotConfig, default_colors, load_plot_config,
-                         out_variant, read_table, unique_slugs, warn)
+                         PlotConfig, default_colors, legend_pt,
+                         load_plot_config, out_variant, read_table,
+                         unique_slugs, warn)
 
 _METRICS = ("success", "success_chained", "grasp", "obj_grasped")
 _SEQ_KINDS = ("training", "random")
@@ -456,7 +457,8 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                                if len(domains) > 1 or not group_handles else [])
     # Outside the axes: bars reach 1.0, and no corner is reliably empty.
     ax.legend(handles=handles, title=legend_title, loc="upper left",
-              bbox_to_anchor=(1.01, 1.0), fontsize=8, title_fontsize=8,
+              bbox_to_anchor=(1.01, 1.0), fontsize=legend_pt(-1),
+              title_fontsize=legend_pt(-1),
               frameon=False)
 
     fig.tight_layout()

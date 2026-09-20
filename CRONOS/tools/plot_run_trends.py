@@ -47,6 +47,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_common import legend_pt  # noqa: E402
+
 
 def _moving_average(xs, window: int):
     """5-ep MA with edge handling (shorter window near the start)."""
@@ -365,7 +368,7 @@ def render(run_dir: Path, max_episodes: int, out_path: Path,
     ax.set_title("Task performance: success & grasp")
     ax.set_ylim(0, 1)
     if any([roll_succ_eps, id_eps, ood_eps]):
-        ax.legend(loc="best", fontsize=9)
+        ax.legend(loc="best", fontsize=legend_pt(-1))
     ax.grid(True, alpha=0.3)
 
     # --- Panel (0, 1): Policy drift = approx_kl --------------------------
@@ -565,7 +568,7 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
             matplotlib.ticker.FuncFormatter(lambda x, _p: f"{int(x):,}")
         )
         if idx == 0:
-            ax.legend(loc="best", fontsize=8)
+            ax.legend(loc="best", fontsize=legend_pt(-2))
         ax.grid(True, alpha=0.3)
 
     # Hide any trailing unused subplots.
