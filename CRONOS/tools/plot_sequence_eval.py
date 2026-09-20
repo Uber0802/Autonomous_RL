@@ -98,7 +98,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (CURVE_DPI, CURVE_GRID_ALPHA, Group, NoData,  # noqa: E402
+from plot_common import (CURVE_BOX_ASPECT, CURVE_DPI,  # noqa: E402
+                         CURVE_GRID_ALPHA, Group, NoData,
                          PlotConfig, default_colors, legend_pt,
                          load_plot_config, out_variant, read_table,
                          unique_slugs, warn)
@@ -441,6 +442,9 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     ax.set_ylim(*BAR_YLIM)
     ax.grid(axis="y", alpha=CURVE_GRID_ALPHA, zorder=0)
     ax.set_axisbelow(True)
+    # Same 4:3 box as the curve figures — `figsize` alone does not give one,
+    # since the margins depend on how wide the tick labels come out.
+    ax.set_box_aspect(CURVE_BOX_ASPECT)
 
     # Two keys: colour = group (omitted for a single group, where it would label
     # the only hue), fill = domain (omitted on a one-domain figure, whose legend

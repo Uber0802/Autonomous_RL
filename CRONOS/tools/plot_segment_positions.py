@@ -103,7 +103,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from plot_common import (NoData, default_colors, legend_pt,  # noqa: E402
+from plot_common import (CURVE_BOX_ASPECT, NoData,  # noqa: E402
+                         default_colors, legend_pt,
                          load_plot_config, out_variant, read_run_config,
                          read_table, slugify, unique_slugs, warn)
 
@@ -358,9 +359,41 @@ def _shared_limits(df: pd.DataFrame, pad: float = 0.01, robust: bool = True,
     """
     if ws is not None:
         (x0, x1), (y0, y1), _ = ws
-        return _scale_box(x0, x1, scale), _scale_box(y0, y1, scale)
-    return (_robust_range(df["px"], pad=pad, enabled=robust),
-            _robust_range(df["py"], pad=pad, enabled=robust))
+        return _fit_box_ratio(_scale_box(x0, x1, scale),
+                              _scale_box(y0, y1, scale))
+    return _fit_box_ratio(_robust_range(df["px"], pad=pad, enabled=robust),
+                          _robust_range(df["py"], pad=pad, enabled=robust))
+
+
+# The panel is 4:3 like every other figure, but the axes are equal-aspect —
+# the xy plane is a physical table and squashing it to fit would move the
+# points relative to each other. So the BOX is made 4:3 by widening the VIEW,
+# never by scaling the data: the extra width is empty table.
+PANEL_BOX_RATIO = 1.0 / CURVE_BOX_ASPECT          # width:height, i.e. 4:3
+# ...and all of it is added on the left, which puts the cloud right of the box
+# centre. That is where the room for the count legend comes from: it sits in
+# the lower-left corner, and on a view fitted to the cloud it lands on top of
+# the points.
+PANEL_EXTRA_LEFT = 1.0
+
+
+def _fit_box_ratio(xlim, ylim, ratio: float = PANEL_BOX_RATIO,
+                   extra_left: float = PANEL_EXTRA_LEFT):
+    """`(xlim, ylim)` widened so the equal-aspect box comes out `ratio` wide.
+
+    Only ever grows a range — a view is never cropped to hit the shape, since
+    that would hide points. A view already wider than `ratio` grows in y
+    instead (symmetrically: nothing competes for the top or bottom).
+    """
+    (x0, x1), (y0, y1) = xlim, ylim
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return xlim, ylim
+    if w < ratio * h:
+        extra = ratio * h - w
+        return (x0 - extra * extra_left, x1 + extra * (1.0 - extra_left)), ylim
+    extra = w / ratio - h
+    return xlim, (y0 - extra / 2.0, y1 + extra / 2.0)
 
 
 def _report_offscreen(df: pd.DataFrame, xlim, ylim, label: str = "") -> int:
@@ -782,8 +815,9 @@ def _keep_forward(df: pd.DataFrame, pose_csv: Path) -> pd.DataFrame:
 
 
 def _new_panel():
-    """One figure, one xy scatter. Square, because the axes are equal-aspect."""
-    return plt.subplots(figsize=(5.8, 5.8))
+    """One figure, one xy scatter. Landscape, to hold the 4:3 equal-aspect box
+    that `_fit_box_ratio` gives the shared view."""
+    return plt.subplots(figsize=(5.8 * PANEL_BOX_RATIO, 5.8))
 
 
 def report_panel(label: str, sub: pd.DataFrame) -> None:
@@ -821,7 +855,9 @@ def _finish_panel(ax, *, xlim, ylim, workspace) -> None:
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.25)
     if workspace:
-        ax.legend(loc="upper right", fontsize=legend_pt(-2))
+        # Upper LEFT: the widened 4:3 view puts the cloud right of centre, so
+        # that corner is the empty one (the count legend takes the lower one).
+        ax.legend(loc="upper left", fontsize=legend_pt(-2))
 
 
 _DENSITY_MODES = ("emphasis", "size", "shade", "scatter")

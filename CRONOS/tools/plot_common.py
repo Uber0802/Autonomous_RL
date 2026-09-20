@@ -223,7 +223,7 @@ def default_colors(n: int):
 # relative sizes: the main curve legends sit at the base, legends inside a
 # crowded panel or a small grid subplot sit one to three notches under it.
 # Change this number and re-run the tools; nothing else needs touching.
-LEGEND_PT = 11
+LEGEND_PT = 16
 LEGEND_MIN_PT = 7          # below this the labels stop being readable in print
 
 
@@ -232,7 +232,7 @@ def legend_pt(steps: int = 0) -> int:
     return max(LEGEND_MIN_PT, LEGEND_PT + steps)
 
 
-CURVE_FIGSIZE = (6.4, 6.0)
+CURVE_FIGSIZE = (8.0, 6.0)
 CURVE_DPI = 120
 # The clipping range for the ±std bands. Not the axes limit: that is fitted to
 # the data by `curve_ylim` below, so a run that never passes 0.2 is not drawn as
@@ -263,15 +263,16 @@ CURVE_LEGEND_OUTSIDE = {"loc": "upper left", "bbox_to_anchor": (1.02, 1.0),
 CURVE_LEGEND_STEPS = ((6, 0), (10, -2))
 # The plot box's height:width ratio is forced rather than left to `figsize`:
 # the figure's own margins depend on how wide the tick labels come out, so a
-# square `figsize` gives a visibly non-square box, and a different x range
-# changes it again.
-CURVE_BOX_ASPECT = 1.0
+# 4:3 `figsize` gives a visibly non-4:3 box, and a different x range changes it
+# again. These are the two shapes every curve figure comes in — landscape 4:3
+# by default, 16:9 where the x range is the point.
+CURVE_BOX_ASPECT = 3 / 4
 # The rollout-success curves run over millions of environment steps and are
 # read left-to-right — where the resets fall, how each inter-reset piece rises
-# and drops. A square box spends that width on nothing and squeezes the
-# sixteen pieces of a T2560 run together; a flat one gives them room.
-FLAT_FIGSIZE = (11.0, 4.6)
-FLAT_BOX_ASPECT = 0.34
+# and drops. 4:3 squeezes the sixteen pieces of a T2560 run together; 16:9
+# gives them room.
+FLAT_FIGSIZE = (12.0, 7.0)
+FLAT_BOX_ASPECT = 9 / 16
 
 X_LABEL = {
     "total_steps": "environment steps",

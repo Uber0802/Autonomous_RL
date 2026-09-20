@@ -225,7 +225,9 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         df = sel
 
     n_panels = 1 if by == "none" else 2
-    fig, axes = plt.subplots(n_panels, 1, figsize=(11, 4.2 * n_panels), squeeze=False)
+    fig, axes = plt.subplots(n_panels, 1,
+                             figsize=(FLAT_FIGSIZE[0], FLAT_FIGSIZE[1] * n_panels),
+                             squeeze=False)
     ax0 = axes[0][0]
 
     if direction == "all":
@@ -248,6 +250,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
     ax0.set_ylabel("rate")
     ax0.set_ylim(-0.02, 1.02)
     ax0.grid(alpha=0.3)
+    ax0.set_box_aspect(FLAT_BOX_ASPECT)
     # Outside the box: these curves climb into the upper-left corner, which is
     # where an inside legend would sit.
     ax0.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
@@ -267,6 +270,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         ax1.set_ylabel("success rate")
         ax1.set_ylim(-0.02, 1.02)
         ax1.grid(alpha=0.3)
+        ax1.set_box_aspect(FLAT_BOX_ASPECT)
         ax1.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
                    borderaxespad=0.0, fontsize=legend_pt(-2))
         ax1.set_title(f"per-segment success by {by}")
