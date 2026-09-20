@@ -216,11 +216,28 @@ def default_colors(n: int):
 
 CURVE_FIGSIZE = (6.4, 6.0)
 CURVE_DPI = 120
+# The clipping range for the ±std bands. Not the axes limit: that is fitted to
+# the data by `curve_ylim` below, so a run that never passes 0.2 is not drawn as
+# a flat line along the bottom fifth of an empty panel.
 CURVE_YLIM = (-0.02, 1.02)
+# Fitted upper bound = the highest plotted value (band tops included) plus
+# `HEADROOM` of it, rounded up to a whole `STEP` so the ticks stay round, and
+# never below `MIN_TOP` — zooming in past a quarter of the range makes a low
+# curve look like a high one, which is the opposite of the point.
+CURVE_Y_HEADROOM = 0.10
+CURVE_Y_STEP = 0.05
+CURVE_Y_MIN_TOP = 0.25
 CURVE_LINEWIDTH = 2.0
 CURVE_BAND_ALPHA = 0.16
 CURVE_GRID_ALPHA = 0.3
-CURVE_LEGEND = {"loc": "upper left", "fontsize": 8}
+# Sized for a figure that lands in a paper at column width, where 8pt legend
+# text is set smaller than the caption under it.
+CURVE_LEGEND = {"loc": "upper left", "fontsize": 11, "title_fontsize": 11}
+# ...except that a legend is only readable while it stays out of the curve's
+# way. A reset-split panel can carry ten entries, and ten 11pt lines reach
+# halfway down a panel whose y bound is now fitted to the data, so past a few
+# entries the type steps back down.
+CURVE_LEGEND_STEPS = ((6, 11), (10, 9))
 # The plot box is forced square rather than left to `figsize`: the figure's own
 # margins depend on how wide the tick labels come out, so a square `figsize`
 # gives a visibly non-square box, and a different x range changes it again.
@@ -373,15 +390,83 @@ def plot_group_curve(ax, x, mean, std=None, *, color, label, n_series=None):
         ax.fill_between(x, lo, hi, color=color, alpha=CURVE_BAND_ALPHA, linewidth=0)
 
 
-def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None):
+def curve_legend(n_entries: int = 1) -> dict:
+    """`CURVE_LEGEND` with the type size fitted to how many entries it holds."""
+    size = CURVE_LEGEND["fontsize"]
+    for limit, pt in CURVE_LEGEND_STEPS:
+        size = pt
+        if n_entries <= limit:
+            break
+    else:
+        size = 8
+    return {**CURVE_LEGEND, "fontsize": size, "title_fontsize": size}
+
+
+def axes_peak(ax) -> float:
+    """The highest y value actually drawn on `ax`: lines and band tops.
+
+    Rules drawn with `axvline` are skipped — their y data is (0, 1) in axes
+    coordinates, not success, and taking it for data would pin every fitted
+    limit at 1.0. They are identified by their transform, which is blended
+    rather than `transData`.
+    """
+    import numpy as np
+    peak = 0.0
+    for line in ax.get_lines():
+        if line.get_transform() is not ax.transData:
+            continue
+        y = np.asarray(line.get_ydata(), dtype=float)
+        if y.size and np.isfinite(y).any():
+            peak = max(peak, float(np.nanmax(y)))
+    for coll in ax.collections:                 # fill_between bands
+        if coll.get_transform() is not ax.transData:
+            continue
+        for path in coll.get_paths():
+            v = path.vertices
+            if v.size and np.isfinite(v[:, 1]).any():
+                peak = max(peak, float(np.nanmax(v[:, 1])))
+    return peak
+
+
+def curve_ylim(peak: float):
+    """`(bottom, top)` for a success axis whose data tops out at `peak`.
+
+    A success rate is bounded at 1, but a run that never clears 0.2 spends four
+    fifths of a full-range panel on whitespace, and the shape that the figure
+    exists to show is squashed into the bottom strip. The bound is therefore
+    fitted to the data — rounded up to a whole `CURVE_Y_STEP` so the ticks stay
+    round, floored at `CURVE_Y_MIN_TOP` so a near-zero curve is not magnified
+    into a dramatic one, and padded by the same 2% of the range at both ends
+    that the old fixed `(-0.02, 1.02)` gave the unit interval.
+    """
+    import math
+    if not (peak == peak) or peak <= 0:          # NaN or nothing drawn
+        top = CURVE_Y_MIN_TOP
+    else:
+        top = math.ceil(peak * (1.0 + CURVE_Y_HEADROOM) / CURVE_Y_STEP) * CURVE_Y_STEP
+        top = min(1.0, max(CURVE_Y_MIN_TOP, top))
+    pad = 0.02 * top
+    return (-pad, top + pad)
+
+
+def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
+                     y_max=None, legend=True):
+    """Shared axis dressing. Call it AFTER every curve is drawn: the y bound is
+    fitted to what is on the axes.
+
+    `y_max` overrides the measured peak (for a figure whose scale must match
+    another's); `legend=False` drops the legend, which is what a panel holding a
+    single unsplit curve wants — its one entry would only repeat the filename.
+    """
     ax.set_xlabel(X_LABEL.get(x_axis, x_axis))
     ax.set_ylabel(y_label)
-    ax.set_ylim(*CURVE_YLIM)
+    ax.set_ylim(*curve_ylim(axes_peak(ax) if y_max is None else float(y_max)))
     # Left edge pinned to 0 so the anchored origin is actually visible.
     ax.set_xlim(0.0, None if not x_max else float(x_max))
     ax.grid(alpha=CURVE_GRID_ALPHA)
     ax.set_box_aspect(CURVE_BOX_ASPECT)
-    ax.legend(**CURVE_LEGEND)
+    if legend:
+        ax.legend(**curve_legend(len(ax.get_legend_handles_labels()[0])))
 
 
 def save_curve_figure(fig, out_path) -> Path:
@@ -640,3 +725,53 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
             # the grid's own weight it read as one more gridline.
             ax.axvline(0.5 * (x[lo - 1] + x[lo]), color="0.45", linewidth=0.9,
                        linestyle=":", zorder=0)
+
+
+# ---------------------------------------------------------------------------
+# The curriculum switch
+# ---------------------------------------------------------------------------
+#
+# A resume chain may change the horizon mid-curve — a T320 -> T2560 curriculum
+# (CL) is one run continued under a longer episode. That switch is a different
+# kind of event from a reset: a reset re-randomizes the batch, the switch
+# changes what the task IS, so everything left of it and everything right of it
+# were measured under different conditions. It gets the heaviest mark on the
+# figure, a solid black rule, and it is drawn whether or not the curve is split.
+
+HORIZON_RULE = {"color": "black", "linewidth": 2.2, "zorder": 2.5}
+
+
+def horizon_changes(x, horizons):
+    """x positions where `horizons` steps to a new value.
+
+    Each is the midpoint between the last point of the old horizon and the first
+    of the new one, which is where the switch actually happened — the same
+    convention as the reset rule. NaNs (gap points, or a run that did not record
+    its `episode_len`) carry the last known horizon forward rather than counting
+    as a change of their own.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    if horizons is None:
+        return []
+    h = np.asarray(horizons, dtype=float)
+    if h.size != x.size or h.size < 2:
+        return []
+    out, last, last_i = [], None, None
+    for i in range(h.size):
+        if not np.isfinite(h[i]):
+            continue
+        if last is not None and h[i] != last and last_i is not None:
+            a, b = x[last_i], x[i]
+            if np.isfinite(a) and np.isfinite(b):
+                out.append(0.5 * (a + b))
+        last, last_i = h[i], i
+    return out
+
+
+def mark_horizon_changes(ax, x, horizons) -> list:
+    """Draw the black rule at every horizon switch. Returns the x positions."""
+    xs = horizon_changes(x, horizons)
+    for xc in xs:
+        ax.axvline(xc, **HORIZON_RULE)
+    return xs

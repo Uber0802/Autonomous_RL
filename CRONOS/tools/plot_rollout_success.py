@@ -47,7 +47,9 @@ within-stretch climb followed by the reset's drop reads as noise. Each piece
 gets its own colour — categorical, not a ramp, so four pieces are unmistakable
 and eight are still separable — and a dotted rule marks where the reset fell.
 The hue is free to carry the reset index because a per-group figure holds one
-group and the legend's title names it.
+group and the legend's title names it. A panel whose curve is NOT split carries
+no legend at all: its single entry would be the group label, which the filename
+already gives.
 
 The split stays out of the main figure on purpose: there the hue is what tells
 the conditions apart, and spending it on the reset index would leave nothing to
@@ -58,9 +60,13 @@ At `segment_len = 80` an episode holds `episode_len / 80` segments, so T1280 is
 the first horizon whose 16 make a shape; T320's 4 and T80's 1 do not, and those
 runs are drawn whole with the reason on stderr. In a resume chain the decision
 is per leg: a T320 -> T2560 curriculum (CL) has every T2560 inter-reset piece in
-its own colour, and its T320 leg drawn whole in grey. A run whose resets fire faster than the horizon
-implies — HSR soft-resets at segment boundaries — is caught by a second guard on
-the measured piece length.
+its own colour, and its T320 leg drawn whole in grey. The switch itself — where
+the horizon changes, split or not — is marked with a solid black rule, heavier
+than the dotted reset rules, because the two sides of it were measured under
+different tasks rather than merely after a re-randomized batch.
+
+A run whose resets fire faster than the horizon implies — HSR soft-resets at
+segment boundaries — is caught by a second guard on the measured piece length.
 
 Missing data is skipped, not fatal
 ----------------------------------
@@ -91,10 +97,11 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (CURVE_LEGEND, RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E402
+from plot_common import (RESET_SPLIT_MIN_EPISODE_LEN,  # noqa: E402
                          RESET_SPLIT_MIN_PIECE, SHORT_HORIZON_COLOR, X_LABEL,
-                         NoData, concat_chain, piece_colors,
-                         default_colors, load_plot_config, new_curve_figure,
+                         NoData, concat_chain, curve_legend, piece_colors,
+                         default_colors, load_plot_config,
+                         mark_horizon_changes, new_curve_figure,
                          out_variant, piece_labels, plot_group_curve,
                          plot_reset_segmented_curve, prepend_origin,
                          break_gaps, sample_step,
@@ -237,7 +244,7 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
     ax0.set_ylabel("rate")
     ax0.set_ylim(-0.02, 1.02)
     ax0.grid(alpha=0.3)
-    ax0.legend(loc="upper left", fontsize=8)
+    ax0.legend(loc="upper left", fontsize=10)
 
     if by != "none":
         ax1 = axes[1][0]
@@ -504,8 +511,14 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     When the curve is split the group's label goes in the legend's TITLE, since
     the pieces occupy the entries and the panel would otherwise not say which
     condition it shows (`save_curve_figure` deliberately writes no suptitle —
-    the run identity lives in the filename). When it is drawn whole the label is
-    the single entry instead; carrying both would print it twice.
+    the run identity lives in the filename). When it is drawn whole there is no
+    legend at all: its one entry would be the group label, which the filename
+    already carries, and a box in the corner of an otherwise clean panel is a
+    poor trade for a caption the reader has anyway.
+
+    A horizon switch — the T320 -> T2560 point of a curriculum chain — is marked
+    with a solid black rule either way, since it is what separates the two
+    regimes the panel shows.
     """
     fig, ax = new_curve_figure()
     plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
@@ -523,10 +536,17 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
         plot_group_curve(ax, curve.x, curve.mean, curve.std, color=color,
                          label=curve.label, n_series=curve.n_series)
         print(f"[rollout] {curve.label}: drawn whole — {declined}", file=sys.stderr)
+    rules = mark_horizon_changes(ax, curve.x, curve.horizons)
+    if rules:
+        print(f"[rollout] {curve.label}: horizon switch at "
+              + ", ".join(f"{v:.4g}" for v in rules) + " (black rule)",
+              file=sys.stderr)
     x_max = float(curve.x.max()) if curve.x.size else 0.0
-    style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max)
+    style_curve_axes(ax, x_axis="total_steps", y_label=metric, x_max=x_max,
+                     legend=False)
     if plan:
-        ax.legend(title=curve.label, **CURVE_LEGEND)
+        n_named = sum(l is not None for l in plan[2])
+        ax.legend(title=curve.label, **curve_legend(n_named))
     return save_curve_figure(fig, out_path)
 
 
