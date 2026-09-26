@@ -120,7 +120,7 @@ restores the initial condition. Which means the `noep` vs `noep+LSR` comparison
 is not only "is a reset policy worth the steps" but also "how much of `noep`'s
 apparent success rate is this drift" — and with no `success_at_start` column
 recorded, that second part has to be argued from the position plots
-(`tools/plot_segment_positions.py --phase start`) rather than measured directly.
+(`analysis/plot_segment_positions.py --phase start`) rather than measured directly.
 
 Use `--phase start` and look for the object cloud collapsing onto the receptacle
 positions over training. If the two modes' curves differ mainly in the

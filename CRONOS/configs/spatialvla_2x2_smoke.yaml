@@ -17,7 +17,7 @@
 #     --no-record-video --no-wandb \
 #     --name p5_smoke
 
-cronos_version: V0.3
+cronos_version: V0.99
 policy: spatialvla
 vla_path: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge
 vla_unnorm_key: bridge_orig/1.0.0

@@ -2,7 +2,7 @@
 # Each segment: sample a random task (≠ previous), weighted by frequency in task_sequence.
 # Fan-out enabled (default).
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: pure_random
 fan_out: true
 

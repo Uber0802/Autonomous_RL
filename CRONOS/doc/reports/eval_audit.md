@@ -1,7 +1,7 @@
 # Eval / sequential-eval audit
 
-Describes the current tree; the code version is in [`../version.py`](../version.py).
-Index of these documents: [`README.md`](README.md).
+Describes the current tree; the code version is in [`../version.py`](../../version.py).
+Index of these documents: [`README.md`](../README.md).
 
 Scope: `main.py` (training-time eval, `--eval-single`, `--eval-sequential`) and
 `eval_only.py`, compared against `AutoRL/SimplerEnv/simpler_env/train_ms3_ppo.py`.
@@ -57,7 +57,7 @@ independent of performance on the current task.
 for `env_i` in `[0, num_envs)`, assuming one sample per env. Against the
 over-long list those indices land on the *first* truncation event — step 1 of
 the task, before the arm has moved — so the column was effectively all zeros for
-`task_idx ≥ 1`. `tools/mcnemar_pair.py` reads this file, so the paired
+`task_idx ≥ 1`. `analysis/mcnemar_pair.py` reads this file, so the paired
 significance test was consuming corrupted data.
 
 ### Not affected
@@ -140,7 +140,7 @@ Both columns come from the shared standalone evaluator
 (`evaluation/sequential.py`), used by `eval_only.py` and by
 `main.py --eval-single/--eval-sequential` alike. Chaining is per (domain, round,
 env); every scene of a multi-group config chains on its own env range. See
-[`eval_sequential.md`](eval_sequential.md).
+[`eval_sequential.md`](../eval_sequential.md).
 
 ---
 
@@ -156,13 +156,13 @@ value for that specific env, then bakes it into the name:
 glob/{seq}-{task}/video_{env}-{obj}_{recep}-s_{0|1}.mp4
 ```
 
-`tools/parse_autorl_eval.py` reads those filenames plus
+`analysis/parse_autorl_eval.py` reads those filenames plus
 `stats.yaml["instruction"]` (for the task string) and emits a CSV with the same
 schema as `eval_per_trial.csv`, including both A and B columns. Read-only; it
 never writes inside AutoRL.
 
 ```bash
-python tools/parse_autorl_eval.py \
+python analysis/parse_autorl_eval.py \
     --glob-dir /path/to/AutoRL/SimplerEnv/wandb/run-<id>/glob \
     --obj-set rand --out reports/autorl_baseline_per_trial.csv
 ```
@@ -197,7 +197,7 @@ hand-rolled the same logic separately.
 > `envs/rng_streams.py::random_orders`, which is prefix-stable in the number of
 > rounds, and layouts by seeded per-(round, scene) streams. The byte-identity
 > claim below describes `build_eval_sequences`, which standalone eval no longer
-> calls. See [`eval_sequential.md §3`](eval_sequential.md).
+> calls. See [`eval_sequential.md §3`](../eval_sequential.md).
 
 Verified: for a 4-task pool the new function returns byte-identical orderings to
 both previous implementations across seeds 0-4 and `eval_sequences` ∈ {1,3,5,24},
@@ -220,7 +220,7 @@ metrics are unchanged, and remain directly comparable to prior runs and to
 AutoRL.
 
 The recommended baseline path is to rebuild the AutoRL side with
-`tools/parse_autorl_eval.py` so both sides use the corrected definition, rather
+`analysis/parse_autorl_eval.py` so both sides use the corrected definition, rather
 than preserving a matched-but-wrong metric.
 
 ---

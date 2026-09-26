@@ -4,7 +4,7 @@
 # Group A: ketchup_bottle (7) + kitchen_shovel (2) on yellow_plate (1) + cloth (2)
 # Group B: bread (3) + 7up_can (5) on newspaper (4) + carpet (3)
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential
 fan_out: true
 

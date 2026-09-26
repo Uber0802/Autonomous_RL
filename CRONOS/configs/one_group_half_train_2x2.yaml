@@ -8,7 +8,7 @@
 # V24 constraint: 4 eval tasks, so num_envs must be divisible by 4.
 # V25 constraint: 4 eval tasks % 2 train tasks == 0. ✓
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential
 fan_out: true
 

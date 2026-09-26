@@ -17,8 +17,8 @@ from pathlib import Path
 
 
 def _add_paths():
-    here = Path(__file__).resolve().parent.parent           # Autonomous_RL/SpatialVLA
-    root = here.parent                                       # Autonomous_RL
+    here = Path(__file__).resolve().parent.parent           # <repo>/SpatialVLA
+    root = here.parent                                       # <repo>
     for p in (str(root / "SimplerEnv"), str(root / "CRONOS"), str(here)):
         if p not in sys.path:
             sys.path.insert(0, p)

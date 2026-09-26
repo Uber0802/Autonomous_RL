@@ -4,7 +4,7 @@
 # Use with: bash scripts/eval.sh /path/to/episode_XXXX configs/eval/one_group_half_train_2x2.yaml 0 5
 # Default eval_mode: sequential (training_seq + 4 random perms). Override with --eval-mode single.
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequence_random              # eval default: random permutations (AutoRL parity)
 fan_out: true
 

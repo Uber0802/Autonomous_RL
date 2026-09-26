@@ -1833,7 +1833,7 @@ class CronosRunner:
         dashboard is convenience, not load-bearing (the McNemar gate reads
         `eval_success.csv` directly).
         """
-        cronos_root = Path(__file__).resolve().parent           # Autonomous_RL/CRONOS
+        cronos_root = Path(__file__).resolve().parent           # <repo>/CRONOS
         sys.path.insert(0, str(cronos_root))
         from tools.plot_run_trends import render as _render_trends
         from tools.plot_run_trends import render_per_task as _render_trends_per_task

@@ -1,7 +1,6 @@
-# Dependencies for scripts/plot_v04.py (V0.4 success-curve aggregator + plotter).
-# These versions match what's installed in nerl_env where the script has been
-# verified to run end-to-end. cronos_env already ships numpy + matplotlib at
-# these versions; only pandas needs to be installed for plot_v04.
+# Plotting dependencies, installed by setup.sh. Needed by the training-time
+# dashboard (tools/plot_run_trends.py, called from main.py after each eval).
+# Pinned to the versions it was verified with.
 
 pandas==2.3.3
 numpy==1.26.4

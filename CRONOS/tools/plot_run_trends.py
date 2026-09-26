@@ -47,8 +47,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import legend_pt  # noqa: E402
+# Legend sizes. Kept local so this dashboard (imported by `main.py` during
+# training) does not depend on the offline analysis tools.
+LEGEND_PT = 16
+LEGEND_MIN_PT = 7
+
+
+def legend_pt(steps: int = 0) -> int:
+    """`LEGEND_PT` moved `steps` notches down the scale (negative = smaller)."""
+    return max(LEGEND_MIN_PT, LEGEND_PT + steps)
 
 
 def _moving_average(xs, window: int):
@@ -153,7 +160,7 @@ def _wandb_history(entity: str, project: str, run_id: str):
         print("[warn] wandb not installed — skipping cloud history", file=sys.stderr)
         return ("?", [])
     api = wandb.Api()
-    full = f"{entity}/{project}/{run_id}"
+    full = f"{entity}/{project}/{run_id}" if entity else f"{project}/{run_id}"
     try:
         run = api.run(full)
     except Exception as e:
@@ -596,8 +603,8 @@ def main():
     p.add_argument("--out", required=True, help="output PNG path for the 4-panel dashboard")
     p.add_argument("--out-per-task", default=None,
                    help="output PNG path for the per-task breakdown (default: alongside --out)")
-    p.add_argument("--entity", default=os.environ.get("WANDB_ENTITY",
-                                                      "b09501048-national-taiwan-university"))
+    p.add_argument("--entity", default=os.environ.get("WANDB_ENTITY"),
+                   help="wandb entity (default: $WANDB_ENTITY, else your wandb default entity)")
     p.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "CRONOS"))
     p.add_argument("--run-id", default=None, help="wandb run id (derived from --run-dir if omitted)")
     p.add_argument("--prior-run-id", action="append", default=[],

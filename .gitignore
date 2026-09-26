@@ -65,3 +65,10 @@ CRONOS/test_vla_limits.py
 openvla/wandb/
 SimplerEnv/wandb/
 ManiSkill/data/
+CRONOS/doc/tmp/
+
+# Offline analysis: plotting / statistics tools, per-experiment plot configs,
+# figure renderers and their outputs. Kept locally, not part of the release.
+# See CRONOS/doc/README.md ("What is not in the release").
+CRONOS/analysis/
+reports/

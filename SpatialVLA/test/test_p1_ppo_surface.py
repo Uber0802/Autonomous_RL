@@ -9,7 +9,7 @@ NF-13 caveat: the shim must build the prompt+suffix byte-identically to the
 real processor path, else a mirrored wrong assumption yields a false P-1 pass.
 P-2 re-runs these gates through the real adapter for the authoritative check.
 
-Usage (from `Autonomous_RL/SpatialVLA/`):
+Usage (from `<repo>/SpatialVLA/`):
     conda activate spatialvla_cronos
     CUDA_VISIBLE_DEVICES=0 python -m test.test_p1_ppo_surface \\
         --model-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge

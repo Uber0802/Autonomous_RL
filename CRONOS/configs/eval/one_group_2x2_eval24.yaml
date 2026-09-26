@@ -2,7 +2,7 @@
 # single-group scene** that the PPO plan's P-5 and P-6 train on.
 #
 # Why this YAML matches the PPO plan's "Minimal single-group config"
-# (Autonomous_RL/README.md §"Minimal single-group config") *except* num_envs:
+# (README.md §"Minimal single-group config") *except* num_envs:
 #   - same `obj: [7, 2]` (ketchup_bottle, kitchen_shovel)
 #   - same `recep: [1, 2]` (yellow_plate, cloth)
 #   - same `name: "default"` and `task_order: "sequential"` so the scheduler
@@ -37,7 +37,7 @@
 # meaningful rand_ood pool. The McNemar gate (and the E-5 gate) reads
 # the `in_domain` numbers; OOD is reported for context only.
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential               # matches Minimal single-group; inert in eval_mode=single
 fan_out: true
 

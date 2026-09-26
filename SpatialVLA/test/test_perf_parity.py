@@ -24,7 +24,7 @@ Each fixture run does 20 real `policy.get_action` calls plus one
 `CronosPPO.train_epoch` → meaningful s/step and s/update measurements (much
 smaller magnitude than P-5's 4.49 s/step, but the per-phase RATIO scales).
 
-Usage (from `Autonomous_RL/SpatialVLA/`):
+Usage (from `<repo>/SpatialVLA/`):
     conda activate spatialvla_cronos
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=.:../SimplerEnv:../CRONOS \\
         python -m test.test_perf_parity \\

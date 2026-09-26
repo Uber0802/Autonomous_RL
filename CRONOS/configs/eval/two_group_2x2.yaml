@@ -10,7 +10,7 @@
 # (object, receptacle) to all envs, but with two groups the env loads different
 # physical objects per env-range — set_task("kitchen shovel", ...) succeeds for
 # group_A's envs (which have it) and FAILS for group_B's envs. This config is
-# included for completeness; multi-group eval is V0.4 M2 work.
+# included for completeness; multi-group eval is not supported by this legacy file.
 #
 # For now, to evaluate a checkpoint trained on this two-group config, run two
 # single-group eval passes — one per group:
@@ -20,7 +20,7 @@
 # `--eval-at-start` / training-time eval, which uses fan-out rotation and supports
 # multi-group natively.)
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential
 fan_out: true
 

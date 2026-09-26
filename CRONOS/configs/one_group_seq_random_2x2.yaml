@@ -2,7 +2,7 @@
 # Each epoch: random permutation of all 4 unique tasks, then reshuffle.
 # Fan-out enabled (default).
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequence_random
 fan_out: true
 

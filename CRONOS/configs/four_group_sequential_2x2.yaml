@@ -10,7 +10,7 @@
 # Groups A and B are bit-identical to two_group_sequential_2x2.yaml so any baseline trained
 # on that config remains comparable on its first 32 envs of this one.
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential
 fan_out: true
 

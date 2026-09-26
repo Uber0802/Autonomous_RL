@@ -31,7 +31,7 @@ Skipped at P-4 (exercised at P-5/P-6): the rollout per-task observability
 keys (`rollout/<task>/*`) come from a REAL env step, which the gate cannot
 synthesize. The PLUMBING is verified by source assertions.
 
-Usage (from `Autonomous_RL/SpatialVLA/`):
+Usage (from `<repo>/SpatialVLA/`):
     conda activate spatialvla_cronos
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=.:../SimplerEnv:../CRONOS \\
         python -m test.test_p4_smoke \\
@@ -126,7 +126,7 @@ def main():
     args = parser.parse_args()
 
     # Make adapter + CRONOS importable.
-    here = Path(__file__).resolve().parent.parent          # Autonomous_RL/SpatialVLA
+    here = Path(__file__).resolve().parent.parent          # <repo>/SpatialVLA
     for p in (str(here.parent / "SimplerEnv"),
               str(here.parent / "CRONOS"),
               str(here)):

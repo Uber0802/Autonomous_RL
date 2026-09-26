@@ -5,7 +5,7 @@
 #
 # Use with: bash scripts/eval.sh /path/to/episode_XXXX configs/eval/one_group_pure_random_2x2.yaml 0 5
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequence_random              # eval default: random permutations (AutoRL parity)
 fan_out: true
 

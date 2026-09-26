@@ -4,7 +4,7 @@
 # Objects: toy_bear (10), plastic_bottle (4), fast_food_cup (11)
 # Receptacles: sheet_metal (5), drawing_tablet (6), flat_bowl (9)
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequential
 fan_out: true
 

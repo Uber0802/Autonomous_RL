@@ -11,7 +11,7 @@ Three task ordering modes:
 
 Example config::
 
-    cronos_version: V0.4
+    cronos_version: V0.99
     task_order: sequential
     num_envs: 64
 

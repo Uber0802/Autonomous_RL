@@ -6,7 +6,7 @@
 # Note: with 9 tasks, 9! = 362,880 permutations. Default sequential eval samples 4
 # of them in addition to the training order; set `--eval-sequences N` to change.
 
-cronos_version: V0.3
+cronos_version: V0.99
 task_order: sequence_random              # eval default: random permutations (AutoRL parity)
 fan_out: true
 

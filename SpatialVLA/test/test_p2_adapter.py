@@ -7,7 +7,7 @@ adapter from `simpler_env.policies.spatialvla.spatialvla_train.SpatialVLAPolicy`
 P-1's gate run went through a `HandSuffixShim`; per NF-13, P-2 is the
 *authoritative* first exercise of the real `_preprocess_obs` evaluate path.
 
-Usage (from `Autonomous_RL/SpatialVLA/`):
+Usage (from `<repo>/SpatialVLA/`):
     conda activate spatialvla_cronos
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=.:../SimplerEnv \\
         python -m test.test_p2_adapter \\
@@ -78,7 +78,7 @@ def main():
     args = parser.parse_args()
 
     # Make the adapter importable from its SimplerEnv location.
-    here = Path(__file__).resolve().parent.parent           # Autonomous_RL/SpatialVLA
+    here = Path(__file__).resolve().parent.parent           # <repo>/SpatialVLA
     simpler_env = (here.parent / "SimplerEnv").resolve()
     sys.path.insert(0, str(simpler_env))
     sys.path.insert(0, str(here))                            # for `model.*` imports inside adapter

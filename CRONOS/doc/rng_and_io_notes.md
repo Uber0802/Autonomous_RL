@@ -180,12 +180,12 @@ wandb overlay points. **[read]** Fix: B1's rebuild rewrites whole files. **[test
 
 The old per-trial writer used `successes[env_i] if env_i < len(successes) else 0.0`
 and, on the continued-segment path, indexed the wrong timestep
-([`eval_audit.md`](eval_audit.md)). Fix: exactly one terminal report per segment,
+([`eval_audit.md`](reports/eval_audit.md)). Fix: exactly one terminal report per segment,
 on its last step, with `num_envs` values — anything else raises. **[test]**
 
 ### B5. Consumer keys narrower than the data
 
-`tools/mcnemar_pair.py` keyed trials by `(eval_kind, task, env_idx)`; with several
+`analysis/mcnemar_pair.py` keyed trials by `(eval_kind, task, env_idx)`; with several
 rounds every round overwrote the previous one. Fix: key includes group, round and
 task slot, and duplicates raise. **[test]**
 

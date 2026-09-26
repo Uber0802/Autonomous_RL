@@ -1,13 +1,13 @@
 # GRPO 失效診斷 / Why GRPO collapses
 
-Index of these documents: [`README.md`](README.md).
+Index of these documents: [`README.md`](../README.md).
 Companion: [`grpo_autorl.md`](grpo_autorl.md) — 該文件的 §4.1、§5、§6 有三處需要修正，見本文 §5。
 Three claims in that document need correcting; see §5 below.
 
 **範圍 / Scope:** `--alg-name grpo` 在 CRONOS 上為何不但學不起來、還會把 SFT 初始策略破壞掉。
-包含七個 GRPO run 的實測、與 `~/workspace/AutoRL` 的逐項對拍，以及修法建議。
+包含七個 GRPO run 的實測、與 `$AUTORL_ROOT` 的逐項對拍，以及修法建議。
 Why `--alg-name grpo` not only fails to learn but actively destroys the SFT initialization.
-Covers seven measured GRPO runs, an item-by-item comparison against `~/workspace/AutoRL`,
+Covers seven measured GRPO runs, an item-by-item comparison against `$AUTORL_ROOT`,
 and the recommended fix.
 
 **狀態 / Status:** 本文的每一項數值都來自 (a) 真實 run 的 `glob/` 產出，或 (b) 直接 import
@@ -196,7 +196,7 @@ non-zero rewards → more dead samples → noisier signal → fewer grasps.
 
 ## 4. 與 AutoRL 的對照 / Comparison against AutoRL
 
-比對對象 / Compared against: `~/workspace/AutoRL/SimplerEnv/simpler_env/`
+比對對象 / Compared against: `$AUTORL_ROOT/SimplerEnv/simpler_env/`
 （`utils/replay_buffer.py:109`、`policies/openvla/openvla_train.py:411,539`、`train_ms3_ppo.py:271`）
 
 ### 4.1 完全一致的部分 / Bit-identical
@@ -238,21 +238,21 @@ more frequent, but it is an aggravating factor, not the cause; the cause is the 
 
 ## 5. `grpo_autorl.md` 需要修正的三處 / Three corrections to `grpo_autorl.md`
 
-### 5.1 §4.1 / Finding #2 的 ×`act_dim` 不適用於 `~/workspace/AutoRL`
+### 5.1 §4.1 / Finding #2 的 ×`act_dim` 不適用於 `$AUTORL_ROOT`
 
 **中文** — 文件說 `replay_buffer.py:20` 把 `action_log_probs` 配置成寬度 `act_dim`，
 使 `[B,1]` 被廣播成 `[B,7]`、`sum(dim=-1)` 把 policy loss 放大 7 倍，並列為「高」嚴重度。
-**在 `~/workspace/AutoRL` 不成立**：三個 buffer class 的 `action_log_probs` 都是**寬度 1**
+**在 `$AUTORL_ROOT` 不成立**：三個 buffer class 的 `action_log_probs` 都是**寬度 1**
 （`replay_buffer.py:20`、`:217`、`:273`），且 `evaluate_actions` 有
 `assert logprobs.shape[1] == 1`（`openvla_train.py:234`）。
 `.sum(dim=-1, keepdim=True)` 作用在 `[mb,1]` 上是 **no-op**，與 `.mean()` 完全相同。
 
-寬度 `act_dim` 的版本在 **`~/workspace/RL4VLA/SimplerEnv/simpler_env/utils/replay_buffer.py:18`**
+寬度 `act_dim` 的版本在 **`$RL4VLA_ROOT/SimplerEnv/simpler_env/utils/replay_buffer.py:18`**
 ——文件把 RL4VLA 的 bug 記到 AutoRL 頭上了。連帶地 `training/grpo.py` docstring 那句
 「CRONOS GRPO losses are `act_dim` times smaller than AutoRL's … Compare gradient norms, not raw
 loss values」也不成立：**兩邊 loss 可以直接比較。**
 
-**English** — The ×`act_dim` inflation does not exist in `~/workspace/AutoRL`: all three buffer
+**English** — The ×`act_dim` inflation does not exist in `$AUTORL_ROOT`: all three buffer
 classes allocate `action_log_probs` at width 1, and `evaluate_actions` asserts `[B,1]`, so
 `sum(dim=-1)` is a no-op equal to `.mean()`. The width-`act_dim` allocation is in **RL4VLA**
 (`replay_buffer.py:18`); the bug was misattributed. The note in `training/grpo.py`'s docstring is
@@ -288,7 +288,7 @@ divergence for the 2x2 config: AutoRL's own 2x2 env is equally heterogeneous, so
 
 ### 5.3 AutoRL 的 GRPO 路徑從未跑過 / AutoRL never ran GRPO
 
-**中文** — `~/workspace/AutoRL/wandb` 有 41 個 run，能讀出 `alg_name` 的 35 個**全部是 `ppo`**，
+**中文** — `$AUTORL_ROOT/wandb` 有 41 個 run，能讀出 `alg_name` 的 35 個**全部是 `ppo`**，
 另 6 個是空的或中斷的 run。config 裡出現的 `grpo` 字串都是 `alg_grpo_fix` 這個 key。
 **沒有任何一個 GRPO run。** 所以「對齊 AutoRL」對齊的是一段從未產生過結果的程式碼——
 忠實移植從來就不等於正確。
@@ -341,7 +341,7 @@ an outcome reward and fixes all four mechanisms at once. Suggested as
 ## 7. 重跑驗證 / Re-verification
 
 不需要 GPU / No GPU required. `$PY` = 任一有 numpy 的環境，例如
-`~/miniconda3/envs/cronos_env/bin/python`。
+`$(conda run -n cronos_tf447_cu121 which python)`。
 
 ```bash
 # §2.1 / §2.2 — 每個 run 的 grasp / success 首末比較
@@ -436,19 +436,19 @@ PY
 ```bash
 # §5.1 — AutoRL 的 action_log_probs 寬度是 1，不是 act_dim（RL4VLA 才是）
 grep -n 'action_log_probs = \(np.zeros\|create_memmap\)' \
-  ~/workspace/AutoRL/SimplerEnv/simpler_env/utils/replay_buffer.py \
-  ~/workspace/RL4VLA/SimplerEnv/simpler_env/utils/replay_buffer.py
+  $AUTORL_ROOT/SimplerEnv/simpler_env/utils/replay_buffer.py \
+  $RL4VLA_ROOT/SimplerEnv/simpler_env/utils/replay_buffer.py
 grep -n 'assert len(logprobs.shape)' \
-  ~/workspace/AutoRL/SimplerEnv/simpler_env/policies/openvla/openvla_train.py
+  $AUTORL_ROOT/SimplerEnv/simpler_env/policies/openvla/openvla_train.py
 
 # §5.2 — pose 分支的真實位置與極性
 grep -n 'select_pos_ids =\|if obj_set' \
-  ~/workspace/AutoRL/ManiSkill/mani_skill/envs/tasks/digital_twins/bridge_dataset_eval/pick_place_multi.py
+  $AUTORL_ROOT/ManiSkill/mani_skill/envs/tasks/digital_twins/bridge_dataset_eval/pick_place_multi.py
 
 # §5.3 — AutoRL 的 41 個 run 全是 ppo
 $PY - <<'PY'
 import glob,re,os
-for d in sorted(glob.glob(os.path.expanduser('~/workspace/AutoRL/wandb/*run-*/'))):
+for d in sorted(glob.glob(os.path.expandvars('$AUTORL_ROOT/wandb/*run-*/'))):
     hit=None
     for f in glob.glob(d+'*.wandb'):
         b=open(f,'rb').read(4_000_000)

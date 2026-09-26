@@ -25,7 +25,7 @@
 # --resume-from). P-6 is NOT warm-started from P-5; each is its own paired
 # McNemar gate.
 
-cronos_version: V0.3
+cronos_version: V0.99
 
 # --- policy / VLA wiring (P-3) ---
 policy: spatialvla

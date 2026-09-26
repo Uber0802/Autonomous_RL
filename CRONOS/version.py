@@ -15,10 +15,10 @@ Deliberately dependency-free so anything can import it — including the offline
 plot tools, which run without a GPU stack.
 """
 
-__version__ = "V0.93"
+__version__ = "V0.99"
 
 # Config-file format version. Tracked separately because the YAML schema changes
 # far less often than the code. NOTE: the `cronos_version` key inside a config is
 # accepted by `envs/config.py` but never read or validated — it is a human
 # annotation only, not a compatibility gate.
-CONFIG_FORMAT_VERSION = "V0.4"
+CONFIG_FORMAT_VERSION = "V0.99"

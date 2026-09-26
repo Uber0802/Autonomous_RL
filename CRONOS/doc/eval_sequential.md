@@ -30,7 +30,7 @@ torch). **Not yet run on hardware**; see §8.
 
 AutoRL `render_seq` semantics are kept: reset at the start of a round, switch tasks
 without resetting, `begin_segment()` reopening the measurement window
-([`eval_audit.md`](eval_audit.md)).
+([`eval_audit.md`](reports/eval_audit.md)).
 
 ## 2. Settings
 
@@ -320,7 +320,7 @@ script on this machine, **[read]** by reading code.
 
 | # | AutoRL `render_seq` / `render` | CRONOS | Effect on comparing numbers |
 |---|---|---|---|
-| 1 | `_elapsed_steps` not reset between tasks: from task 2 on, aggregate `success` is a time-average (video filenames hold the correct terminal value) | `begin_segment()`: terminal value | AutoRL aggregates are wrong; rebuild with `tools/parse_autorl_eval.py` |
+| 1 | `_elapsed_steps` not reset between tasks: from task 2 on, aggregate `success` is a time-average (video filenames hold the correct terminal value) | `begin_segment()`: terminal value | AutoRL aggregates are wrong; rebuild with `analysis/parse_autorl_eval.py` |
 | 2 | grasp latches carry over across tasks | cleared per task slot | grasp metrics not comparable for task slot ≥ 1 |
 | 3 | every env runs one order per sequence | 4 blocks run 4 orders per round; round 0 = the rotations AutoRL's own *training* ran | compare pooled rates, not per-sequence |
 | 4 | 4 random permutations sampled from the 23 non-identity orders; can include training rotations (seeds 0 and 1 draw `BCDA`) **[local]** | 5 untrained cycles = the 20 non-rotation orders, each once | "random" means untrained only in CRONOS |
@@ -343,6 +343,6 @@ use it, so eval is unaffected; the LSR backward reward
 
 ### 9d. Known gap
 
-`tools/parse_autorl_eval.py` writes `prefix = autorl_seq…`, which
-`tools/mcnemar_pair.py` does not map to a domain, so recovered AutoRL rows are
+`analysis/parse_autorl_eval.py` writes `prefix = autorl_seq…`, which
+`analysis/mcnemar_pair.py` does not map to a domain, so recovered AutoRL rows are
 skipped. With 9b #3–#5 only pooled rates are comparable in any case.

@@ -3,7 +3,7 @@
 SpatialVLA actor + value head (eval + PPO surface).
 
 Mirrors `prismatic.extern.hf.modeling_prismatic.OpenVLAForActionPredictionWithValueHead`
-(`Autonomous_RL/openvla/prismatic/extern/hf/modeling_prismatic.py:627`) so the CRONOS
+(`<repo>/openvla/prismatic/extern/hf/modeling_prismatic.py:627`) so the CRONOS
 PPO seam can swap SpatialVLA in for OpenVLA transparently.
 
 Eval surface (E-1, unchanged):
@@ -70,7 +70,7 @@ class ValueHead(nn.Module):
     """3-layer MLP value head.
 
     Copied from OpenVLA's eval-side value head
-    (`Autonomous_RL/openvla/prismatic/extern/hf/modeling_prismatic.py:602`) so
+    (`<repo>/openvla/prismatic/extern/hf/modeling_prismatic.py:602`) so
     that PPO can use one identical recipe across policies — only the input
     dimensionality differs (SpatialVLA's Gemma2-2B hidden_size=2304 vs
     OpenVLA's Llama-2-7B hidden_size=4096).

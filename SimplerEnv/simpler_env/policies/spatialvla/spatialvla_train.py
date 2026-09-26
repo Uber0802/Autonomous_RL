@@ -58,7 +58,7 @@ from model.modeling_spatialvla_valuehead import SpatialVLAForActionPredictionWit
 from simpler_env.policies.peft_compat import load_peft_adapter
 
 
-# Prompt template — matches `Autonomous_RL/SpatialVLA/test/test_huggingface.py`
+# Prompt template — matches `<repo>/SpatialVLA/test/test_huggingface.py`
 # and the eval plan §Approach ("Decisions baked in"). Lowercasing the
 # instruction makes minor case differences ("Carrot" vs "carrot") inert.
 _PROMPT_TEMPLATE = "What action should the robot take to {instruction}?"
