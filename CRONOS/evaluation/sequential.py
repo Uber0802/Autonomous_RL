@@ -9,7 +9,7 @@ The unit of work is (domain, pass, round). Per unit:
                                                                what ran before)
   3. for each task slot: set_task (+ begin_segment after the first), `segment_len`
      steps, terminal success/grasp per env                     (AutoRL render_seq
-                                                               semantics; doc/eval_audit.md)
+                                                               semantics)
   4. rows appended to eval_per_trial / eval_layouts / eval_segment_pose, then
      eval_status.json updated — so a crash loses at most the unit in progress.
 

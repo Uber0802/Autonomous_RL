@@ -9,7 +9,7 @@ task_order: sequential
 fan_out: true
 
 # Standalone eval (eval_only.py / scripts/eval.sh) reads this same file; training
-# ignores this block. Keys: evaluation/plan.py::EVAL_SETTING_SPEC, doc/eval_sequential.md.
+# ignores this block. Keys: evaluation/plan.py::EVAL_SETTING_SPEC; README "Evaluation (standalone)".
 eval:
   mode: sequential                 # sequential (AutoRL render_seq) | single (AutoRL render; blocks run tasks side by side)
   pose_sets: 1                     # sets of start poses. One set = 6 rounds = all 24 orders (4 tasks);

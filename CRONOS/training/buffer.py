@@ -169,7 +169,7 @@ class CronosReplayBuffer:
                 ``"global"`` — the std over the whole update, so groups are
                                centred independently but weighted equally.
                 ``"none"``   — no division (centring only).
-                See `doc/grpo_autorl.md` for the trade-off; the short version is
+                The short version of the trade-off is
                 that per-group std doubles as a per-group *weight*, which is
                 harmless when the group is the whole batch and distorting when
                 the group is a handful of envs.

@@ -24,7 +24,7 @@
 #             recep  reset goal is another receptacle, != the forward task's
 #             mixed  per-env draw between the two; ratio via PERTURB_RECEP_PROB
 #
-# Reset modes (see doc/reset_modes.md for the full account):
+# Reset modes (see README "Reset-mode legend"):
 #   normal    — standard episodic training (hard reset every episode)
 #   LSR       — Low-level State Reset: learn the backward policy
 #   HSR       — High-level State Reset: respawn fallen objects every task boundary
@@ -207,7 +207,7 @@ case $RESET in
     # its initial state — HSR only respawns actors the detector flags as fallen
     # or out of bounds — so the start-state distribution drifts toward
     # already-satisfied tasks over training. main.py warns about this at
-    # startup; doc/reset_modes.md explains what it does to the metrics.
+    # startup: start states drift toward already-satisfied tasks, which inflates metrics.
     RESET_ARGS="$_HSR_ARGS $_NOEP_ARGS"
     _hsr_on=1
     ;;
@@ -223,7 +223,7 @@ case $RESET in
   *) echo "Unknown reset mode: $RESET"
      echo "Valid: normal|LSR|HSR|HSR+LSR|noep|noep+LSR  (LSR+HSR = HSR+LSR)"
      echo "Note: noep means HSR without episodic reset and does NOT include"
-     echo "      LSR; use noep+LSR for that (see doc/reset_modes.md)."
+     echo "      LSR; use noep+LSR for that (see README 'Reset-mode legend')."
      exit 1 ;;
 esac
 

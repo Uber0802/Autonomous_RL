@@ -1,6 +1,6 @@
 # CRONOS
 
-> **V0.99 — early release.** What changed in each version: [`CRONOS/doc/CHANGELOG.md`](CRONOS/doc/CHANGELOG.md). All other documentation: [`CRONOS/doc/`](CRONOS/doc/README.md).
+> **V0.99 — early release.** See [Version](#version) for known issues.
 
 CRONOS is a refactored robotic manipulation training benchmark designed for **non-episodic reinforcement learning** and **multi-task training**. It is built on the `RL4VLA` backbone with optimized modules from `AutoRL`.
 
@@ -10,11 +10,11 @@ CRONOS is a refactored robotic manipulation training benchmark designed for **no
 - **Per-env rotation eval** — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
 - **Per-group objects/backgrounds** — different groups can have different physical objects and visual overlays in the same training run.
 - **Dual VLA support** — `--policy openvla|spatialvla` switches between OpenVLA-7B and SpatialVLA-4B adapters (7-token vs 3-token action sequences).
-- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in (**experimental** — it currently collapses, see [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md)); grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
+- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in (**experimental** — see [Version](#version)); grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
 - **Orthogonal reset dimensions** — LSR (learned reset policy), HSR (respawn fallen actors), EER (gripper re-home), and Perturbation (the reset goal is sometimes a *different receptacle* instead of the table), each toggled independently.
 - **Modular Environment** — decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
 - **Efficient Rollouts** — multi-task execution with GPU-parallelized ManiSkill environments, memory-mapped replay buffers.
-- **Analysis-ready outputs** — per-segment CSVs recording both sides of every segment boundary, documented column by column in [`CRONOS/doc/data_schemas.md`](CRONOS/doc/data_schemas.md).
+- **Analysis-ready outputs** — per-segment CSVs recording both sides of every segment boundary (see [Training-time outputs](#training-time-outputs)).
 
 ## Installation
 
@@ -55,9 +55,8 @@ conda activate cronos_tf447_cu128
 #   cronos_tf440_cu128 — OpenVLA-only on Blackwell, V0.1 transformers ABI
 ```
 
-> Memory figures are historical reports; re-measure with `tools/bench_rollout.py`
-> on your hardware. Why there are four envs, and what "bit-exact" means here:
-> [`CRONOS/doc/environments.md`](CRONOS/doc/environments.md).
+> Memory figures are approximate; re-measure with `tools/bench_rollout.py` on your
+> hardware. For bit-exact comparisons, run every arm of an ablation in the same env.
 
 ### 3. Run the setup script
 
@@ -121,8 +120,7 @@ cd CRONOS
 ### 7. Checkpoint portability across envs
 
 Checkpoints trained in a `tf447` env load in a `tf440` env and vice versa (handled
-by `SimplerEnv/simpler_env/policies/peft_compat.py`; details in
-[`CRONOS/doc/environments.md`](CRONOS/doc/environments.md)). Audit a checkpoint tree before a long eval, without loading a model:
+by `SimplerEnv/simpler_env/policies/peft_compat.py`). Audit a checkpoint tree before a long eval, without loading a model:
 
 ```bash
 python tools/check_ckpt_compat.py /path/to/runs                 # default target: tf440, the strict reader
@@ -191,7 +189,7 @@ GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential
 
 `RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
 
-**Reset-mode legend** — full account in [`CRONOS/doc/reset_modes.md`](CRONOS/doc/reset_modes.md):
+**Reset-mode legend:**
 
 | mode | CLI flags added | `RUN_TAG` | Meaning |
 |---|---|---|---|
@@ -210,8 +208,8 @@ removing the episodic reset hurt" from "does learning a reset policy pay for it"
 > its initial state: HSR respawns only what its detector flags as fallen or out
 > of bounds, and there is no `env.reset()`. Start states therefore drift toward
 > already-satisfied tasks, which inflates both reward and rollout success rate.
-> `main.py` warns at startup; [`doc/reset_modes.md`](CRONOS/doc/reset_modes.md) says how to
-> check for it. Run directories containing `-noep-` (before V0.93g) are `noep+LSR` runs.
+> `main.py` warns at startup. To check a run, compare the start-of-segment object
+> positions (`segment_pose.csv`, `phase=start`) with the spawn positions.
 
 **Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR (`LSR`, `HSR+LSR`, `noep+LSR`):
 
@@ -222,8 +220,7 @@ removing the episodic reset hurt" from "does learning a reset policy pay for it"
 | `mixed` | `--backward-goal mixed --backward-recep-prob P` | per-env draw between the two; `P` via `PERTURB_RECEP_PROB` |
 
 Both goals reuse existing `put <obj> on <recep>` tasks — no new task string or reward
-term. `off` is numerically identical to not having the option. Design notes:
-[`doc/reset_modes.md`](CRONOS/doc/reset_modes.md).
+term. `off` is numerically identical to not having the option.
 
 **EER (End-Effector Reset)** — the 7th positional arg, orthogonal to every reset mode above:
 
@@ -242,7 +239,7 @@ Key training flags:
 | `--policy` | `openvla` | `openvla` or `spatialvla` |
 | `--alg-name` | `ppo` | `ppo` (actor-critic + GAE) or `grpo` (critic-free) |
 | `--grpo-group-scope` | `batch` | GRPO only. What counts as one group: all three are per-segment. `batch` (whole segment — the statistic AutoRL uses, bit-identical) \| `scene` (segment × YAML group) \| `task` (segment × fan-out sub-block). Sizes for `four_group_sequential_2x2`: 64 / 16 / 4 |
-| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. See [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md) (Part 1 §9) |
+| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. |
 | `--alg-grpo-fix` | on | GRPO only. Compute reward statistics from non-zero rewards only (AutoRL's `alg_grpo_fix`) |
 | `--wandb-dir` | `""` | Run output root. Created and validated before `wandb.init`; a run that cannot land here fails instead of silently going to `$TMPDIR` |
 | `--num-envs` | 64 | Total parallel environments |
@@ -264,8 +261,7 @@ Key training flags:
 
 ### Training-time outputs
 
-Written to the run's `glob/` on every run; full column specs in
-[`doc/data_schemas.md`](CRONOS/doc/data_schemas.md).
+Written to the run's `glob/` on every run.
 
 | File | Contents |
 |---|---|
@@ -290,7 +286,6 @@ the checkpoint's **training config file** — found from the checkpoint (the
 `config_path` in its `run_config`). A config passed explicitly must define the same
 scenes as training, or eval stops before loading the model
 (`--allow-config-mismatch` to override on purpose).
-Full design: [`doc/eval_sequential.md`](CRONOS/doc/eval_sequential.md).
 
 **Rounds.** A round is one reset followed by every task of the scene without
 resets (AutoRL `render_seq`). Each scene's envs are split into 4 order blocks, as
@@ -363,7 +358,7 @@ training round 64 trials (16 per task), random rounds 320 trials (80 per task),
 4 start poses; 245,760 env-steps for all scenes and both domains. `serial` gives
 4× trials and 16 poses at 4× the steps. Printed before rollout, checked after.
 
-**Outputs** (under a fresh `wandb/offline-run-<timestamp>-<id>/glob/`; columns in [`doc/data_schemas.md`](CRONOS/doc/data_schemas.md)):
+**Outputs** (under a fresh `wandb/offline-run-<timestamp>-<id>/glob/`):
 
 | File | Contents |
 |---|---|
@@ -406,7 +401,7 @@ eval. Use `--eval-at-start` for rotation eval of a checkpoint loaded by `main.py
 (`tools/plot_run_trends.py`; failures are non-fatal). It can also be run by hand.
 Offline plotting and statistics tools (cross-run aggregation, per-segment curves,
 position distributions, sequence-eval bars, McNemar tests) are not part of this
-release; see [`CRONOS/doc/README.md`](CRONOS/doc/README.md#what-is-not-in-the-release).
+release.
 
 #### Per-run live dashboard — `tools/plot_run_trends.py`
 
@@ -610,7 +605,6 @@ order for `segment_len` steps per task.
 | `sequential` (default) | rounds selected by number; each pose set = 6 rounds = all 24 orderings (round 6k training rotations, 6k+1..6k+5 the other cycles); every round of a pose set starts from the same poses; tasks within a round switch without env reset. Round N is reproducible per seed. | `render_seq(eval_training_seq=True)` |
 | `single` | One task slot per round from a fresh reset; the blocks run tasks A/B/C/D side by side. | `render` |
 
-Details: [`doc/eval_sequential.md`](CRONOS/doc/eval_sequential.md).
 
 #### Sequential scoring: independent vs chained
 
@@ -626,9 +620,6 @@ Independent measures single-task capability; chained measures how far into a
 sequence the policy survives, and is deliberately order-sensitive — the same
 task set under different permutations gives different chained values. They
 coincide at `task_idx == 0`.
-
-Sequential-eval numbers from before V0.91 are not comparable to later ones
-([`doc/results/bug_reports.md`](CRONOS/doc/results/bug_reports.md)).
 
 ## Tools
 
@@ -668,24 +659,19 @@ python tools/bench_rollout.py \
 - `configs/eval/` — Legacy reduced-env eval configs (need `--allow-config-mismatch`)
 - `scripts/` — `train.sh`, `eval.sh`, and the plotting requirements `setup.sh` installs
 - `tools/` — Eval-shard merging, checkpoint compatibility, benchmarking, live dashboard
-- `doc/` — All documentation, indexed by [`doc/README.md`](CRONOS/doc/README.md): changelog, experiment results, bug reports, design references
 - `plotting/` — Plotting and statistics tools; not included in V0.99 (planned for a later release)
 
-## Version and changelog
+## Version
 
 This is **CRONOS V0.99**, an early release. The version is defined in
 [`CRONOS/version.py`](CRONOS/version.py) and stamped into every run's
-`run_config.json`.
+`run_config.json`; compare runs only within one version.
 
-Every version since the initial refactor is listed in
-[`CRONOS/doc/CHANGELOG.md`](CRONOS/doc/CHANGELOG.md). Entries marked
-**[numbers-affected]** changed results collected with earlier versions — check
-them before comparing runs across versions. Experiment results are in
-[`CRONOS/doc/results/`](CRONOS/doc/README.md#results). Known issues in this release:
+Known issues:
 
 - **GRPO is experimental.** `--alg-name grpo` degrades the SFT policy instead of
-  improving it; see [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md).
-  Use PPO (the default) for results.
+  improving it (the objective favours inaction). Use PPO, the default.
 - **Training RNG is not yet isolated.** Standalone eval is reproducible per round,
-  but training still shares generators between layout draws and action sampling;
-  see [`doc/rng_and_io_notes.md`](CRONOS/doc/rng_and_io_notes.md).
+  but training shares random generators between layout draws and action sampling,
+  so two training runs that differ only on the policy side do not see the same
+  start states.

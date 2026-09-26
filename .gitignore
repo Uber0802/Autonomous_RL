@@ -66,6 +66,9 @@ openvla/wandb/
 SimplerEnv/wandb/
 ManiSkill/data/
 
+# Internal documentation: changelog, experiment results, bug reports, design
+# notes. Local only; the release documents itself through README.md.
+CRONOS/doc/
 # Plotting / statistics tools. Will be released later; ignored until then.
 CRONOS/plotting/
 # Debug scripts, backups, launch queues, per-experiment plot configs with

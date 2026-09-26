@@ -5,7 +5,7 @@
 # Background pool: 4 distinct overlay+table-texture pairs (per-group `background: k`).
 #
 # Stage mesh is shared (`flat_table` default) — per-group stage geometry (sink vs flat_table)
-# requires multiple gym.make calls and is deferred to V0.5 per task_list.md.
+# requires multiple gym.make calls and is not supported yet.
 #
 # Groups A and B are bit-identical to two_group_sequential_2x2.yaml so any baseline trained
 # on that config remains comparable on its first 32 envs of this one.
@@ -15,7 +15,7 @@ task_order: sequential
 fan_out: true
 
 # Standalone eval (eval_only.py / scripts/eval.sh) reads this same file; training
-# ignores this block. Keys: evaluation/plan.py::EVAL_SETTING_SPEC, doc/eval_sequential.md.
+# ignores this block. Keys: evaluation/plan.py::EVAL_SETTING_SPEC; README "Evaluation (standalone)".
 eval:
   mode: sequential                 # sequential (AutoRL render_seq) | single (AutoRL render; blocks run tasks side by side)
   pose_sets: 1                     # sets of start poses. One set = 6 rounds = all 24 orders (4 tasks);

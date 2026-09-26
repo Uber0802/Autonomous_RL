@@ -170,7 +170,7 @@ class Args:
     #              gradient scale stable.
     #   "none"   — centring only (Dr. GRPO style).
     # Under `grpo_group_scope=batch` the group IS the whole update, so "group"
-    # and "global" are the same thing. See `doc/grpo_autorl.md` §"是否需要 /std".
+    # and "global" are the same thing.
     grpo_std_scope: str = "group"        # group | global | none
 
     # --- PPO / buffer ---
@@ -848,14 +848,14 @@ class CronosRunner:
             # at every task switch, so such a segment pays the full +1.0
             # potential term as soon as the object is grasped, and its
             # `rollout_success.csv` row reads success=1.0 for a segment in which
-            # the policy did nothing. See doc/reset_modes.md.
+            # the policy did nothing.
             print("[WARN] reset_mode=none + reset_unsuitable + no LSR (`noep`) — "
                   "HSR never respawns a successfully PLACED object, so start "
                   "states drift toward already-satisfied tasks and both reward "
                   "and rollout success rate become optimistic over training. "
                   "Compare against noep+LSR (--enable-backward), whose reset "
                   "segment is the only mechanism that restores the initial "
-                  "condition; see doc/reset_modes.md.")
+                  "condition; see README 'Reset-mode legend'.")
         if args.reset_mode == "none" and not args.reset_unsuitable:
             # user opts in to non-episodic without HSR
             # (object respawn). The original constraint was that under

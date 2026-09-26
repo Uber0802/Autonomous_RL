@@ -17,7 +17,8 @@ Derived (rebuilt whole, atomically, by `evaluation.outputs.rebuild_outputs`):
 `SegmentPoseWriter` is also what `main.py` uses for the training-time
 `segment_pose.csv`, so the two files share one formatter.
 
-Why derived files are rebuilt rather than appended: see doc/rng_and_io_notes.md.
+Derived files are rebuilt whole rather than appended, so a crash or a rerun can
+never leave duplicate or partial aggregate rows.
 """
 
 from __future__ import annotations
