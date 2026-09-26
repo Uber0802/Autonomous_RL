@@ -524,11 +524,11 @@ class TestRecordsAndOutputs(unittest.TestCase):
                 tool.merge(Path(root) / "out3", [a, c], "eval_report.txt")
 
     def test_mcnemar_pairs_every_round(self):
-        # mcnemar_pair.py is an offline analysis tool, not shipped in the release.
+        # plotting/ (incl. mcnemar_pair.py) is not shipped in this release yet.
         try:
-            import analysis.mcnemar_pair as mc
+            import plotting.mcnemar_pair as mc
         except ImportError:
-            self.skipTest("analysis/mcnemar_pair.py not present")
+            self.skipTest("plotting/mcnemar_pair.py not present")
         plan, pd = self.plan_dict(domains=["in_domain"])
         with tempfile.TemporaryDirectory() as d:
             self.simulate(d, plan)

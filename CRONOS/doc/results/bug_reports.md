@@ -1,7 +1,36 @@
-# Eval / sequential-eval audit
+# Bug reports
 
-Describes the current tree; the code version is in [`../version.py`](../../version.py).
-Index of these documents: [`README.md`](../README.md).
+Index of the documentation: [`../README.md`](../README.md).
+
+Every defect found so far whose fix **changed numbers produced by earlier
+versions**, newest first, then the full sequential-eval audit. Details of each fix
+are in [`../CHANGELOG.md`](../CHANGELOG.md); the GRPO failure is in
+[`grpo.md`](grpo.md). Before comparing two runs, check that no row below falls
+between their versions (the version a run was produced with is in its
+`run_config.json`; see the stamp caveat at the top of the changelog).
+
+| Fixed in | Area | Defect | What it invalidates |
+|---|---|---|---|
+| V0.95 | GRPO | Objective ranks inaction above attempting — [`grpo.md`](grpo.md) (open, not fixed) | Every GRPO result |
+| V0.94d | Standalone eval | SpatialVLA checkpoints were evaluated with sampling (T = 0.6) instead of greedy | SpatialVLA standalone eval before V0.94d |
+| V0.94 | Standalone eval | Multi-group eval broadcast group 0's objects to every env; orders, layouts and seeds redesigned | All standalone eval before V0.94 |
+| V0.93g | Reset modes | `noep` silently included LSR; tags renamed | Grouping of old `-noep-` runs with new `-HSRnoep-` runs |
+| V0.93a | wandb logging | Backward (reset) segments were averaged into `rollout/<task>/*` | wandb per-task rollout curves of LSR runs |
+| V0.93 | Output dirs | Relative `--wandb-dir` could put a whole run under `/tmp` | (data loss, not numbers) |
+| V0.92 | Training, EER off | `_elapsed_steps` never reset: masks 0, GAE degenerated to `returns = reward` | Every `--no-reset-robot` run before V0.92 |
+| V0.91 | Sequential eval | Tasks after the first ran permanently truncated: time-averaged success, leaked grasp flags | Sequential-eval numbers before V0.91 (below) |
+| V0.4.2 | SpatialVLA eval | Sampled instead of deterministic eval in `train.sh` | SpatialVLA eval before V0.4.2 |
+| V0.4.1 | wandb logging | Only the last minibatch of each PPO update was logged | Logged loss / grad curves before V0.4.1 |
+| V0.4c | Reset modes | `LSR` / `HSR` meant different flags; HSR `MAX_RESET` ~3× too small at T1280 | LSR / HSR runs before V0.4c |
+| V0.4a | HSR | HSR-only silently reset the robot; default respawn scope changed to `per_env` | HSR runs before V0.4a |
+| V0.3a | HSR, init | Respawn used hard-coded slots and unrotated carrots; stale first observation; eval clobbered non-episodic state | HSR and `reset_mode=none` runs before V0.3a |
+
+---
+
+## Sequential-eval accounting defect (V0.91)
+
+*Originally `eval_audit.md`: Eval / sequential-eval audit.*
+
 
 Scope: `main.py` (training-time eval, `--eval-single`, `--eval-sequential`) and
 `eval_only.py`, compared against `AutoRL/SimplerEnv/simpler_env/train_ms3_ppo.py`.
@@ -14,7 +43,7 @@ the training machine (see *Verifying on hardware*).
 
 ---
 
-## 1. The defect
+### 1. The defect
 
 **Sequential eval reports the wrong numbers for every task after the first in a
 sequence.** Three independent facts combine:
@@ -39,7 +68,7 @@ With `segment_len = 80`:
 caller accumulates with `env_infos[k] += v`. So a continued segment appends
 `segment_len * num_envs` samples where the contract is `num_envs`.
 
-### Consequences
+#### Consequences
 
 **`success` is under-reported.** `success = src_on_target` (`bridge_multi.py:347`)
 is instantaneous and does not latch, so averaging over all timesteps answers
@@ -57,10 +86,10 @@ independent of performance on the current task.
 for `env_i` in `[0, num_envs)`, assuming one sample per env. Against the
 over-long list those indices land on the *first* truncation event — step 1 of
 the task, before the arm has moved — so the column was effectively all zeros for
-`task_idx ≥ 1`. `analysis/mcnemar_pair.py` reads this file, so the paired
+`task_idx ≥ 1`. `plotting/mcnemar_pair.py` reads this file, so the paired
 significance test was consuming corrupted data.
 
-### Not affected
+#### Not affected
 
 Verified by inspection of each path:
 
@@ -72,7 +101,7 @@ Verified by inspection of each path:
 
 Only the sequential path, `task_idx ≥ 1`, was wrong.
 
-### Relationship to AutoRL
+#### Relationship to AutoRL
 
 `AutoRL/SimplerEnv/simpler_env/env/simpler_wrapper.py:151-169` is line-for-line
 identical in the relevant block, and `render_seq` uses the same
@@ -85,7 +114,7 @@ and its in-training `eval()` both reset per task and are correct.
 
 ---
 
-## 2. The fix
+### 2. The fix
 
 `CronosWrapper.begin_segment()` (`envs/wrapper.py`), called on the `reset=False`
 branch of both `CronosRunner.eval` and `EvalRunner.eval`. It clears exactly two
@@ -103,7 +132,7 @@ so eval and training now compute `success` and grasp identically, and
 `eval_only.py` also warns if a segment yields more than `num_envs` terminal
 samples, so a future regression surfaces instead of silently skewing the data.
 
-### One residual difference, by design
+#### One residual difference, by design
 
 The robot is not reset between tasks, so a gripper still holding the object from
 the previous task re-latches `is_src_obj_grasped` on the first `evaluate()` of
@@ -113,7 +142,7 @@ single-task eval, where every trial starts from an open gripper.
 
 ---
 
-## 3. Scoring semantics: A and B
+### 3. Scoring semantics: A and B
 
 Both are emitted; neither is a mode switch. One eval run answers both questions,
 and no re-run is needed to change the lens.
@@ -134,7 +163,7 @@ task orderings are hard.
 
 They coincide at `task_idx == 0`.
 
-### Where they are available
+#### Where they are available
 
 Both columns come from the shared standalone evaluator
 (`evaluation/sequential.py`), used by `eval_only.py` and by
@@ -144,7 +173,7 @@ env); every scene of a multi-group config chains on its own env range. See
 
 ---
 
-## 4. Recovering a correct AutoRL baseline
+### 4. Recovering a correct AutoRL baseline
 
 AutoRL's aggregate numbers — the printed log line, `stats.yaml["stats"]`, and
 `stats.yaml["last_info"]` — all flow through the affected path. But `render()`
@@ -156,13 +185,13 @@ value for that specific env, then bakes it into the name:
 glob/{seq}-{task}/video_{env}-{obj}_{recep}-s_{0|1}.mp4
 ```
 
-`analysis/parse_autorl_eval.py` reads those filenames plus
+`plotting/parse_autorl_eval.py` reads those filenames plus
 `stats.yaml["instruction"]` (for the task string) and emits a CSV with the same
 schema as `eval_per_trial.csv`, including both A and B columns. Read-only; it
 never writes inside AutoRL.
 
 ```bash
-python analysis/parse_autorl_eval.py \
+python plotting/parse_autorl_eval.py \
     --glob-dir /path/to/AutoRL/SimplerEnv/wandb/run-<id>/glob \
     --obj-set rand --out reports/autorl_baseline_per_trial.csv
 ```
@@ -172,7 +201,7 @@ only the polluted aggregate; its correct per-trial values are unrecoverable
 without rerunning AutoRL's eval (rerunning is not modifying — `render()` always
 writes videos).
 
-### What cannot be recovered
+#### What cannot be recovered
 
 Grasp metrics. They carry both distortions (time-average *and* cross-task latch
 carry-over), the per-step values were never persisted — they live only in the
@@ -182,7 +211,7 @@ only for `--only_render` (single-task) runs.
 
 ---
 
-## 5. Secondary finding: permutation enumeration
+### 5. Secondary finding: permutation enumeration
 
 `eval_only.py` and `main.py` each materialized `list(itertools.permutations(pool))`
 before sampling from it. Fine for the 4-task 2×2 configs (24 orderings); for
@@ -206,7 +235,7 @@ so existing 2×2 runs stay reproducible. For 9 tasks it returns in 0.09 ms versu
 
 ---
 
-## 6. Impact on existing results
+### 6. Impact on existing results
 
 Sequential-eval numbers produced before this change are not comparable to
 numbers produced after:
@@ -220,12 +249,12 @@ metrics are unchanged, and remain directly comparable to prior runs and to
 AutoRL.
 
 The recommended baseline path is to rebuild the AutoRL side with
-`analysis/parse_autorl_eval.py` so both sides use the corrected definition, rather
+`plotting/parse_autorl_eval.py` so both sides use the corrected definition, rather
 than preserving a matched-but-wrong metric.
 
 ---
 
-## 7. Verifying on hardware
+### 7. Verifying on hardware
 
 The chain is deterministic and cheap to confirm on any GPU that can load a
 policy. In `eval_only.py::eval`, at the top of the `reset=False` branch:
@@ -240,3 +269,4 @@ End to end, run `--eval-mode sequential --eval-rounds 0-1` and check
 `eval_per_trial.csv`: the row count must be exactly
 `sequences × tasks × num_envs`, and `task_idx ≥ 1` rows must no longer be
 uniformly zero.
+

@@ -128,7 +128,7 @@ unaffected by the algorithm choice, so they stay comparable across PPO and GRPO
 runs. `value_explained_variance` is absent from GRPO's wandb payload entirely;
 `grpo_adv_zero_frac` appears instead — the fraction of minibatch samples whose
 advantage is exactly zero, i.e. how often a group's rewards came out all
-identical and contributed no gradient. See [`grpo_autorl.md`](reports/grpo_autorl.md).
+identical and contributed no gradient. See [`results/grpo.md`](results/grpo.md).
 
 ### Timing of the GAE columns
 
@@ -210,7 +210,7 @@ no segment `K+1` — the same guard `buffer.warmup` uses.
 
 `--segment-pose-phase start|end|both` selects which are written (default `both`).
 CSVs written before this column existed contain `end` rows only;
-`analysis/plot_segment_positions.py` backfills `phase="end"` when the column is
+`plotting/plot_segment_positions.py` backfills `phase="end"` when the column is
 absent.
 
 ### Note on the predecessor
@@ -225,7 +225,7 @@ was incremented again. Fixed here — only `segment` is incremented.
 ## `eval_per_trial.csv`
 
 Source of truth for standalone eval: one row per (domain, round, task slot, env).
-`analysis/mcnemar_pair.py` pairs on `(eval_kind, task, group, seq_idx, task_idx, env_idx)`.
+`plotting/mcnemar_pair.py` pairs on `(eval_kind, task, group, seq_idx, task_idx, env_idx)`.
 A unit's rows — (eval_kind, pass_label, seq_idx) — are appended together after its
 last task slot.
 
@@ -255,7 +255,7 @@ exactly `num_envs × task slots`; the eval refuses to continue otherwise.
 
 ### AutoRL side
 
-`analysis/parse_autorl_eval.py` emits this same schema from an AutoRL run's video
+`plotting/parse_autorl_eval.py` emits this same schema from an AutoRL run's video
 filenames, with `grasp` / `obj_grasped` left empty (not recoverable — see the
 audit doc). Both sides then feed the same `mcnemar_pair.py` and `plot.py`.
 

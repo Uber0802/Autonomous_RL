@@ -10,7 +10,7 @@ CRONOS is a refactored robotic manipulation training benchmark designed for **no
 - **Per-env rotation eval** — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
 - **Per-group objects/backgrounds** — different groups can have different physical objects and visual overlays in the same training run.
 - **Dual VLA support** — `--policy openvla|spatialvla` switches between OpenVLA-7B and SpatialVLA-4B adapters (7-token vs 3-token action sequences).
-- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in (**experimental** — it currently collapses, see [`grpo_failure.md`](CRONOS/doc/reports/grpo_failure.md)); grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
+- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in (**experimental** — it currently collapses, see [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md)); grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
 - **Orthogonal reset dimensions** — LSR (learned reset policy), HSR (respawn fallen actors), EER (gripper re-home), and Perturbation (the reset goal is sometimes a *different receptacle* instead of the table), each toggled independently.
 - **Modular Environment** — decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
 - **Efficient Rollouts** — multi-task execution with GPU-parallelized ManiSkill environments, memory-mapped replay buffers.
@@ -37,11 +37,6 @@ Pick one of four envs depending on which policies you need and which GPU class y
 `tf447` = transformers 4.47 / peft 0.14 (serves both VLAs), `tf440` = transformers
 4.40.1 / peft 0.11.1 (OpenVLA only); `cu121` = Ampere/Ada/Hopper, `cu128` = Blackwell.
 
-> Renamed from `cronos_env` / `cronos_env_blackwell` / `cronos_env_lite` /
-> `cronos_env_lite_blackwell`, which did not say which stack they carried. Nothing
-> reads the env name programmatically, so existing envs keep working — rename with
-> `conda rename -n cronos_env cronos_tf447_cu121` when convenient.
-
 | Env | `setup.sh` args | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
 |---|---|---|---|---|---|---|
 | `cronos_tf447_cu121` | `setup.sh all` | `torch==2.5.1+cu121` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Ampere / Ada / Hopper (sm_80…sm_90) | ~55 GB | Hopper / A100 (both VLAs); Ada (SpatialVLA only — OpenVLA OOMs 48 GB) |
@@ -60,7 +55,9 @@ conda activate cronos_tf447_cu128
 #   cronos_tf440_cu128 — OpenVLA-only on Blackwell, V0.1 transformers ABI
 ```
 
-> **Bit-exact note:** Only `cronos_tf440_cu121` reproduces V0.1 baseline PPO logs bit-for-bit. `cronos_tf440_cu128` upgrades torch (no V0.1-era cu128 wheels exist), so it shares V0.1's transformers/peft *ABI* but not its exact cuBLAS/attention kernels. The dual-VLA (`tf447`) envs upgrade both torch and transformers, so their PPO logs drift ~10⁻² from V0.1 in the first 1000 minibatches and converge to <0.2% by PPO step 100 — algorithmically correct, numerically different. For bit-exact ablations, run the baseline arm in the **same env** as the test arm. Multi-seed mean±std comparisons are unaffected (drift ≪ seed-to-seed variance).
+> Memory figures are historical reports; re-measure with `tools/bench_rollout.py`
+> on your hardware. Why there are four envs, and what "bit-exact" means here:
+> [`CRONOS/doc/environments.md`](CRONOS/doc/environments.md).
 
 ### 3. Run the setup script
 
@@ -82,10 +79,6 @@ chmod +x *.sh
 ./setup.sh openvla                   # dual-VLA, OpenVLA pillar only (skips SpatialVLA)
 ./setup.sh spatialvla blackwell      # dual-VLA, SpatialVLA pillar only, Blackwell
 ```
-
-> **Memory budget — pick the right env for your GPU.** The dual-VLA stack lifts OpenVLA-7B PPO peak memory from ~40 GB → ~55 GB (`transformers==4.47` HybridCache + `peft==0.14` fast path + newer torch caching), which **does not fit on Ada-class GPUs (48 GB)**. If you only need OpenVLA on Ada, the lightweight stack (`torch==2.2.0+cu121` + `transformers==4.40.1`, ~40 GB peak) still fits 1 OpenVLA-7B PPO on a 48 GB Ada. See [Lightweight env](#6-optional-lightweight-openvla-only-env-for-ada-class-gpus).
->
-> The `tf440` split is a workaround for that regression, not a design goal. `tools/bench_rollout.py` measures throughput and peak memory per stack with a phase breakdown, so the ~15 GB can be attributed and ideally removed — at which point `tf440` retires and the matrix collapses to one env per torch channel. The memory figures in the table above are historical reports, not `bench_rollout.py` output; re-measure on your own hardware before relying on them.
 
 `setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
 
@@ -113,66 +106,23 @@ Blackwell cards (RTX PRO 6000, RTX 5090, B200) ship `sm_120` SASS, which only `+
 ./setup.sh openvla_v01 blackwell     # cronos_tf440_cu128 — OpenVLA-only, V0.1 transformers ABI
 ```
 
-Both variants pin `torch==2.7.0+cu128` (the lowest stable cu128 build with sm_120). What differs is the LM stack:
-
-| Env | Transformers/peft/tokenizers | OpenVLA peak | Bit-exact to V0.1 cu121? |
-|---|---|---|---|
-| `cronos_tf447_cu128` | V0.4 (4.47 / 0.14 / 0.21) | ~55 GB | No — also drifts from V0.1 |
-| `cronos_tf440_cu128` | V0.1 (4.40.1 / 0.11.1 / 0.19.1) | ~45 GB | No — cu128 changes cuBLAS/attention kernels, but transformers ABI matches V0.1 |
-
-**No torch build is simultaneously V0.1-era *and* Blackwell-compatible.** The cu128 channel does not ship `torch==2.2.0` (cu128 wheels start at torch 2.7), and torch 2.2.0+cu121 has no `sm_120` SASS or PTX. Bit-exact V0.1 baseline replication is therefore Ada/Hopper-only by physics of GPU release dates.
-
-*Reproducibility note:* PTX is JIT-compiled on first CUDA op on a new arch, so SASS may differ slightly between a Blackwell run and a Hopper run even within the same env. Training curves on Blackwell are *statistically* equivalent to Hopper, not bit-exact.
-
 ### 6. (Optional) Lightweight OpenVLA-only env for Ada-class GPUs
 
-For Ada-class GPUs (L40S, RTX 6000 Ada, A6000 — 48 GB), the dual-VLA stack's ~55 GB OpenVLA-7B PPO peak does **not** fit. The lightweight `openvla_v01` mode pins the lightweight stack (`transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1`) and — on `cu121` — pins `torch==2.2.0` to match V0.1 exactly. OpenVLA-7B PPO peak stays at ~40 GB, fitting one PPO on a 48 GB Ada with headroom.
+For 48 GB Ada-class GPUs (L40S, RTX 6000 Ada, A6000), where the dual-VLA stack's
+OpenVLA-7B PPO does not fit. OpenVLA only — `--policy spatialvla` is unavailable.
 
 ```bash
 conda create -n cronos_tf440_cu121 -y python=3.10
 conda activate cronos_tf440_cu121
-cd Benchmark/CRONOS
+cd CRONOS
 ./setup.sh openvla_v01
 ```
 
-Tradeoffs:
-- ✅ Fits on Ada (48 GB) — restores parity with V0.1's running memory profile.
-- ✅ Numerically bit-exact against V0.1 baseline runs (same cuBLAS GEMM tile order + attention kernels).
-- ❌ Cannot run `--policy spatialvla` — transformers ≥ 4.43 needed for the `HybridCache` import in SpatialVLA's `model/modeling_gemma2.py`. `setup.sh openvla_v01` skips the `../SpatialVLA` editable install entirely; the policy's lazy import in [main.py:385](CRONOS/main.py#L385) and [eval_only.py:210](CRONOS/eval_only.py#L210) is gated by `--policy spatialvla` so it never fires under OpenVLA-only runs.
-- ❌ Will not run on Blackwell as-is — pass `blackwell` as the 2nd arg to install the Blackwell variant: `./setup.sh openvla_v01 blackwell` produces `cronos_tf440_cu128` (lightweight stack on `torch==2.7.0+cu128`; loses cu121 bit-exactness but keeps V0.1 transformers ABI).
-
-How `setup.sh` picks the install: the 1st positional arg picks the LM stack + which sibling pillars get installed, the 2nd picks the torch wheel channel. See the header comment in `setup.sh` for the full pin rationale and the 4-env recommended workflows.
-
 ### 7. Checkpoint portability across envs
 
-A checkpoint is written by whichever env trained it, and the two LM stacks do not
-serialize the LoRA adapter the same way. **`tf447` (peft 0.14) writes three
-`LoraConfig` fields that `tf440` (peft 0.11.1) has no field for** — `eva_config`,
-`exclude_modules`, `lora_bias`. `LoraConfig` is a dataclass, so peft 0.11.1 does
-not ignore the extras; `PeftModel.from_pretrained` dies on the constructor:
-
-```
-TypeError: LoraConfig.__init__() got an unexpected keyword argument 'eva_config'
-```
-
-This cannot be pinned away. peft 0.14 needs `transformers>=4.43` (for
-`EncoderDecoderCache`), which breaks OpenVLA's `transformers<4.43` pin, and peft
-0.11.1 is the newest release that works against transformers 4.40.1 — so it is
-handled at the load site instead, in
-[`SimplerEnv/simpler_env/policies/peft_compat.py`](SimplerEnv/simpler_env/policies/peft_compat.py).
-`load_peft_adapter` filters out fields the *installed* peft cannot represent
-before building the config, and both VLA pillars load through it.
-
-The filter is behaviour-neutral, and enforces that rather than assuming it: a key
-is dropped **only** when it holds the value that means "feature off"
-(`eva_config: null`, `exclude_modules: null`, `lora_bias: false`) — which is what
-`tf447` checkpoints actually contain, since nobody turned those features on. A key
-that is genuinely set, or one no peft release in the table accounts for, raises
-instead of being silently discarded. The reverse direction (`tf440` checkpoint,
-`tf447` reader) needs no repair and is the identity transform.
-
-Audit a checkpoint tree before committing to a long eval, without loading a model
-(or peft, or torch):
+Checkpoints trained in a `tf447` env load in a `tf440` env and vice versa (handled
+by `SimplerEnv/simpler_env/policies/peft_compat.py`; details in
+[`CRONOS/doc/environments.md`](CRONOS/doc/environments.md)). Audit a checkpoint tree before a long eval, without loading a model:
 
 ```bash
 python tools/check_ckpt_compat.py /path/to/runs                 # default target: tf440, the strict reader
@@ -182,12 +132,6 @@ python tools/check_ckpt_compat.py /path/to/runs --verbose       # one line per c
 
 It exits non-zero if any checkpoint cannot be loaded by the target stack, so it
 also works as a preflight step in a shell script.
-
-The LoRA *weights* (`adapter_model.safetensors`) have the same layout in both peft
-releases and need no translation. `training_state.pt` is a torch pickle, and its
-own cross-version hazard is torch 2.6 flipping the `torch.load` default to
-`weights_only=True`; every load site passes `weights_only=False` explicitly, since
-CRONOS spans torch 2.2 / 2.5 / 2.7 and writes these files itself.
 
 ## Quick Start
 
@@ -207,10 +151,8 @@ bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [
 ```
 
 Output directory: defaults to `./$RUN_TAG`, created before launch and passed as an
-**absolute** `--wandb-dir`. Override with `RUN_OUT_DIR=/data/runs/my-run`. Passing a
-relative or not-yet-existing directory used to make wandb silently redirect the whole
-run — every CSV, checkpoint and video — into `$TMPDIR`; `run_paths.py` now creates and
-validates the directory up front and fails loudly if wandb ignores it.
+**absolute** `--wandb-dir`. Override with `RUN_OUT_DIR=/data/runs/my-run`. The run
+fails at startup if wandb would write anywhere else.
 
 Examples:
 ```bash
@@ -264,18 +206,12 @@ GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential
 `noep+LSR`. The `HSR+LSR` / `noep` / `noep+LSR` triple is what separates "does
 removing the episodic reset hurt" from "does learning a reset policy pay for it".
 
-> ⚠️ **`noep` changed meaning, and the tags were renamed.** It used to expand to
-> LSR+HSR+`--reset-mode none`, i.e. today's `noep+LSR`. Any run directory
-> containing `-noep-` predates the change and is a `noep+LSR` run under the
-> current definition — do not put it in the same plot-config group as a new
-> `-HSRnoep-` run. The tag rename (`LSR+HSR`→`HSRLSR`, `noep`→`HSRnoep`,
-> `noep+LSR`→`HSRLSRnoep`) guarantees no new run collides with a historical one.
-
 > ⚠️ Bare `noep` has no mechanism that returns a *successfully placed* object to
 > its initial state: HSR respawns only what its detector flags as fallen or out
 > of bounds, and there is no `env.reset()`. Start states therefore drift toward
 > already-satisfied tasks, which inflates both reward and rollout success rate.
-> `main.py` warns at startup; `doc/reset_modes.md` says how to check for it.
+> `main.py` warns at startup; [`doc/reset_modes.md`](CRONOS/doc/reset_modes.md) says how to
+> check for it. Run directories containing `-noep-` (before V0.93g) are `noep+LSR` runs.
 
 **Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR (`LSR`, `HSR+LSR`, `noep+LSR`):
 
@@ -285,15 +221,9 @@ removing the episodic reset hurt" from "does learning a reset policy pay for it"
 | `recep` | `--backward-goal recep` | always another receptacle, chosen != the forward task's |
 | `mixed` | `--backward-goal mixed --backward-recep-prob P` | per-env draw between the two; `P` via `PERTURB_RECEP_PROB` |
 
-Both goals reuse tasks that already exist in the pool — the receptacle variant is
-literally an existing `put <obj> on <recep>` pair — so there is no new task string
-and no new reward term. Swapping the env's target receptacle makes its own
-`success` predicate and language instruction follow, which is why that variant is
-scored by the *forward* reward branch rather than by `src_on_table`. Motivation:
-a reset policy that always returns the object to one canonical state keeps the
-forward policy's start-state distribution narrow (arXiv:2004.12570 §4.1).
-`off` emits no flag, no tag, and does not draw from the RNG, so it is numerically
-identical to before the option existed.
+Both goals reuse existing `put <obj> on <recep>` tasks — no new task string or reward
+term. `off` is numerically identical to not having the option. Design notes:
+[`doc/reset_modes.md`](CRONOS/doc/reset_modes.md).
 
 **EER (End-Effector Reset)** — the 7th positional arg, orthogonal to every reset mode above:
 
@@ -303,16 +233,7 @@ identical to before the option existed.
 | `off` | `--no-reset-robot` | fully continuous arm — nothing repositions the end effector between segments |
 
 `eer=off` appends `-noEER` to `RUN_TAG` so it lands in its own output directory;
-`eer=on` emits a command line byte-identical to before the option existed, so
-prior runs, resume paths and wandb dirs are unaffected.
-
-> `reset_robot()` is also the only thing that zeroes ManiSkill's `_elapsed_steps`
-> on the training path, and `truncated` feeds the PPO buffer's masks. With EER
-> off, the training loop calls `CronosWrapper.begin_segment()` instead, which
-> reopens the accounting window without touching the arm — otherwise every step
-> after the first segment would report truncated, masks would go to zero and GAE
-> would degenerate to `returns = reward` with no bootstrapping. This is the same
-> mechanism described in [`doc/eval_audit.md`](CRONOS/doc/reports/eval_audit.md).
+`eer=on` adds no flag and no tag.
 
 Key training flags:
 | Flag | Default | Description |
@@ -321,7 +242,7 @@ Key training flags:
 | `--policy` | `openvla` | `openvla` or `spatialvla` |
 | `--alg-name` | `ppo` | `ppo` (actor-critic + GAE) or `grpo` (critic-free) |
 | `--grpo-group-scope` | `batch` | GRPO only. What counts as one group: all three are per-segment. `batch` (whole segment — the statistic AutoRL uses, bit-identical) \| `scene` (segment × YAML group) \| `task` (segment × fan-out sub-block). Sizes for `four_group_sequential_2x2`: 64 / 16 / 4 |
-| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. See [`doc/grpo_autorl.md` §9](CRONOS/doc/reports/grpo_autorl.md) |
+| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. See [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md) (Part 1 §9) |
 | `--alg-grpo-fix` | on | GRPO only. Compute reward statistics from non-zero rewards only (AutoRL's `alg_grpo_fix`) |
 | `--wandb-dir` | `""` | Run output root. Created and validated before `wandb.init`; a run that cannot land here fails instead of silently going to `$TMPDIR` |
 | `--num-envs` | 64 | Total parallel environments |
@@ -475,10 +396,6 @@ Eval flags (the bracketed name is the `eval:` key):
 | `--segment-len` | 80 | Steps per task rollout |
 | `--policy` / `--vla-path` / `--vla-unnorm-key` / `--vla-temperature-eval` / `--vla-lora-rank` | from the checkpoint | override the training policy settings |
 | `--action-chunk` | 1 | SpatialVLA open-loop chunk length |
-
-Removed: `--eval-sequences`, `--eval-training-sequence`, and the YAML keys
-`num_sequences`, `include_training_sequence`, `training_orders`, `random_orders`,
-`layout_rng` — use `rounds`.
 
 **Note:** the per-env rotation eval lives only inside `train()` for training-time
 eval. Use `--eval-at-start` for rotation eval of a checkpoint loaded by `main.py`.
@@ -710,23 +627,8 @@ sequence the policy survives, and is deliberately order-sensitive — the same
 task set under different permutations gives different chained values. They
 coincide at `task_idx == 0`.
 
-#### Accounting fix (affects numbers from prior runs)
-
-Sequential eval deliberately does not reset between tasks. That left ManiSkill's
-`_elapsed_steps` at the time limit, so from the second task onward the env
-reported `truncated` on *every* step — the aggregate `success` silently became a
-time-average instead of a terminal value (under-reporting), grasp flags carried
-over between tasks (over-reporting), and `eval_per_trial.csv` sampled the wrong
-timestep entirely. `CronosWrapper.begin_segment()` now reopens the measurement
-window at each task boundary without touching the scene, so eval and training
-compute `success` and grasp identically.
-
-**Sequential-eval numbers from before this change are not comparable to numbers
-after it.** Single-task eval and all training-time metrics are unaffected. The
-same defect exists upstream in AutoRL's `--only_render_seq`; a correct AutoRL
-baseline can be rebuilt from its own artifacts (offline tool `parse_autorl_eval.py`,
-not part of this release) without modifying AutoRL. Full analysis in
-[`doc/eval_audit.md`](CRONOS/doc/reports/eval_audit.md).
+Sequential-eval numbers from before V0.91 are not comparable to later ones
+([`doc/results/bug_reports.md`](CRONOS/doc/results/bug_reports.md)).
 
 ## Tools
 
@@ -766,7 +668,8 @@ python tools/bench_rollout.py \
 - `configs/eval/` — Legacy reduced-env eval configs (need `--allow-config-mismatch`)
 - `scripts/` — `train.sh`, `eval.sh`, and the plotting requirements `setup.sh` installs
 - `tools/` — Eval-shard merging, checkpoint compatibility, benchmarking, live dashboard
-- `doc/` — All documentation, indexed by [`doc/README.md`](CRONOS/doc/README.md): changelog, design references, and bug / failure reports
+- `doc/` — All documentation, indexed by [`doc/README.md`](CRONOS/doc/README.md): changelog, experiment results, bug reports, design references
+- `plotting/` — Plotting and statistics tools; not included in V0.99 (planned for a later release)
 
 ## Version and changelog
 
@@ -777,10 +680,11 @@ This is **CRONOS V0.99**, an early release. The version is defined in
 Every version since the initial refactor is listed in
 [`CRONOS/doc/CHANGELOG.md`](CRONOS/doc/CHANGELOG.md). Entries marked
 **[numbers-affected]** changed results collected with earlier versions — check
-them before comparing runs across versions. Known issues in this release:
+them before comparing runs across versions. Experiment results are in
+[`CRONOS/doc/results/`](CRONOS/doc/README.md#results). Known issues in this release:
 
 - **GRPO is experimental.** `--alg-name grpo` degrades the SFT policy instead of
-  improving it; see [`doc/reports/grpo_failure.md`](CRONOS/doc/reports/grpo_failure.md).
+  improving it; see [`doc/results/grpo.md`](CRONOS/doc/results/grpo.md).
   Use PPO (the default) for results.
 - **Training RNG is not yet isolated.** Standalone eval is reproducible per round,
   but training still shares generators between layout draws and action sampling;

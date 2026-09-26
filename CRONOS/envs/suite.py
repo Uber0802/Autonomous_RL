@@ -6,7 +6,7 @@ from transforms3d.euler import euler2quat
 # NOTE: `mani_skill.utils.io_utils` is imported inside `TaskSuite.__init__`
 # rather than here, and the unused `torch` import was dropped, so that
 # `POSE_PRESETS` / `generate_pose_configs` can be imported without a GPU stack.
-# `analysis/plot_segment_positions.py` relies on that to rebuild the initial-pose
+# `plotting/plot_segment_positions.py` relies on that to rebuild the initial-pose
 # table offline; keeping one source of truth beats vendoring a copy there.
 
 # Constants from AutoRL/RL4VLA

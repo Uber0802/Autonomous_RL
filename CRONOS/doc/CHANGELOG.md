@@ -10,7 +10,7 @@ version label, so every entry below was written from the diff. Conventions:
 - **Report:** — a bug report, failure report or design document was added; see
   [`README.md`](README.md) for the full list.
 - *Analysis tools* — plotting / statistics tools that were moved out of the release
-  at V0.99 (see [What is not in the release](README.md#what-is-not-in-the-release)).
+  at V0.99 (see [the repository layout](README.md#repository-layout-what-is-and-is-not-released)).
   Their history is kept here but condensed.
 
 **Version stamp caveat.** `version.py` is what `run_config.json` records. It was a
@@ -25,17 +25,20 @@ from V0.93c–V0.95. V0.99 is the first stamp that matches the code.
 **Changed**
 - Version set to `V0.99` in `version.py` (code and config format) and in the
   `cronos_version` annotation of every sample config.
-- Documentation consolidated under `CRONOS/doc/`: this changelog, design references,
-  and a `reports/` directory for bug / failure analyses (`eval_audit.md`,
-  `grpo_autorl.md`, `grpo_failure.md`). Top-level README trimmed to installation,
-  training, evaluation and config format; it now links here.
-- Plotting / statistics tools, per-experiment plot configs, figure renderers, launch
-  queues and backups moved to `CRONOS/analysis/`, which is not part of the release.
-  `tools/` keeps what training and eval need: `rebuild_eval_outputs.py`,
-  `check_ckpt_compat.py`, `bench_rollout.py`, `plot_run_trends.py`.
-- `tools/plot_run_trends.py` no longer imports the analysis-only `plot_common.py`.
-- `tests/test_eval_plan.py`: the McNemar test is skipped when the analysis tools are
-  absent.
+- Documentation consolidated under `CRONOS/doc/`: this changelog; design references
+  plus a new `environments.md`; experiment results in `doc/results/`
+  (`paper_experiments.md` — Q1–Q6 result tables; `grpo.md` — merged GRPO review and
+  failure analysis; `bug_reports.md` — every numbers-affecting defect plus the
+  sequential-eval audit). The top-level README now covers usage only.
+- Plotting / statistics tools (`plot_*.py`, `mcnemar_pair.py`,
+  `parse_autorl_eval.py`, `hsr_need_common.py`, `render_*.py`,
+  `extract_run_frames.py`) and their example configs moved from `tools/` to
+  `CRONOS/plotting/`, ignored until they are released. Debug output, backups, launch
+  queues and per-experiment plot configs moved to `CRONOS/history/` (never released).
+  `tools/` keeps `rebuild_eval_outputs.py`, `check_ckpt_compat.py`,
+  `bench_rollout.py` and `plot_run_trends.py`.
+- `tools/plot_run_trends.py` no longer imports `plot_common.py`.
+- `tests/test_eval_plan.py`: the McNemar test is skipped when `plotting/` is absent.
 
 **Removed**
 - Machine- and user-specific paths, the hard-coded wandb entity default in
@@ -43,7 +46,7 @@ from V0.93c–V0.95. V0.99 is the first stamp that matches the code.
   internal repository names in comments.
 
 **Known issues**
-- GRPO collapses — see [`reports/grpo_failure.md`](reports/grpo_failure.md). Use PPO.
+- GRPO collapses — see [`results/grpo.md`](results/grpo.md). Use PPO.
 - Training RNG is not yet isolated — see [`rng_and_io_notes.md`](rng_and_io_notes.md).
 
 ---
@@ -52,7 +55,7 @@ from V0.93c–V0.95. V0.99 is the first stamp that matches the code.
 
 *Core:* no changes.
 
-**Report:** [`reports/grpo_failure.md`](reports/grpo_failure.md) — why
+**Report:** [`results/grpo.md`](results/grpo.md) — why
 `--alg-name grpo` collapses. Normalization is per step with no group baseline;
 `alg_grpo_fix=True` leaves all-zero ("idle") trajectories at advantage 0, and
 mean-centering cancels the +0.1 grasp signal, so the objective ranks
@@ -71,7 +74,7 @@ figures; `plot_eval_success.py` config keys `horizon_lines`, `legend`, `axis`,
 `sr_ylim`, `aspect_ratio`. **[numbers-affected]** `plot_eval_success.py` crops no
 longer drop rows, so aggregate final mean / std can differ from V0.94p.
 Experiment plot configs (`scripts/Q*.json`) and tool backups were committed here;
-both moved to `analysis/` in V0.99.
+moved to `history/` in V0.99.
 
 ## V0.94l – V0.94p — 2026-09-20 … 2026-09-21
 
@@ -267,7 +270,7 @@ runs, tool options settable from the config.
 - A relative, not-yet-existing `--wandb-dir` (what `train.sh` passed) could silently
   put every CSV, checkpoint and video under `/tmp`.
 
-**Report:** [`reports/grpo_autorl.md`](reports/grpo_autorl.md) — review of AutoRL's
+**Report:** [`results/grpo.md`](results/grpo.md) — review of AutoRL's
 GRPO and CRONOS's grouping / std choices.
 
 ---
@@ -313,7 +316,7 @@ GRPO and CRONOS's grouping / std choices.
   **Sequential-eval numbers from before this fix are not comparable.**
 - `end_of_segment_xyz.csv` labelled every row one episode ahead of its video.
 
-**Report:** [`reports/eval_audit.md`](reports/eval_audit.md) — the sequential-eval
+**Report:** [`results/bug_reports.md`](results/bug_reports.md) — the sequential-eval
 accounting defect, its fix, and which historical numbers stay comparable.
 [`data_schemas.md`](data_schemas.md) — CSV column specs.
 

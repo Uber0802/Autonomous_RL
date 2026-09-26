@@ -38,7 +38,7 @@ STATUS = "eval_status.json"
 SUCCESS = "eval_success.csv"
 
 # The first ten columns are the pre-existing schema, in the pre-existing order,
-# so `analysis/mcnemar_pair.py` and `analysis/parse_autorl_eval.py` output stay
+# so `plotting/mcnemar_pair.py` and `plotting/parse_autorl_eval.py` output stay
 # compatible. Everything after `prefix` is new.
 PER_TRIAL_FIELDS: Tuple[str, ...] = (
     "seq_idx", "task_idx", "obj_set", "task", "env_idx",
