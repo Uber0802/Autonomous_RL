@@ -25,6 +25,8 @@ from run_paths import prepare_wandb_dir, verify_run_dir
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler
+from envs import rng_streams
+from oom_report import is_oom, write_oom_report
 import envs.bridge_multi  # Trigger environment registration
 from training.ppo import CronosPPO, aggregate_train_results
 from training.grpo import CronosGRPO
@@ -39,6 +41,11 @@ class Args:
     name: str = "CRONOS-PPO"
     seed: int = 0
     resume_episode: int = 0
+    # Scene (layouts, HSR respawns, training-time eval layouts) and task schedule
+    # draw from separate keyed CPU streams (envs/rng_streams.py), so neither the
+    # task order nor GPU action sampling moves a scene. --legacy-rng restores the
+    # pre-V0.99 global-generator draws (bit-exact with older runs).
+    legacy_rng: bool = False
 
     # --- Environment ---
     # PickPlaceNxM-v1 — pick the (N, M) shape via --env_n / --env_m.
@@ -251,6 +258,9 @@ class CronosRunner:
     
     def __init__(self, args):
         self.args = args
+        # Where the run is, for the OOM report (`oom_report.py`). Updated at phase
+        # boundaries only, so it costs nothing per step.
+        self.oom_context = {"phase": "init"}
         # --resume_from auto-sets vla_load_path from checkpoint dir
         if args.resume_from:
             ckpt = Path(args.resume_from)
@@ -490,6 +500,11 @@ class CronosRunner:
                 task_filter=task_filter,
             )
         self.env.set_scheduler(self.scheduler)
+
+        # Task schedule on its own generator (installed before the checkpoint
+        # restore below, which also restores its state).
+        if not args.legacy_rng:
+            self.scheduler.set_rng(rng_streams.task_rng(args.seed))
 
         # restore scheduler cursor from checkpoint if available
         if hasattr(self, '_resume_scheduler_state'):
@@ -902,6 +917,10 @@ class CronosRunner:
         return torch.cat(values, dim=0), torch.cat(actions, dim=0), torch.cat(logprobs, dim=0)
 
     def run_standalone_eval(self, single=False):
+        self.oom_context = {"phase": "standalone_eval"}
+        return self._run_standalone_eval(single)
+
+    def _run_standalone_eval(self, single=False):
         """`--eval-single` / `--eval-sequential`: the same evaluator as eval_only.py.
 
         Every scene of the config is evaluated (the old path broadcast group 0's
@@ -947,10 +966,25 @@ class CronosRunner:
             act_fn=lambda obs, instr: self._get_action(obs, instr, deterministic=True)[1],
             prep_rollout=self.policy.prep_rollout, obj_set=a.obj_set,
             episode=episode, total_steps=total_steps, report_name=a.eval_report,
+            oom_context=self.oom_context,
         ).run()
         if result["wandb"]:
             wandb.log(result["wandb"], step=total_steps)
         return result
+
+    def _scene_ids(self, obj_set, kind, **fields):
+        """Per-env scene ids for one reset / respawn, or None under --legacy-rng.
+
+        Keyed by (seed, kind, fields) only — see `envs/rng_streams.scene_ids`.
+        `rand_8` shares one layout across each block of 8 envs, as the env's own
+        draw does (`rand_id.repeat(8)`).
+        """
+        if self.args.legacy_rng:
+            return None
+        n = self.args.num_envs
+        if obj_set == "rand_8":
+            return rng_streams.scene_ids(self.args.seed, n // 8, kind, **fields) * 8
+        return rng_streams.scene_ids(self.args.seed, n, kind, **fields)
 
     def eval_all_groups(self, iteration, obj_set, prefix="eval"):
         """M4: Evaluate all groups using per-env rotation.
@@ -964,6 +998,14 @@ class CronosRunner:
 
         Returns: list of (g_idx, group_name, task, n_samples, stats_dict) tuples.
         """
+        outer_context = dict(self.oom_context)
+        self.oom_context = {"phase": "train_eval", "iteration": iteration, "domain": obj_set}
+        try:
+            return self._eval_all_groups(iteration, obj_set, prefix)
+        finally:
+            self.oom_context = outer_context
+
+    def _eval_all_groups(self, iteration, obj_set, prefix):
         self.policy.prep_rollout()
 
         per_group_evals = self.scheduler.get_eval_tasks_per_group()
@@ -1027,7 +1069,10 @@ class CronosRunner:
                 envs_recep.append(envs_recep[-1])
 
             # Reset env and assign tasks
-            obs, _, _ = self.env.reset(obj_set_override=obj_set, skip_scheduler=True)
+            obs, _, _ = self.env.reset(
+                obj_set_override=obj_set, skip_scheduler=True,
+                layout_ids=self._scene_ids(obj_set, "eval", iteration=iteration,
+                                           domain=obj_set, round=ep))
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
 
@@ -1132,6 +1177,8 @@ class CronosRunner:
         Name kept as `_run_ppo_update` under GRPO too: `tools/bench_rollout.py`
         monkey-patches this method by name to time the update phase.
         """
+        outer_phase = self.oom_context.get("phase")
+        self.oom_context["phase"] = f"{self.args.alg_name}_update"
         # The only algorithm-dependent step: how `returns` / `advantages` are
         # filled. Everything downstream (row flush, minibatch generator,
         # train_epoch contract, result aggregation) is shared.
@@ -1153,11 +1200,13 @@ class CronosRunner:
             train_results.extend(self.trainer.train_epoch(self.buffer, log_path=ppo_log_path))
         self.buffer.reset()
         self.policy.prep_rollout()
+        self.oom_context["phase"] = outer_phase
         return train_results
 
     def run_rollout(self, ppo_log_path=None, episode=0, episode_base_steps=0, episode_base_resets=0):
         """Executes a non-episodic rollout with instruction switching, partial resets,
         and mid-rollout PPO training every ppo_update_len steps (matching AutoRL)."""
+        self.oom_context = {"phase": "rollout", "episode": episode, "segment": 1}
         self.policy.prep_rollout()
 
         # reset_mode=none skips env.reset() after the first episode.
@@ -1167,7 +1216,8 @@ class CronosRunner:
             obs = self._no_reset_obs
             instruct = self.env.get_language_instructions()
         else:
-            obs, instruct, _ = self.env.reset()
+            obs, instruct, _ = self.env.reset(
+                layout_ids=self._scene_ids(self.args.obj_set, "episode", episode=episode))
         self.buffer.warmup(obs, instruct)
 
         # Start of segment 1 — recorded here because this is AFTER the episode's
@@ -1269,6 +1319,7 @@ class CronosRunner:
 
             # 5. Segment & Task Switching Logic
             if (step_idx + 1) % self.args.task_len == 0:
+                self.oom_context["segment"] = (step_idx + 1) // self.args.task_len + 1
                 # capture per-task rollout outcomes BEFORE the
                 # scheduler advances. `info["episode"]` is populated by the
                 # wrapper at truncation (`wrapper.py:249-253`), which fires at
@@ -1419,7 +1470,9 @@ class CronosRunner:
                 # HSR (object respawn) and LSR (robot reset) are now truly
                 # orthogonal; HSR-only no longer silently also resets the robot.
                 if self.args.reset_unsuitable:
-                    next_obs = self.env.reset_unsuitable_envs()
+                    next_obs = self.env.reset_unsuitable_envs(respawn_ids=self._scene_ids(
+                        None, "respawn", episode=episode,
+                        segment=(step_idx + 1) // self.args.task_len))
                     self.soft_reset_count = self.env.reset_strategy.reset_unsuitable_count
                     print(f"Total unsuitable resets: {self.soft_reset_count}")
                 if self.args.reset_robot:
@@ -1898,12 +1951,19 @@ class CronosRunner:
 
 def main():
     args = tyro.cli(Args)
-    runner = CronosRunner(args)
-    
-    if args.eval_single or args.eval_sequential:
-        runner.run_standalone_eval(single=args.eval_single)
-    else:
-        runner.train()
+    runner = None
+    try:
+        runner = CronosRunner(args)
+        if args.eval_single or args.eval_sequential:
+            runner.run_standalone_eval(single=args.eval_single)
+        else:
+            runner.train()
+    except BaseException as e:
+        if is_oom(e):
+            out_dir = getattr(runner, "glob_dir", None) or (Path(args.wandb_dir) if args.wandb_dir else None)
+            context = getattr(runner, "oom_context", {"phase": "init"})
+            write_oom_report(e, out_dir, context, args=args)
+        raise
 
 if __name__ == "__main__":
     main()

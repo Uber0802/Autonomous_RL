@@ -72,7 +72,7 @@ class ResetStrategy:
         
         self.env.unwrapped.reset_grasp_stats()
 
-    def reset_unsuitable_envs(self):
+    def reset_unsuitable_envs(self, respawn_ids=None):
         """Respawns objects/receptacles in envs where the detector flagged
         them as unsuitable (fallen, ejected from workspace, etc.).
 
@@ -82,6 +82,9 @@ class ResetStrategy:
         Now this method does ONLY the object-side respawn; the train loop
         decides independently whether to also reset the robot (matching
         AutoRL's two-independent-if pattern in train_ms3_ppo.py:637-643).
+
+        respawn_ids: optional per-env scene ids (`envs/rng_streams.scene_ids`)
+        for the new poses; `None` keeps the global numpy draw.
         """
         unwrapped = self.env.unwrapped
         reasons = None
@@ -121,6 +124,7 @@ class ResetStrategy:
         count = unwrapped.reset_unsuitable_envs(
             obj_mask=obj_mask, recep_mask=recep_mask,
             reasons=reasons, fully_reset_envs=fully_reset_envs,
+            respawn_ids=respawn_ids,
         )
         self.reset_unsuitable_count += count
         return count

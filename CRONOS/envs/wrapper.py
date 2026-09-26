@@ -260,7 +260,7 @@ class CronosWrapper:
 
         layout_ids: optional per-env integers (`envs/rng_streams.py`) fixing each
             env's initial object/receptacle placement. `None` keeps the env's own
-            `torch.randint` draw on the global CUDA generator (training today).
+            `torch.randint` draw on the global CUDA generator (`--legacy-rng`).
         """
         options = self._build_options(obj_set_override=obj_set_override,
                                       group_idx_override=group_idx_override)
@@ -462,9 +462,9 @@ class CronosWrapper:
         obs = self.env.unwrapped.get_obs(info)
         return obs["sensor_data"]["3rd_view_camera"]["rgb"].to(torch.uint8)
 
-    def reset_unsuitable_envs(self):
-        """Resets only the unsuitable environments."""
-        self.reset_strategy.reset_unsuitable_envs()
+    def reset_unsuitable_envs(self, respawn_ids=None):
+        """Resets only the unsuitable environments (`respawn_ids`: see ResetStrategy)."""
+        self.reset_strategy.reset_unsuitable_envs(respawn_ids=respawn_ids)
         return self.get_obs_image()
 
     def set_task(self, objects, receptacles):

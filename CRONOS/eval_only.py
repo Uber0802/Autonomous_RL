@@ -32,6 +32,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from run_paths import prepare_wandb_dir, verify_run_dir
+from oom_report import is_oom, write_oom_report
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler
@@ -119,6 +120,7 @@ class EvalRunner:
 
     def __init__(self, args: EvalArgs):
         self.args = args
+        self.oom_context = {"phase": "init"}      # for oom_report.py
 
         np.random.seed(args.seed)
         random.seed(args.seed)
@@ -389,7 +391,9 @@ class EvalRunner:
             prep_rollout=self.policy.prep_rollout, obj_set=a.obj_set,
             episode=episode, total_steps=total_steps, report_name=a.eval_report,
             resume=bool(a.eval_resume),
+            oom_context=self.oom_context,
         )
+        self.oom_context["phase"] = "standalone_eval"
         result = evaluator.run()
         if result["wandb"]:
             wandb.log(result["wandb"], step=0)
@@ -406,8 +410,15 @@ class EvalRunner:
 
 def main():
     args = tyro.cli(EvalArgs)
-    runner = EvalRunner(args)
-    runner.run()
+    runner = None
+    try:
+        runner = EvalRunner(args)
+        runner.run()
+    except BaseException as e:
+        if is_oom(e):
+            out_dir = getattr(runner, "glob_dir", None) or (Path(args.wandb_dir) if args.wandb_dir else None)
+            write_oom_report(e, out_dir, getattr(runner, "oom_context", {"phase": "init"}), args=args)
+        raise
 
 
 if __name__ == "__main__":

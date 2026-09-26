@@ -14,9 +14,11 @@ Consequences:
   are consumed in a fixed order (layout slot 0, 1, ...; cycle 0, 1, ...), so a
   longer draw extends a shorter one instead of replacing it.
 
-Used by standalone eval today (`evaluation/plan.py`). Training still draws
-layouts from the env's generator; moving it onto these streams is future work,
-and nothing here depends on training.
+Used by standalone eval (`evaluation/plan.py`) and by training (`main.py`):
+training draws every scene quantity — episode layouts, HSR respawn poses and the
+layouts of training-time eval — from `scene_ids`, and the task schedule from
+`task_rng`, so neither the task order nor the policy's sampling on the GPU can
+move a scene. `--legacy-rng` restores the old global-generator draws.
 """
 
 from __future__ import annotations
@@ -57,6 +59,36 @@ def layout_ids(seed: int, domain: str, n_slots: int, pose_set: int = 0) -> List[
     """
     rng = stream(layout_key(seed, domain, pose_set))
     return [rng.getrandbits(LAYOUT_ID_BITS) for _ in range(n_slots)]
+
+
+def scene_key(seed: int, kind: str, **fields) -> str:
+    return stream_key("scene", seed=seed, kind=kind, **fields)
+
+
+def scene_ids(seed: int, n: int, kind: str, **fields) -> List[int]:
+    """`n` per-env scene ids for one training-side draw.
+
+    `kind` names what the draw places — ``episode`` (layout at an episode's
+    `env.reset()`), ``respawn`` (HSR re-placement at a segment boundary) or
+    ``eval`` (training-time eval) — and `fields` say which one, e.g.
+    ``episode=12, segment=3``. Ids are uniform 62-bit integers; the env maps
+    them onto its config table with `% ltt`, the same distribution as its own
+    `torch.randint` / `np.random.choice` draws, but computed on the CPU from
+    the key alone: no GPU or global generator is consumed, and a resumed run
+    redraws exactly what the uninterrupted run drew.
+    """
+    rng = stream(scene_key(seed, kind, **fields))
+    return [rng.getrandbits(LAYOUT_ID_BITS) for _ in range(n)]
+
+
+def task_rng(seed: int) -> random.Random:
+    """Dedicated generator for the task schedule (`TaskScheduler`).
+
+    Separate from every scene draw, so changing the task order (mode, pool,
+    fan-out) never changes a layout, and the reverse. Stateful: the scheduler
+    checkpoints its state in `scheduler_state.json`.
+    """
+    return stream(stream_key("task", seed=seed))
 
 
 def policy_key(seed: int, domain: str, round_idx: int, pass_label: str) -> str:

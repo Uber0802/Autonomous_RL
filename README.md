@@ -189,6 +189,22 @@ GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential
 
 `RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
 
+**Random streams.** Scenes and the task schedule are drawn independently, and
+neither depends on the policy's sampling on the GPU:
+
+| What | Drawn from |
+|---|---|
+| Object / receptacle layout at each episode reset | CPU stream keyed by `(seed, episode)` |
+| HSR respawn poses | CPU stream keyed by `(seed, episode, segment)` |
+| Layouts of training-time eval | CPU stream keyed by `(seed, eval point, domain, eval episode)` |
+| Task order (`pure_random`, `sequence_random`) | a dedicated generator seeded by `seed`, saved in each checkpoint's `scheduler_state.json` |
+
+So two runs with the same seed see the same scenes whatever the policy does, and
+a resumed run continues exactly where it stopped. `LEGACY_RNG=1 bash scripts/train.sh …`
+(`--legacy-rng`) restores the older behaviour, in which layouts came from the GPU
+generator shared with action sampling — use it only to reproduce a run made before
+V0.99; it adds `-legacyRNG` to `RUN_TAG`.
+
 **Reset-mode legend:**
 
 | mode | CLI flags added | `RUN_TAG` | Meaning |
@@ -257,6 +273,7 @@ Key training flags:
 | `--backward-goal` | `table` | LSR reset goal (perturbation). `table` = "put X on table" (unchanged) \| `recep` = another receptacle, != the forward task's \| `mixed` = per-env draw. Requires `--enable-backward` |
 | `--backward-recep-prob` | 0.5 | `mixed` only: P(receptacle variant) per env per reset segment |
 | `--segment-pose-phase` | `both` | `start` (state each segment begins from, after that boundary's resets) \| `end` (steady state the policy produced, before them) \| `both` |
+| `--legacy-rng` | off | Draw scenes and task order from the global generators, as before V0.99 (see *Random streams*) |
 | `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
 
 ### Training-time outputs
@@ -450,6 +467,17 @@ training in `num_envs`, so they only run with `--allow-config-mismatch`.
 | `one_group_sequential_3x3.yaml` | `eval/one_group_3x3.yaml` | 9 tasks; sequence 0 = auto-generated NxM order from training config |
 | `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | legacy; the training config itself now carries an `eval:` block |
 | `four_group_sequential_2x2.yaml` | — | use the training config; every `eval:` key spelled out |
+
+### Out-of-memory errors
+
+If training or eval runs out of GPU memory, the process still exits with the
+error, and first prints a summary and writes `glob/oom_report.txt`: the phase
+(`init`, `rollout`, `ppo_update` / `grpo_update`, `train_eval`,
+`standalone_eval`), episode and segment (or eval domain and round), the settings
+that decide peak memory, per-GPU allocated / reserved / free memory, the full
+`torch.cuda.memory_summary()` and hints (lower `--buffer-inferbatch` for rollout,
+`--buffer-minibatch` for the update; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+when reserved memory far exceeds allocated).
 
 ## YAML Config Format
 
@@ -654,6 +682,7 @@ python tools/bench_rollout.py \
 - `evaluation/` — Standalone eval: plan (settings, scenes, rounds, coverage, fingerprint), records (CSV schemas, readers/writers), outputs (derived files, status, resume/merge), provenance (training config), sequential (rollout loop)
 - `tests/` — CPU-only tests for eval planning, RNG streams, records, the eval loop and peft checkpoint compatibility (`python -m pytest tests/ -q`)
 - `run_paths.py` — Run output directory resolution, shared by both entry points
+- `oom_report.py` — CUDA out-of-memory report (`glob/oom_report.txt`), written by both entry points
 - `version.py` — Single source for the version stamped into every `run_config.json`
 - `configs/` — Sample YAML training configs
 - `configs/eval/` — Legacy reduced-env eval configs (need `--allow-config-mismatch`)
@@ -671,7 +700,6 @@ Known issues:
 
 - **GRPO is experimental.** `--alg-name grpo` degrades the SFT policy instead of
   improving it (the objective favours inaction). Use PPO, the default.
-- **Training RNG is not yet isolated.** Standalone eval is reproducible per round,
-  but training shares random generators between layout draws and action sampling,
-  so two training runs that differ only on the policy side do not see the same
-  start states.
+- **Action sampling and the PPO minibatch shuffle still use the global
+  generators.** They no longer affect scenes or the task order, but two runs are
+  not bit-identical across GPUs or package stacks.

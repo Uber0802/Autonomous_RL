@@ -47,13 +47,17 @@ class SequentialEvaluator:
                  act_fn: Callable, chunk_fn: Optional[Callable] = None, action_chunk: int = 1,
                  prep_rollout: Optional[Callable] = None,
                  obj_set: str = "rand", episode: int = 0, total_steps: int = 0,
-                 video_workers: int = 4, report_name: str = "eval_report.txt", resume: bool = False):
+                 video_workers: int = 4, report_name: str = "eval_report.txt", resume: bool = False,
+                 oom_context: Optional[dict] = None):
         """
         act_fn(obs, instructions) -> action ids [num_envs, A]
+        oom_context: caller's dict, updated in place with the unit being run so an
+            OOM report (`oom_report.py`) can say where it happened
         chunk_fn(obs, instructions, K) -> action ids [num_envs, K, A]   (action_chunk > 1 only)
         episode / total_steps: checkpoint progress, written to every CSV row
         """
         self.plan = plan
+        self.oom_context = oom_context if oom_context is not None else {}
         self.settings = plan.settings
         self.env = env
         self.glob_dir = Path(glob_dir)
@@ -307,6 +311,7 @@ class SequentialEvaluator:
                     for seq in p.sequences:
                         if (eval_kind, p.label, seq.seq_idx) in done:
                             continue
+                        self.oom_context.update(domain=eval_kind, pass_label=p.label, round=seq.seq_idx)
                         self._run_unit(eval_kind, obj_set, p, seq, submit_video)
                         O.write_status(self.glob_dir, [plan_dict],
                                        R.read_rows(self.glob_dir / R.PER_TRIAL))

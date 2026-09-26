@@ -360,7 +360,17 @@ fi
 
 # Derive config name from filename (e.g. configs/one_group_sequential_3x3.yaml → one_group_sequential_3x3)
 CONFIG_NAME=$(basename "$CONFIG" .yaml)
-RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}${EER_TAG}${ALGO_TAG}${PTB_TAG}-seed${SEED}"
+# RNG: scene and task draw from separate keyed streams (default). LEGACY_RNG=1
+# restores the pre-V0.99 global-generator draws, e.g. to reproduce an older run
+# bit-exactly; tagged so it never shares a directory with a default run.
+RNG_ARGS=""
+RNG_TAG=""
+if [ "${LEGACY_RNG:-0}" = "1" ]; then
+  RNG_ARGS="--legacy-rng"
+  RNG_TAG="-legacyRNG"
+fi
+
+RUN_TAG="CRONOS-${VLA_TAG}-${CONFIG_NAME}-${HORIZON_TAG}-${RESET_TAG}${EER_TAG}${ALGO_TAG}${PTB_TAG}${RNG_TAG}-seed${SEED}"
 CKPT="${CKPT:-}"
 
 # --- Run output directory ---
@@ -440,7 +450,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS $PTB_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
+COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS $PTB_ARGS $RNG_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────

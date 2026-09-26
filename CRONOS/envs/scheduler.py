@@ -105,6 +105,17 @@ def _warn_padding(msg: str) -> None:
 # Per-group state
 # ---------------------------------------------------------------------------
 
+def _rng_state_to_json(state):
+    """`random.Random.getstate()` as JSON-serialisable lists."""
+    version, internal, gauss_next = state
+    return [version, list(internal), gauss_next]
+
+
+def _rng_state_from_json(state):
+    version, internal, gauss_next = state
+    return (version, tuple(internal), gauss_next)
+
+
 @dataclass
 class GroupState:
     """Mutable scheduling state for one group."""
@@ -182,6 +193,16 @@ class TaskScheduler:
 
         # Legacy compat
         self.current_task_idx = 0
+
+        # Generator for the random task orders (`pure_random`, `sequence_random`).
+        # Defaults to the global `random` module (legacy); training installs a
+        # dedicated one via `set_rng` so the task schedule and the scene draws
+        # never share a stream.
+        self.rng = random
+
+    def set_rng(self, rng: random.Random) -> None:
+        """Use a dedicated generator for task draws (see `envs/rng_streams.task_rng`)."""
+        self.rng = rng
 
     # ------------------------------------------------------------------
     # Class methods for backward-compatible construction
@@ -261,7 +282,7 @@ class TaskScheduler:
             # Weighted sample, different from last
             attempts = 0
             while attempts < 100:
-                idx = random.choices(range(len(pool)), weights=gs.weights, k=1)[0]
+                idx = self.rng.choices(range(len(pool)), weights=gs.weights, k=1)[0]
                 if idx != gs.last_task_idx or len(pool) == 1:
                     gs.last_task_idx = idx
                     return pool[idx]
@@ -275,7 +296,7 @@ class TaskScheduler:
             # Generate new permutation if needed
             if not gs.shuffle_perm or gs.shuffle_cursor >= len(gs.shuffle_perm):
                 gs.shuffle_perm = list(range(len(pool)))
-                random.shuffle(gs.shuffle_perm)
+                self.rng.shuffle(gs.shuffle_perm)
                 gs.shuffle_cursor = 0
             idx = gs.shuffle_perm[gs.shuffle_cursor]
             return pool[idx]
@@ -395,6 +416,9 @@ class TaskScheduler:
                 }
                 for gs in self.group_states
             ],
+            # Dedicated task generator only; the global `random` is not ours to save.
+            "rng_state": (_rng_state_to_json(self.rng.getstate())
+                          if isinstance(self.rng, random.Random) else None),
         }
 
     def load_state(self, state: Dict):
@@ -409,3 +433,6 @@ class TaskScheduler:
             gs.shuffle_perm = gs_state.get("shuffle_perm", [])
             gs.shuffle_cursor = gs_state.get("shuffle_cursor", 0)
             gs.last_task_idx = gs_state.get("last_task_idx", -1)
+        rng_state = state.get("rng_state")
+        if rng_state is not None and isinstance(self.rng, random.Random):
+            self.rng.setstate(_rng_state_from_json(rng_state))

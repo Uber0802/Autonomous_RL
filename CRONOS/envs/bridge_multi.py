@@ -404,7 +404,7 @@ class BasePickPlace(BaseEnv):
         return self.extra_stats["extra_pos_plate"]
 
     def reset_unsuitable_envs(self, env_idx=[], obj_mask=None, recep_mask=None,
-                              reasons=None, fully_reset_envs=None):
+                              reasons=None, fully_reset_envs=None, respawn_ids=None):
         """Respawns envs whose objects/receptacles have fallen.
 
         M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
@@ -461,7 +461,13 @@ class BasePickPlace(BaseEnv):
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
         ltt = lc * 1 * 16 * lo * l1 * l2
-        indices = np.random.choice(ltt, self.num_envs)
+        if respawn_ids is not None:
+            # Per-env ids from a keyed scene stream (`envs/rng_streams.scene_ids`):
+            # same uniform distribution as the draw below, but independent of the
+            # global numpy generator (which the PPO minibatch shuffle also uses).
+            indices = np.asarray(respawn_ids, dtype=np.int64).reshape(self.num_envs) % ltt
+        else:
+            indices = np.random.choice(ltt, self.num_envs)
         xyz_indices = (indices//l2) %l1
         xyz_sample = torch.tensor(self.xyz_configs[xyz_indices], device=self.device)
         quant_indices = indices % l2
