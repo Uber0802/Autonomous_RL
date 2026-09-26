@@ -50,7 +50,7 @@ them — a second copy of that decode here would be the most likely thing in thi
 file to drift out of sync. It therefore reproduces `main.py::run_rollout`
 closely: same wrapper, same scheduler-driven task switch at every ``--task-len``
 boundary, same EER. The ``zero`` / ``random`` paths drive ``PickPlaceNxM-v1``
-through raw ``gym.make`` the way `tools/render_background_catalog.py` does, and
+through raw ``gym.make`` the way `plotting/render_background_catalog.py` does, and
 reuse `envs/reset.py::ResetStrategy.reset_robot` for EER. Neither path imports
 `main.py`.
 
@@ -84,16 +84,16 @@ Point ``CUDA_VISIBLE_DEVICES`` at an idle card and it will not disturb training.
 Usage::
 
     cd <repo>/CRONOS
-    CUDA_VISIBLE_DEVICES=5 python tools/render_episode_boundaries.py
+    CUDA_VISIBLE_DEVICES=5 python plotting/render_episode_boundaries.py
     # quick shape check (2 x 80 steps instead of 2 x 320):
-    CUDA_VISIBLE_DEVICES=5 python tools/render_episode_boundaries.py --episode-len 80
+    CUDA_VISIBLE_DEVICES=5 python plotting/render_episode_boundaries.py --episode-len 80
     # arm actually disturbs the scene:
-    CUDA_VISIBLE_DEVICES=5 python tools/render_episode_boundaries.py --policy random \
+    CUDA_VISIBLE_DEVICES=5 python plotting/render_episode_boundaries.py --policy random \
         --out figures/episode_boundaries_random.png
     # tail taken after EER instead of at the last policy step:
-    CUDA_VISIBLE_DEVICES=5 python tools/render_episode_boundaries.py --tail-phase post_eer
+    CUDA_VISIBLE_DEVICES=5 python plotting/render_episode_boundaries.py --tail-phase post_eer
     # a trained checkpoint drives the arm:
-    CUDA_VISIBLE_DEVICES=5 python tools/render_episode_boundaries.py --policy vla \
+    CUDA_VISIBLE_DEVICES=5 python plotting/render_episode_boundaries.py --policy vla \
         --ckpt <run>/wandb/<run-id>/glob/episode_0016 \
         --out figures/episode_boundaries_vla.png
 

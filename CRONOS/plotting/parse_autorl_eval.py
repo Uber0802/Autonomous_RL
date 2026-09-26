@@ -44,7 +44,7 @@ correct as-is.
 
 Usage
 -----
-    python tools/parse_autorl_eval.py \
+    python plotting/parse_autorl_eval.py \
         --glob-dir /path/to/AutoRL/SimplerEnv/wandb/run-<id>/glob \
         --obj-set rand \
         --out reports/autorl_baseline_per_trial.csv

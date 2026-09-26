@@ -1,20 +1,20 @@
-# SpatialVLA 2x2 PPO training config — used by P-5 (episodic) and P-6 (non-episodic).
+# SpatialVLA 2x2 PPO training config — one scene, two objects × two receptacles.
 #
-# Pins everything that is constant across P-5 and P-6 (the "Minimal single-group"
-# 2x2 scene + policy + unnorm key + lr split); the three diff-flags
-# (`reset_mode`, `episode_len`, `ppo_update_len`) are supplied on the
-# command line per the plan's P-5 vs P-6 table.
+# Pins everything that is constant between the episodic and the non-episodic
+# variant of this run (scene, policy, unnorm key, lr split); the three flags
+# that differ (`--reset-mode`, `--episode-len`, `--ppo-update-len`) are given
+# on the command line.
 #
-# Canonical commands (per plan §"P-5 & P-6 — the two PPO training runs"):
-#   P-5 (episodic):
-#     safejob python main.py \
+# Canonical commands:
+#   episodic:
+#     python main.py \
 #       --config-path configs/spatialvla_2x2_train.yaml \
 #       --seed 0 \
 #       --reset-mode per_episode --episode-len 80 --ppo-update-len 80 \
 #       --task-len 80 --segment-len 80 \
 #       --max-episodes 32
-#   P-6 (non-episodic):
-#     safejob python main.py \
+#   non-episodic:
+#     python main.py \
 #       --config-path configs/spatialvla_2x2_train.yaml \
 #       --seed 0 \
 #       --reset-mode none --episode-len 320 --ppo-update-len 160 \
@@ -22,30 +22,31 @@
 #       --max-episodes 8
 #
 # Both runs start fresh from the sft-bridge base (no --vla-load-path / no
-# --resume-from). P-6 is NOT warm-started from P-5; each is its own paired
-# McNemar gate.
+# --resume-from). The non-episodic run is NOT warm-started from the episodic
+# one; each is its own paired McNemar comparison against the zero-shot
+# baseline (`configs/eval/one_group_2x2_eval24.yaml`).
 
 cronos_version: V0.99
 
-# --- policy / VLA wiring (P-3) ---
+# --- policy / VLA wiring ---
 policy: spatialvla
 vla_path: IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge
-# Plan §P-3 caveat: the main.py default is `bridge_orig` (wrong for SpatialVLA);
+# Note: the main.py default is `bridge_orig` (wrong for SpatialVLA);
 # this YAML pins `bridge_orig/1.0.0` so `get_action_stats` finds the right q01/q99.
 vla_unnorm_key: bridge_orig/1.0.0
 vla_lr: 1.0e-4                       # LoRA AdamW lr (params_vla)
 vla_vhlr: 3.0e-3                     # value-head AdamW lr (params_vh)
 
-# --- scene (Minimal single-group, identical to E-5's eval config) ---
+# --- scene (single group, identical to configs/eval/one_group_2x2_eval24.yaml) ---
 task_order: sequential
 fan_out: true
 
 groups:
   - name: "default"
-    num_envs: 64                     # PPO training num_envs (E-5 eval uses 24)
+    num_envs: 64                     # PPO training num_envs (the eval config uses 24)
     obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
     recep: [1, 2]                    # yellow_plate, cloth
-    task_sequence:                   # explicit form of Minimal's auto-generated 4 N×M combos
+    task_sequence:                   # explicit form of the auto-generated 4 N×M combos
       - "put obj1 on recep1"
       - "put obj1 on recep2"
       - "put obj2 on recep1"

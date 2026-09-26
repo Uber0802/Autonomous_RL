@@ -1,9 +1,9 @@
 {
   "_comment": [
-    "Example config for the three plot tools in tools/, all of which take",
+    "Example config for the three plot tools in plotting/, all of which take",
     "--config and write to this file's `out_dir`:",
-    "  tools/plot_eval_success.py, tools/plot_rollout_success.py,",
-    "  tools/plot_segment_positions.py.   Schema: tools/plot_common.py.",
+    "  plotting/plot_eval_success.py, plotting/plot_rollout_success.py,",
+    "  plotting/plot_segment_positions.py.   Schema: plotting/plot_common.py.",
     "",
     "Each entry in `groups` becomes one curve (the two success plots) or its",
     "own pair of PNGs, one per actor kind (the position plot). Each entry in a",

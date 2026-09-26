@@ -4,7 +4,7 @@ Counts at every segment end how many task (scope=task) or all (scope=all)
 obj / recep actors are below z=0.7, and how many envs have at least one — see
 `hsr_need_common.py` for the definitions and how they were validated.
 
-    python tools/plot_hsr_need_panels.py --config doc/tmp/hsr_need_config.json
+    python plotting/plot_hsr_need_panels.py --config history/paper_plot_configs/hsr_need_config.json
 
 Writes to the config's `out_dir`:
   <name>_hsr_need_per_segment.png        2 x 3 panels: scope (task / all) x
@@ -145,7 +145,7 @@ def tables(seg, cfg, out_dir: Path, groups, n_eps):
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--config", required=True, help="plot config JSON (schema: tools/plot_common.py)")
+    p.add_argument("--config", required=True, help="plot config JSON (schema: plotting/plot_common.py)")
     p.add_argument("--step-range", default=None, help="LO:HI env steps; overrides config `step_range`")
     p.add_argument("--table-episodes", type=int, default=18, help="rows in the episode tables (default 18)")
     p.add_argument("--table-groups", default=None,

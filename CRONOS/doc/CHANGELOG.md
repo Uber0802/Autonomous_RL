@@ -56,8 +56,21 @@ from V0.93c–V0.95. V0.99 is the first stamp that matches the code.
   runs; `--legacy-rng` / `LEGACY_RNG=1` restores the old behaviour.
 - `oom_report.py`: a CUDA OOM in `main.py` or `eval_only.py` prints a summary and
   writes `glob/oom_report.txt` (phase, episode / segment or eval unit, memory
-  settings, per-GPU memory, `memory_summary`, hints) before re-raising.
+  settings, per-GPU memory, `memory_summary`, hints) before re-raising. When the
+  run directory does not exist yet (OOM during policy load) the file lands
+  directly under `--wandb-dir`.
 - `tests/test_training_rng.py`.
+- Post-review fixes: an OOM inside training-time eval is now reported as
+  `train_eval` (the context was restored before the report was written);
+  training-time eval layouts are keyed by the number of completed episodes
+  (`point`), so `--eval-at-start` no longer shares layouts with the eval after
+  episode 1 and a resumed at-start eval matches the original run;
+  `eval_only.py` stamps `cronos_version` into `run_config.json` like `main.py`.
+  README corrections: `train.sh` config default and horizon-tag legend,
+  `--ppo-update-len` default 160, `--unsuitable-detector` accepts only `low_z`
+  on the CLI, `--run-dir` is `wandb/run-*/glob` (no `files/`),
+  `segment_pose.csv` rows and default, `backward_recep` scoring. Example
+  commands in the configs no longer use a local `safejob` wrapper.
 
 **Known issues**
 - Action sampling and the PPO minibatch shuffle still use global generators

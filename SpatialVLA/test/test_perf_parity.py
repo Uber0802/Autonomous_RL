@@ -1,4 +1,4 @@
-"""O-0 perf-parity harness for plans/2026-06-09_spatialvla-ppo-perf-optimization.md.
+"""O-0 perf-parity harness for the SpatialVLA PPO performance-optimization work.
 
 Captures a tiny but representative PPO fixture from the unmodified SpatialVLA
 PPO stack (the `perf-baseline` git tag, 83b97f1) and re-runs the SAME fixture
@@ -50,7 +50,7 @@ from PIL import Image
 
 
 # Fixture / parity tolerances. TOL_LOGP / TOL_VALUE re-use the
-# `reports/2026-06-06_spatialvla-ppo-results.md` *Common setup* numbers — same
+# SpatialVLA PPO results report's *Common setup* numbers — same
 # bf16 noise floor SpatialVLA's Gemma2 HybridCache↔cacheless drift sits in.
 TOL_LOGP   = 1.0
 TOL_VALUE  = 0.5

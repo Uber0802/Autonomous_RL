@@ -26,7 +26,7 @@ that really are an `env.reset()` draw are synthesized. See `rebuild_start_rows`
 — it also explains when the rebuild is not available and the tool falls back to
 synthesizing every start.
 
-    python tools/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
+    python plotting/plot_segment_positions.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
 Layout: **one PNG per figure, never a grid.** Each figure is a single xy scatter
 of one `actor_kind` (`obj` or `recep`) for one experiment, so a run of the tool
@@ -1732,7 +1732,7 @@ def main():
     src.add_argument("--run-dir", help="the run's glob dir (…/wandb/run-<ts>-<id>/glob)")
     src.add_argument("--csv", help="path to segment_pose.csv directly")
     src.add_argument("--config", help="JSON describing several groups of runs "
-                                      "(see tools/plot_common.py); one column per group")
+                                      "(see plotting/plot_common.py); one column per group")
     p.add_argument("--out", default=None,
                    help="output PNG BASE path; each figure appends its own "
                         "suffix, e.g. `--out fig.png` writes fig_obj.png and "

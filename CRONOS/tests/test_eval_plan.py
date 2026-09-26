@@ -525,10 +525,13 @@ class TestRecordsAndOutputs(unittest.TestCase):
 
     def test_mcnemar_pairs_every_round(self):
         # plotting/ (incl. mcnemar_pair.py) is not shipped in this release yet.
-        try:
-            import plotting.mcnemar_pair as mc
-        except ImportError:
+        # Skip only when the module is absent; an ImportError from inside it
+        # must still fail the test.
+        import importlib
+        import importlib.util
+        if importlib.util.find_spec("plotting.mcnemar_pair") is None:
             self.skipTest("plotting/mcnemar_pair.py not present")
+        mc = importlib.import_module("plotting.mcnemar_pair")
         plan, pd = self.plan_dict(domains=["in_domain"])
         with tempfile.TemporaryDirectory() as d:
             self.simulate(d, plan)

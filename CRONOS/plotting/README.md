@@ -5,8 +5,8 @@ Offline tools that read a run's CSVs (`rollout_success.csv`, `segment_pose.csv`,
 `--config` JSON, plus statistics (`mcnemar_pair.py`, `parse_autorl_eval.py`) and
 GPU figure renderers (`render_*.py`, see [`figures/README.md`](figures/README.md)).
 
-**Status:** not part of the V0.99 release (ignored by version control); planned
-for a later release. Run every tool from `CRONOS/`, e.g.
+**Status:** not part of the V0.99 release (tracked on the internal branch,
+gitignored on the release branch); planned for a later release. Run every tool from `CRONOS/`, e.g.
 `python plotting/plot_eval_success.py --config plotting/configs/plot_config.json`.
 Dependencies: `scripts/requirements_plot.txt` (installed by `setup.sh`).
 
@@ -17,7 +17,7 @@ and compare several runs from one `--config` JSON:
 
 | Question | Tool | Reads |
 |---|---|---|
-| Is this run healthy right now? | `plot_run_trends.py` | wandb + `eval_success.csv` |
+| Is this run healthy right now? | `../tools/plot_run_trends.py` (ships with the release; see the top-level README) | wandb + `eval_success.csv` |
 | How does training success evolve, segment by segment? | `plot_rollout_success.py` | `rollout_success.csv` |
 | Where do objects start / end up? | `plot_segment_positions.py` | `segment_pose.csv` |
 | Does success depend on a task's position in the sequence? | `plot_sequence_eval.py` | `eval_per_trial.csv` |
@@ -36,7 +36,7 @@ python plotting/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
 | Flag | Default | Description |
 |---|---|---|
-| `--config` | — | JSON with several groups of runs; one curve per group, mean ± 1 std band across that group's series. See [Comparing runs](#comparing-several-runs) |
+| `--config` | — | JSON with several groups of runs; one curve per group, mean ± 1 std band across that group's series. See [Comparing runs](#comparing-several-runs----config) |
 | `--direction` | `forward` | `forward` \| `backward` \| `backward_recep` \| `all`. Reset segments score `success` against a different goal, so mixing them in reads as a ~50% collapse that is pure alternation artifact — see [`doc/data_schemas.md`](../doc/data_schemas.md). `all` draws one series per direction. |
 | `--by` | `none` | Add a second panel split by `task` \| `group` \| `obj` \| `recep` |
 | `--x-axis` | `total_steps` | `total_steps` \| `segment` \| `episode` |
@@ -154,7 +154,7 @@ python plotting/plot_segment_positions.py --config q2.json --phase end \
 
 | Flag | Description |
 |---|---|
-| `--config` | JSON with several groups of runs. See [Comparing runs](#comparing-several-runs) |
+| `--config` | JSON with several groups of runs. See [Comparing runs](#comparing-several-runs----config) |
 | `--phase` | `start` (default) — the state each segment *begins* from, after that boundary's HSR/EER resets and after `env.reset()` at an episode boundary. `end` — the steady state the policy produced, before them. `all` — both |
 | `--actor-kind` / `--slot` / `--model` / `--task` | Narrow to one actor class, logical slot, model-name substring, or task substring |
 | `--step-range LO:HI[,LO:HI...]` | Keep only boundaries whose `total_steps` falls in the range. **The default is not the whole run** (`DEFAULT_STEP_RANGE` in the tool), so a longer run is cropped unless you widen it or pass `--step-range all`. Either side may be left open (`:HI`, `LO:`). Several ranges: `--config` only. What it kept is always reported on stderr |
@@ -177,10 +177,13 @@ recorded but not plotted (EER pins it).
 
 #### Sequence-eval success by position — `plotting/plot_sequence_eval.py`
 
-Bar charts from a standalone sequential eval's `eval_per_trial.csv`: x = the
-task's position in the round (1–4, `task_idx + 1`), one bar per (group, domain).
-**In-domain bars are filled, out-of-domain bars hollow**, in the group's colour;
-the error bar is ±1 std across a group's series (drawn only with > 1 series).
+Bar charts from a standalone sequential eval's `eval_per_trial.csv`. Two
+series: **by position** (x = the task's position in the round, 1–4) and **by
+task** (x = the task, pooled over positions), one bar per group. A pooled
+position figure holds one domain (solid bars); per-task and by-task figures
+hold both domains in one bar — **out-of-domain solid, in-domain hatched over
+it** — in the group's colour. Bars are the mean over a group's series (seeds);
+no spread is drawn.
 
 ```bash
 python plotting/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
@@ -192,14 +195,18 @@ it also shows a group whose seed was evaluated as two round shards.
 
 | Output | Contents |
 |---|---|
-| `<name>_seq_position.png` | pooled over every task |
-| `<name>_seq_position_per_task/<name>_seq_position_<task>.png` | one per task (`--no-per-task` to skip) |
-| `<name>_seq_position.csv` | every plotted number, with `n_series` and `n_trials` |
+| `<name>_seq_position_<metric>_<kind>_{in_domain,out_of_domain}.png` | by position, pooled over tasks, one figure per domain |
+| `<name>_seq_position_<metric>_<kind>_per_task/…_<task>.png` | by position, one per task, both domains (`--no-per-task` to skip) |
+| `<name>_seq_position.csv` | every plotted position number (`metric`, `seq_kind` columns), with `n_trials` |
+| `<name>_seq_task_<metric>_<kind>.png` | by task, both domains |
+| `<name>_seq_task_<metric>_<kind>_per_scene/…_<scene>.png` | by task, one per scene (`--no-per-scene` to skip) |
+| `<name>_seq_task.csv` | the by-task numbers, pooled rows under `scene = __all__` |
 
 | Flag | Default | Description |
 |---|---|---|
-| `--metric` | `success` | `success` (each task on its own) \| `success_chained` (AND along the round) \| `grasp` \| `obj_grasped` |
-| `--seq-kind` | `all` | `training` (the trained rotations) \| `random` (untrained cycles) \| `all` |
+| `--metric` | `success success_chained` | one or more of `success` (each task on its own) \| `success_chained` (AND along the round) \| `grasp` \| `obj_grasped` |
+| `--seq-kind` | `each` | `each` (seen / training and unseen / random orders get their own figures) \| `pooled` (one set, kinds averaged) \| `seen` / `training` \| `unseen` / `random` |
+| `--no-final-eval` | off | skip the figures of the checkpoint's own last training eval |
 | `--out-dir` / `--name` | run dir / `eval` | where and under which prefix to write |
 
 Training runs have no `eval_per_trial.csv`; point it at an eval glob dir. In
@@ -331,10 +338,10 @@ Outputs:
 
 | File | Contents |
 |---|---|
-| `aggregated.csv` | long-form per-group/eval_kind/x_axis mean ± std |
-| `summary.csv` | final-value mean ± std at the rightmost eval per group × eval_kind |
+| `<name>_aggregated.csv` | long-form per-group/eval_kind/x_axis mean ± std |
+| `<name>_summary.csv` | final-value mean ± std at the rightmost eval per group × eval_kind |
 | `<name>_<eval_kind>_<x_axis>.png` | 4 main curves (ID/OOD × total_steps/total_resets) |
 | `<name>_gap_<eval_kind>.png` | success-vs-grasp overlay (placement-collapse diagnostic) |
 
-`plot.py` requires `pandas`, `numpy`, `matplotlib`; pinned versions are in `scripts/requirements_plot.txt` and pulled in by `setup.sh` automatically.
+The `plot_*.py` tools require `pandas`, `numpy`, `matplotlib`; pinned versions are in `scripts/requirements_plot.txt` and pulled in by `setup.sh` automatically.
 

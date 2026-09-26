@@ -9,7 +9,7 @@ Input CSV schema (written by `main.py`'s `SuccessRecorder`):
 Workflow
 --------
 1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
-2. Run: `python tools/plot_eval_success.py --config tools/plot_config.json`.
+2. Run: `python plotting/plot_eval_success.py --config plotting/configs/plot_config.json`.
 3. Outputs land under `<out_dir>/`, all prefixed `<name>_` so configs can share
    a directory (`out_dir` empty/absent = the config file's own directory):
    - `<name>_aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
@@ -20,8 +20,8 @@ Workflow
 Adding a new run = append its `eval_success.csv` path to the right group's
 `csv_paths` list, then rerun. No code changes.
 
-The figures are drawn to the parameters in `tools/plot_common.py`, shared with
-`tools/plot_rollout_success.py`: the two tools measure the same rate at
+The figures are drawn to the parameters in `plotting/plot_common.py`, shared with
+`plotting/plot_rollout_success.py`: the two tools measure the same rate at
 different sampling points (eval rounds vs 80-step boundaries) and are read side
 by side, so they use one look, one x label vocabulary and one (0, 0) anchor
 rather than each inventing its own.
@@ -127,7 +127,7 @@ class PlotConfig:
 def _runs_to_csv_paths(entries: List) -> List:
     """Map the shared `runs` key (glob dirs) onto this script's `csv_paths`.
 
-    `runs` is the format `tools/plot_common.py` uses, and it points at a run's
+    `runs` is the format `plotting/plot_common.py` uses, and it points at a run's
     `glob/` DIRECTORY rather than at one CSV inside it. A directory is the more
     useful unit — it holds `eval_success.csv`, `rollout_success.csv` and
     `segment_pose.csv` — so one config can drive this script and the two

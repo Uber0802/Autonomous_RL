@@ -7,11 +7,11 @@ needs "env 6, segments 1 / 5 / 9, first frame" is one command rather than a
 manual scrub through three videos::
 
     cd <repo>/CRONOS
-    python tools/extract_run_frames.py <run> --envs 6 --segments 1,5,9 --frames first
+    python plotting/extract_run_frames.py <run> --envs 6 --segments 1,5,9 --frames first
 
 No GPU, no simulator, no policy — it only decodes mp4s that already exist. That
 also means it can only show what was recorded: to render a state that no run
-produced, use `tools/render_segment_frames.py` instead.
+produced, use `plotting/render_segment_frames.py` instead.
 
 **Episode and segment are 1-indexed**, matching the directory names
 (``save_video_segment`` writes ``rollout_ep{iteration+1}_seg{segment_id+1}``).
@@ -40,17 +40,17 @@ Usage::
 
     cd <repo>/CRONOS
     # what does this run have?
-    python tools/extract_run_frames.py <run> --list
+    python plotting/extract_run_frames.py <run> --list
 
     # the motivating case
-    python tools/extract_run_frames.py <run> --envs 6 --segments 1,5,9 --frames first
+    python plotting/extract_run_frames.py <run> --envs 6 --segments 1,5,9 --frames first
 
     # first and last frame of every segment of episode 2, for three envs
-    python tools/extract_run_frames.py <run> --episodes 2 --envs 0,6,30 \\
+    python plotting/extract_run_frames.py <run> --episodes 2 --envs 0,6,30 \\
         --segments all --frames first,last --sheet figures/ep2_strip.png
 
     # explicit indices, negatives count from the end
-    python tools/extract_run_frames.py <run> --envs 6 --segments 1 --frames 0,39,-1
+    python plotting/extract_run_frames.py <run> --envs 6 --segments 1 --frames 0,39,-1
 
 ``<run>`` may be the run directory, the ``wandb/run-*`` directory, or the
 ``glob/`` directory itself — whichever is convenient; the script walks down to

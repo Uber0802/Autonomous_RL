@@ -8,8 +8,8 @@ files are laid out for: **does the success rate depend on where in the sequence
 the task sits?** — and, with the positions pooled away, the plain one next to
 it: **how often does each task succeed at all?**
 
-    python tools/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
-    python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json
+    python plotting/plot_sequence_eval.py --run-dir <EVAL_OUT_DIR>/wandb/run-*/glob
+    python plotting/plot_sequence_eval.py --config plotting/configs/plot_sequence_example.json
 
 Figures (one PNG each, never a grid — the convention of the other plot tools),
 one set per metric and round kind (`seen` = the orders training ran,
@@ -749,7 +749,7 @@ def main():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--run-dir", help="the eval's glob dir, holding eval_per_trial.csv")
     src.add_argument("--config", help="JSON describing several groups of eval runs "
-                                      "(see tools/plot_common.py); one bar colour per group")
+                                      "(see plotting/plot_common.py); one bar colour per group")
     p.add_argument("--out-dir", default=None,
                    help="where the figures go (default: the run dir, or the "
                         "config's out_dir)")

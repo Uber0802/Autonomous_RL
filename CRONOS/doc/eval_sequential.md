@@ -10,7 +10,9 @@ that training should adopt are in [`rng_and_io_notes.md`](rng_and_io_notes.md).
 
 Status: plan, RNG streams, settings, records, outputs, resume and merge are covered
 by `tests/test_eval_plan.py` and `tests/test_sequential_eval.py` (fake env, CPU
-torch). **Not yet run on hardware**; see §8.
+torch). Run on hardware for the Q6 final checkpoints (2026-09-25; see
+[`results/paper_experiments.md`](results/paper_experiments.md)); §8 lists the
+checks to repeat on a new machine.
 
 ---
 

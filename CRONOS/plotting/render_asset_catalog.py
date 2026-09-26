@@ -27,8 +27,8 @@ flat top-down silhouettes.
 Usage::
 
     cd <repo>/CRONOS
-    CUDA_VISIBLE_DEVICES=2 python tools/render_asset_catalog.py
-    CUDA_VISIBLE_DEVICES=2 python tools/render_asset_catalog.py --elev 62 --azim -90
+    CUDA_VISIBLE_DEVICES=2 python plotting/render_asset_catalog.py
+    CUDA_VISIBLE_DEVICES=2 python plotting/render_asset_catalog.py --elev 62 --azim -90
 """
 
 from __future__ import annotations

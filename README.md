@@ -141,11 +141,11 @@ bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [
 #                      │      │      │      │       │        │     │     └─ ppo (default) | grpo | grpo-scene | grpo-task
 #                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
 #                      │      │      │      │       │        └─ openvla (default) | spatialvla
-#                      │      │      │      │       └─ YAML config filename (default: four_group_sequential_2x2)
+#                      │      │      │      │       └─ YAML config path (default: configs/one_group_seq_random_2x2.yaml)
 #                      │      │      │      └─ normal | LSR | HSR | HSR+LSR | noep | noep+LSR (default: normal)
 #                      │      │      └─ GPU id (default: 3)
 #                      │      └─ seed (default: 0)
-#                      └─ horizon tag: t80a..t2560c (12 horizons × 3 segment-len variants)
+#                      └─ horizon tag: t80a..t2560c (4 horizons T80/T320/T1280/T2560 × 3 chained runs a/b/c = 12 modes)
 ```
 
 Output directory: defaults to `./$RUN_TAG`, created before launch and passed as an
@@ -196,7 +196,7 @@ neither depends on the policy's sampling on the GPU:
 |---|---|
 | Object / receptacle layout at each episode reset | CPU stream keyed by `(seed, episode)` |
 | HSR respawn poses | CPU stream keyed by `(seed, episode, segment)` |
-| Layouts of training-time eval | CPU stream keyed by `(seed, eval point, domain, eval episode)` |
+| Layouts of training-time eval | CPU stream keyed by `(seed, eval point, domain, eval episode)`; the eval point is the number of training episodes completed (0 for `--eval-at-start`) |
 | Task order (`pure_random`, `sequence_random`) | a dedicated generator seeded by `seed`, saved in each checkpoint's `scheduler_state.json` |
 
 So two runs with the same seed see the same scenes whatever the policy does, and
@@ -260,21 +260,21 @@ Key training flags:
 | `--wandb-dir` | `""` | Run output root. Created and validated before `wandb.init`; a run that cannot land here fails instead of silently going to `$TMPDIR` |
 | `--num-envs` | 64 | Total parallel environments |
 | `--segment-len` | 80 | Steps per segment (AutoRL: 80) |
-| `--ppo-update-len` | 80 | Steps between PPO updates |
+| `--ppo-update-len` | 160 | Steps between PPO updates (`train.sh` passes 80 for the T80 modes) |
 | `--eval-interval` | 4 | Eval every N episodes |
 | `--num-eval-episode` | 4 | Episodes per eval round |
 | `--eval-at-start` | false | Run eval before first training episode |
 | `--enable-backward` / `--backward-interval N` | off | LSR — backward policy alternating with forward at step interval N |
 | `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
 | `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
-| `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) or `workspace` (configurable xyz AABB via YAML) |
+| `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) is the only registered CLI value; the xyz-AABB detector is selected by a YAML `unsuitable_detector:` block (`name: workspace_aabb`), which overrides this flag |
 | `--reset-mode` | `per_episode` | `per_episode` \| `none` (non-episodic) |
 | `--reset-robot` / `--no-reset-robot` | on | EER — return the gripper to its initial pose at every segment boundary |
 | `--backward-goal` | `table` | LSR reset goal (perturbation). `table` = "put X on table" (unchanged) \| `recep` = another receptacle, != the forward task's \| `mixed` = per-env draw. Requires `--enable-backward` |
 | `--backward-recep-prob` | 0.5 | `mixed` only: P(receptacle variant) per env per reset segment |
 | `--segment-pose-phase` | `both` | `start` (state each segment begins from, after that boundary's resets) \| `end` (steady state the policy produced, before them) \| `both` |
 | `--legacy-rng` | off | Draw scenes and task order from the global generators, as before V0.99 (see *Random streams*) |
-| `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at each segment end to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
+| `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at both sides of every segment boundary (`--segment-pose-phase start|end|both`) to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
 
 ### Training-time outputs
 
@@ -283,15 +283,16 @@ Written to the run's `glob/` on every run.
 | File | Contents |
 |---|---|
 | `rollout_success.csv` | one row per (episode, segment, env): `success` / grasp at segment end, `reward_sum`, `return_discounted`, `return_gae`, `value_mean`, `advantage_mean`, plus a `direction` column marking forward vs backward segments |
-| `segment_pose.csv` | one row per (episode, segment, env, actor) with full `pq`; only with `--record-segment-pose` |
+| `segment_pose.csv` | one row per (episode, segment, phase, env, actor) with full `pq`; on by default, `--no-record-segment-pose` disables |
 | `eval_success.csv` | aggregate per (eval point, group, task) |
 
 `rollout_success.csv` uses the **same** `success` definition as eval — the value
 at the segment's final step — so rollout and eval curves are directly
 comparable; they differ only in when they are sampled. Under a mode with LSR
 (`LSR`, `HSR+LSR`, `noep+LSR`), filter `direction == 'forward'` before
-aggregating: the env's success predicate is always the forward one, so backward
-segments score 0 by construction. Modes without LSR — including bare `noep` —
+aggregating: `backward` (to-table) segments score 0 by construction, and
+`backward_recep` (perturbation) segments score a *different* task, since the
+env's success predicate follows the current goal. Modes without LSR — including bare `noep` —
 log every row as `forward`, so the filter is a harmless no-op there.
 
 ### Evaluation (standalone)
@@ -427,7 +428,7 @@ Refreshes a 4-panel `trends.png` directly inside a running training run's `glob/
 ```bash
 # Render trends.png for one in-progress run; also drops a copy at <run-dir>/trends.png
 python tools/plot_run_trends.py \
-  --run-dir wandb/run-20260618_103000-abcd1234/files/glob \
+  --run-dir wandb/run-20260618_103000-abcd1234/glob \
   --max-episodes 32 \
   --out reports/figures/2026-06-18_t320a-trends.png
 ```
@@ -445,7 +446,7 @@ For **resumed** runs (`--resume-from`), pass each prior wandb run id and prior `
 
 ```bash
 python tools/plot_run_trends.py \
-  --run-dir wandb/run-<current>/files/glob \
+  --run-dir wandb/run-<current>/glob \
   --max-episodes 32 --out reports/figures/<date>_trends.png \
   --prior-run-id <parent_run_id> --prior-eval-csv /path/to/parent/glob/eval_success.csv \
   --prior-run-id <grandparent_run_id> --prior-eval-csv /path/to/grandparent/glob/eval_success.csv
@@ -471,11 +472,13 @@ training in `num_envs`, so they only run with `--allow-config-mismatch`.
 ### Out-of-memory errors
 
 If training or eval runs out of GPU memory, the process still exits with the
-error, and first prints a summary and writes `glob/oom_report.txt`: the phase
+error, and first prints a summary and writes `glob/oom_report.txt` (or
+`oom_report.txt` directly under `--wandb-dir` when the run directory does not
+exist yet, e.g. an OOM while loading the policy): the phase
 (`init`, `rollout`, `ppo_update` / `grpo_update`, `train_eval`,
 `standalone_eval`), episode and segment (or eval domain and round), the settings
-that decide peak memory, per-GPU allocated / reserved / free memory, the full
-`torch.cuda.memory_summary()` and hints (lower `--buffer-inferbatch` for rollout,
+that decide peak memory, per-GPU allocated / reserved / free memory, an
+abbreviated `torch.cuda.memory_summary()` and hints (lower `--buffer-inferbatch` for rollout,
 `--buffer-minibatch` for the update; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 when reserved memory far exceeds allocated).
 

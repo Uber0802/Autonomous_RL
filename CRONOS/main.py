@@ -516,9 +516,10 @@ class CronosRunner:
         self._build_grpo_env_blocks()
 
         # Dedicated RNG for the backward-goal draw, so turning perturbation on
-        # does not shift the global `random` stream that the scheduler
-        # (`pure_random` / `sequence_random`) and the env's pose sampling draw
-        # from. Seeded off args.seed, so the draw is reproducible.
+        # does not shift the global `random` stream (which the scheduler and
+        # the env's pose sampling still draw from under --legacy-rng; by
+        # default they use `rng_streams.task_rng` / `scene_ids`). Seeded off
+        # args.seed, so the draw is reproducible.
         self._backward_rng = random.Random(args.seed + 977)
 
         # buffer width comes from the policy, NOT from
@@ -986,7 +987,7 @@ class CronosRunner:
             return rng_streams.scene_ids(self.args.seed, n // 8, kind, **fields) * 8
         return rng_streams.scene_ids(self.args.seed, n, kind, **fields)
 
-    def eval_all_groups(self, iteration, obj_set, prefix="eval"):
+    def eval_all_groups(self, iteration, obj_set, prefix="eval", eval_point=None):
         """M4: Evaluate all groups using per-env rotation.
 
         Assignment formula:
@@ -996,16 +997,27 @@ class CronosRunner:
         Each env resets between episodes. Results are accumulated per (group, task)
         and averaged at the end.
 
+        `eval_point` is the number of training episodes completed when this eval
+        runs; it keys the eval layouts (`scene|seed|kind=eval|point|domain|round`).
+        Defaults to `iteration + 1` (the eval after training episode
+        `iteration + 1`); the eval-at-start pass passes its own start episode, so
+        it never shares layouts with the eval that follows the next episode, and
+        a resumed run's at-start eval matches the uninterrupted run's eval at
+        that checkpoint.
+
         Returns: list of (g_idx, group_name, task, n_samples, stats_dict) tuples.
         """
+        if eval_point is None:
+            eval_point = iteration + 1
         outer_context = dict(self.oom_context)
         self.oom_context = {"phase": "train_eval", "iteration": iteration, "domain": obj_set}
-        try:
-            return self._eval_all_groups(iteration, obj_set, prefix)
-        finally:
-            self.oom_context = outer_context
+        result = self._eval_all_groups(iteration, obj_set, prefix, eval_point)
+        # Restored on the success path only: on a CUDA OOM the context must
+        # still read `train_eval` when `main()` writes the report.
+        self.oom_context = outer_context
+        return result
 
-    def _eval_all_groups(self, iteration, obj_set, prefix):
+    def _eval_all_groups(self, iteration, obj_set, prefix, eval_point):
         self.policy.prep_rollout()
 
         per_group_evals = self.scheduler.get_eval_tasks_per_group()
@@ -1071,7 +1083,7 @@ class CronosRunner:
             # Reset env and assign tasks
             obs, _, _ = self.env.reset(
                 obj_set_override=obj_set, skip_scheduler=True,
-                layout_ids=self._scene_ids(obj_set, "eval", iteration=iteration,
+                layout_ids=self._scene_ids(obj_set, "eval", point=eval_point,
                                            domain=obj_set, round=ep))
             self.env.set_task(envs_obj, envs_recep)
             instruct = self.env.get_language_instructions()
@@ -1569,7 +1581,8 @@ class CronosRunner:
             def _run_eval_start(obj_set, kind_prefix, kind_label):
                 print(f"Evaluating {kind_label} at start (steps={total_steps_0}, "
                       f"{self.args.num_eval_episode} episodes)")
-                results_raw = self.eval_all_groups(start_episode, obj_set, prefix=kind_prefix)
+                results_raw = self.eval_all_groups(start_episode, obj_set, prefix=kind_prefix,
+                                                   eval_point=start_episode)
                 results = []
                 for g_idx, g_name, task, n_samples, stats in results_raw:
                     scalars = self.recorder.log_eval(

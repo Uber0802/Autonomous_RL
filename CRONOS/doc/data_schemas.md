@@ -257,7 +257,7 @@ exactly `num_envs × task slots`; the eval refuses to continue otherwise.
 
 `plotting/parse_autorl_eval.py` emits this same schema from an AutoRL run's video
 filenames, with `grasp` / `obj_grasped` left empty (not recoverable — see the
-audit doc). Both sides then feed the same `mcnemar_pair.py` and `plot.py`.
+audit doc). Both sides then feed the same `mcnemar_pair.py` and `plot_eval_success.py`.
 
 `mcnemar_pair.py` treats an empty cell as "not available": pairs missing the
 requested metric on either side are skipped and counted, and it says so instead
@@ -337,5 +337,5 @@ Aggregate per (eval point, group, task). Training-time eval appends
 `scene` — and writes it **only when the eval is complete and covers the full
 design**; an incomplete eval or a round shard has no `eval_success.csv` (see
 `eval_status.json`). The older `sequential_seq<N>`
-kinds are no longer written. Consumed by `scripts/plot.py` and
+kinds are no longer written. Consumed by `plotting/plot_eval_success.py` and
 `tools/plot_run_trends.py`.

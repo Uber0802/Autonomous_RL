@@ -1,9 +1,9 @@
 {
   "_comment": [
-    "Example config for tools/plot_sequence_eval.py (sequence-eval success by",
-    "task position and by task, as bars).   Schema: tools/plot_common.py.",
+    "Example config for plotting/plot_sequence_eval.py (sequence-eval success by",
+    "task position and by task, as bars).   Schema: plotting/plot_common.py.",
     "",
-    "    python tools/plot_sequence_eval.py --config tools/plot_sequence_example.json",
+    "    python plotting/plot_sequence_eval.py --config plotting/configs/plot_sequence_example.json",
     "",
     "Paths point at a STANDALONE EVAL's glob dir -- the one holding",
     "eval_per_trial.csv -- not at the training run. scripts/eval.sh puts it",

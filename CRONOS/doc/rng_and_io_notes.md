@@ -39,7 +39,10 @@ gives the same uniform distribution) and eval passes ids from
 
 Training fix (V0.99 hotfix): `main.py` passes `scene_ids` keyed
 `scene|seed|kind=episode|episode` at every episode reset,
-`scene|seed|kind=eval|iteration|domain|round` at every training-time eval reset,
+`scene|seed|kind=eval|point|domain|round` at every training-time eval reset
+(`point` = training episodes completed, so the at-start eval and the eval after
+the next episode never share layouts, and a resumed run's at-start eval matches
+the uninterrupted run's),
 and `scene|seed|kind=respawn|episode|segment` to HSR (`respawn_ids`, replacing
 `np.random.choice`). The task schedule has its own `task|seed` generator.
 `--legacy-rng` restores the old draws. **[test]** for the streams and the

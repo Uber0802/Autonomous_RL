@@ -41,7 +41,7 @@ other way afterwards, reporting the first segment at which each repeat's tail
 diverges from run 0's; "IDENTICAL trajectory" there means the extra runs bought
 nothing.
 
-**A checkpoint is required.** Unlike `tools/render_episode_boundaries.py`, whose
+**A checkpoint is required.** Unlike `plotting/render_episode_boundaries.py`, whose
 point survives with the arm held still, this figure is *about* what the policy
 leaves behind, so there is nothing to show without one. ``--ckpt`` is normally
 the only policy flag needed: the family, base model, unnorm key and LoRA rank
@@ -55,16 +55,16 @@ at every segment boundary; ``--no-eer`` turns it off. HSR and LSR stay off.
 Usage::
 
     cd <repo>/CRONOS
-    CUDA_VISIBLE_DEVICES=4 python tools/render_segment_frames.py \\
+    CUDA_VISIBLE_DEVICES=4 python plotting/render_segment_frames.py \\
         --ckpt /path/to/checkpoint_dir
 
     # four T1280 rollouts from one initial scene, differing only in sampling:
-    CUDA_VISIBLE_DEVICES=4 python tools/render_segment_frames.py \\
+    CUDA_VISIBLE_DEVICES=4 python plotting/render_segment_frames.py \\
         --ckpt /path/to/checkpoint_dir --horizons 1280 --repeats 4 \\
         --vla-temperature 0.6
 
     # a cheap shape check before committing an hour of GPU:
-    CUDA_VISIBLE_DEVICES=4 python tools/render_segment_frames.py \\
+    CUDA_VISIBLE_DEVICES=4 python plotting/render_segment_frames.py \\
         --ckpt /path/to/checkpoint_dir --segments 2 --task-len 10
 
 Budget ~1.05 s per policy step with OpenVLA-7B, plus ~5 min to load the model;

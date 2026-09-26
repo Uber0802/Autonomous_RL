@@ -15,11 +15,11 @@
     "",
     "Optional global crops: `end_steps`, `end_resets`.",
     "",
-    "The three plot tools live together in `tools/` and write to the same",
+    "The three plot tools live together in `plotting/` and write to the same",
     "`out_dir`, so one config produces the whole figure set in one directory:",
-    "  python tools/plot_eval_success.py      --config tools/plot_config.json",
-    "  python tools/plot_rollout_success.py   --config tools/plot_config.json",
-    "  python tools/plot_segment_positions.py --config tools/plot_config.json"
+    "  python plotting/plot_eval_success.py      --config plotting/configs/plot_config.json",
+    "  python plotting/plot_rollout_success.py   --config plotting/configs/plot_config.json",
+    "  python plotting/plot_segment_positions.py --config plotting/configs/plot_config.json"
   ],
   "out_dir": "",
   "name": "",

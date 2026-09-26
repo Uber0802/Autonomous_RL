@@ -129,8 +129,9 @@ bookkeeping `reset_robot()` performs during training, minus the physical reset â
 so eval and training now compute `success` and grasp identically, and
 `rollout_success.csv` and `eval_per_trial.csv` can be compared column to column.
 
-`eval_only.py` also warns if a segment yields more than `num_envs` terminal
-samples, so a future regression surfaces instead of silently skewing the data.
+`eval_only.py` also raises (`RuntimeError`, `evaluation/sequential.py`) if a
+segment yields anything but exactly one terminal report per env, so a future
+regression surfaces instead of silently skewing the data.
 
 #### One residual difference, by design
 

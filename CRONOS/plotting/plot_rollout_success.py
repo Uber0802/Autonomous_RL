@@ -5,7 +5,7 @@ every `task_len` boundary — 80 steps by default — so a "per-80" curve is the
 file's native granularity: no resampling, no interpolation. Each plotted point is
 the mean over the `num_envs` rows of one segment.
 
-    python tools/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
+    python plotting/plot_rollout_success.py --run-dir <RUN_OUT_DIR>/wandb/run-*/glob
 
 Why the `direction` filter defaults to `forward`
 ------------------------------------------------
@@ -30,9 +30,9 @@ Comparing several experiments
 -----------------------------
 `--config plot_runs.json` aggregates each group's series into a mean ± spread
 band. A series may be a **resume chain** — several run dirs stitched into one
-continuous line. See `tools/plot_common.py` for the schema.
+continuous line. See `plotting/plot_common.py` for the schema.
 
-    python tools/plot_rollout_success.py --config tools/plot_runs_example.json
+    python plotting/plot_rollout_success.py --config plotting/configs/plot_runs_example.json
 
 It writes a figure set, not one figure:
 
@@ -512,7 +512,7 @@ def reset_split_plan(curve: GroupCurve):
 
 
 # ---------------------------------------------------------------------------
-# Paper look (`tools/rollout_success.txt`): serif type, steps in millions, no
+# Paper look (`--style`): serif type, steps in millions, no
 # top spine, a short wide panel. Before a horizon switch the curve is
 # grey; after it every inter-reset piece is drawn on its own, with a dotted
 # rule and a marker at each reset, a solid rule at the switch, and each
@@ -801,7 +801,7 @@ def main():
     src.add_argument("--run-dir", help="the run's glob dir (…/wandb/run-<ts>-<id>/glob)")
     src.add_argument("--csv", help="path to rollout_success.csv directly")
     src.add_argument("--config", help="JSON describing several groups of runs "
-                                      "(see tools/plot_common.py); one curve per group")
+                                      "(see plotting/plot_common.py); one curve per group")
     p.add_argument("--out", default=None,
                    help="output PNG (default: <run-dir>/rollout_success.png, or "
                         "<out_dir>/<name>_rollout_success.png in --config mode)")
@@ -837,7 +837,7 @@ def main():
                     help="draw every per-group curve whole")
     p.add_argument("--style", default=None, choices=["plain", "fill", "gradient"],
                    help="--config mode: how the inter-reset pieces are drawn "
-                        "(see tools/rollout_success.txt). Default plain.")
+                        "(paper look, see the comment above the style helpers). Default plain.")
     args = p.parse_args()
 
     if args.config:

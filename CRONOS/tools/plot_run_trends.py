@@ -28,7 +28,7 @@ partially-written `eval_success.csv`; that's harmless — the next call refreshe
 
 Usage:
     python tools/plot_run_trends.py \\
-        --run-dir <path>/wandb/run-<ts>-<id>/files/glob \\
+        --run-dir <path>/wandb/run-<ts>-<id>/glob \\
         --max-episodes <N> \\
         --out <out-path>.png
 
@@ -597,7 +597,7 @@ def render_per_task(run_dir: Path, max_episodes: int, out_path: Path,
 def main():
     p = argparse.ArgumentParser("plot_run_trends")
     p.add_argument("--run-dir", required=True,
-                   help="path to the run's glob_dir (e.g. wandb/run-.../files/glob)")
+                   help="path to the run's glob_dir (e.g. wandb/run-.../glob, a sibling of files/)")
     p.add_argument("--max-episodes", type=int, default=32,
                    help="--max-episodes used to launch the training run (for the title)")
     p.add_argument("--out", required=True, help="output PNG path for the 4-panel dashboard")

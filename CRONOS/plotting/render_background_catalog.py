@@ -29,8 +29,8 @@ Two notes on what "background" means in this env:
 Usage::
 
     cd <repo>/CRONOS
-    CUDA_VISIBLE_DEVICES=2 python tools/render_background_catalog.py
-    CUDA_VISIBLE_DEVICES=2 python tools/render_background_catalog.py --backgrounds config
+    CUDA_VISIBLE_DEVICES=2 python plotting/render_background_catalog.py
+    CUDA_VISIBLE_DEVICES=2 python plotting/render_background_catalog.py --backgrounds config
 """
 
 from __future__ import annotations

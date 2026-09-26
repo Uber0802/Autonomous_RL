@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from run_paths import prepare_wandb_dir, verify_run_dir
 from oom_report import is_oom, write_oom_report
+from version import __version__ as CRONOS_VERSION
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.scheduler import TaskScheduler
@@ -273,8 +274,9 @@ class EvalRunner:
         self.env.set_scheduler(self.scheduler)
         print(f"[SCHEDULER] mode={args.task_order}, pool={self.scheduler.task_pool}")
 
-        # Dump config
+        # Dump config (+ the code version, as main.py does)
         cfg = dict(args.__dict__)
+        cfg["cronos_version"] = CRONOS_VERSION
         name = "run_config.json"
         if args.eval_resume and (self.glob_dir / name).exists():
             import datetime as _dt

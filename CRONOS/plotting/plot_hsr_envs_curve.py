@@ -6,7 +6,7 @@ For runs WITHOUT HSR the count only falls at an episode reset, so every
 episode is drawn from 0 at the previous episode's last step (the reset
 point), then one point per segment end.
 
-    python tools/plot_hsr_envs_curve.py --config doc/tmp/hsr_need_config.json
+    python plotting/plot_hsr_envs_curve.py --config history/paper_plot_configs/hsr_need_config.json
 
 Writes to the config's `out_dir`:
   <name>_hsr_envs.png             series mean, band = +-1 std across series
@@ -82,7 +82,7 @@ def draw(seg, cfg, out_dir, scope, series_sel, tag):
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--config", required=True, help="plot config JSON (schema: tools/plot_common.py)")
+    p.add_argument("--config", required=True, help="plot config JSON (schema: plotting/plot_common.py)")
     p.add_argument("--scope", choices=["task", "all", "both"], default="both",
                    help="task = what HSR checks (default figure); all = every slot")
     p.add_argument("--step-range", default=None, help="LO:HI env steps; overrides config `step_range`")

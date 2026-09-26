@@ -68,9 +68,12 @@ openvla/wandb/
 SimplerEnv/wandb/
 ManiSkill/data/
 
-# Full (internal) branch: doc/, plotting/ and history/ are tracked here.
-# The public release branch ignores them. Local-only scratch:
-CRONOS/history/_venv/
-CRONOS/history/changelog_src/
-CRONOS/history/doc_tmp/
+# Internal documentation: changelog, experiment results, bug reports, design
+# notes. Local only; the release documents itself through README.md.
+CRONOS/doc/
+# Plotting / statistics tools. Will be released later; ignored until then.
+CRONOS/plotting/
+# Debug scripts, backups, launch queues, per-experiment plot configs with
+# machine-specific paths. Local only, never released.
+CRONOS/history/
 reports/

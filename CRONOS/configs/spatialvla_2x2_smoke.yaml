@@ -1,6 +1,6 @@
 # SpatialVLA 2x2 SMOKE-RUN config — verifies the end-to-end PPO pipeline
 # wiring (main.py + ppo.py + wrapper + adapter) on a small batch before
-# committing to the multi-hour P-5/P-6 runs.
+# committing to the multi-hour training runs.
 #
 # Same scene as the real training (`configs/spatialvla_2x2_train.yaml`),
 # just num_envs=8 instead of 64. ONE episode is enough to verify the loop
@@ -8,14 +8,14 @@
 # completes, and wandb logging doesn't error.
 #
 # Canonical smoke command:
-#   safejob python main.py --config-path configs/spatialvla_2x2_smoke.yaml \
+#   python main.py --config-path configs/spatialvla_2x2_smoke.yaml \
 #     --seed 0 \
 #     --reset-mode per_episode --episode-len 80 --ppo-update-len 80 \
 #     --task-len 80 --segment-len 80 \
 #     --max-episodes 1 \
 #     --buffer-minibatch 4 --alg-gradient-accum 1 \
 #     --no-record-video --no-wandb \
-#     --name p5_smoke
+#     --name spatialvla_smoke
 
 cronos_version: V0.99
 policy: spatialvla

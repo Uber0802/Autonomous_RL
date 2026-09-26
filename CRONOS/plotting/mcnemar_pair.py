@@ -40,7 +40,7 @@ from pathlib import Path
 def read_per_trial(path: Path, seq_kinds=None):
     """Return {(eval_kind, task, env_idx): {success, success_chained, grasp, obj_grasped}}.
 
-    Columns may be absent or empty. `tools/parse_autorl_eval.py` reconstructs a
+    Columns may be absent or empty. `plotting/parse_autorl_eval.py` reconstructs a
     baseline from an AutoRL run's video filenames, which carry the terminal
     `success` per env but nothing about grasp — those cells are written empty on
     purpose. A missing value becomes None here rather than raising, and

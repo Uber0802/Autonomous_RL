@@ -233,7 +233,7 @@ pip install "numpy<2.0.0" \
 pip install tensorflow==2.15.0 tensorflow-datasets==4.9.3 tensorflow-graphics \
     "tensorflow-metadata<1.21" "protobuf>=3.20,<5"
 
-# 2. Plotting tooling (`scripts/plot.py` needs pandas + matplotlib at pinned versions).
+# 2. Plotting tooling (`tools/plot_run_trends.py` needs pandas + matplotlib at pinned versions).
 pip install -r scripts/requirements_plot.txt
 
 # 3. Pillar packages used by every policy (env, manipulation simulator, shared adapters).
