@@ -35,12 +35,15 @@ Consequences:
 
 Eval fix: the env accepts `options["layout_ids"]` (per-env 62-bit ids; `% ltt`
 gives the same uniform distribution) and eval passes ids from
-`envs/rng_streams.py`. Without the option the env keeps `torch.randint`, so
-training is unchanged. **[test]**
+`envs/rng_streams.py`. Without the option the env keeps `torch.randint`. **[test]**
 
-For training: pass `layout_ids` from a stream keyed by what identifies the reset —
-e.g. `layout|seed|episode|env` for episode resets and
-`respawn|seed|episode|segment|env` for HSR respawns — and log the keys.
+Training fix (V0.99 hotfix): `main.py` passes `scene_ids` keyed
+`scene|seed|kind=episode|episode` at every episode reset,
+`scene|seed|kind=eval|iteration|domain|round` at every training-time eval reset,
+and `scene|seed|kind=respawn|episode|segment` to HSR (`respawn_ids`, replacing
+`np.random.choice`). The task schedule has its own `task|seed` generator.
+`--legacy-rng` restores the old draws. **[test]** for the streams and the
+scheduler; the env-side `respawn_ids` path **[read]**.
 
 ### A2. Hidden reseeds in constructors
 
@@ -239,11 +242,11 @@ The unit of completion must be explicit:
 
 | # | Item | Status in training |
 |---|---|---|
-| 1 | Env layouts from keyed streams (`layout_ids`), keys logged | not done (A1) |
-| 2 | HSR respawn draws from its own keyed stream | not done (A3) |
-| 3 | PPO minibatch shuffle on a dedicated generator | not done (A3) |
-| 4 | No reseeds inside constructors (policy init) | not done (A2) |
-| 5 | Scheduler draws from a dedicated stream | not done (A3) |
+| 1 | Env layouts from keyed streams (`layout_ids`), keys logged | done in V0.99 (episode and training-time eval resets); keys are derivable from (seed, episode), not logged |
+| 2 | HSR respawn draws from its own keyed stream | done in V0.99 |
+| 3 | PPO minibatch shuffle on a dedicated generator | not done, but no longer coupled to HSR (HSR left the numpy global in V0.99) |
+| 4 | No reseeds inside constructors (policy init) | not done (A2); since V0.99 they can no longer move a scene or the task order |
+| 5 | Scheduler draws from a dedicated stream | done in V0.99 (state in `scheduler_state.json`) |
 | 6 | Per-episode (or per-update) reseed of action sampling; generator states in checkpoints | not done (A6) |
 | 7 | Rows carry full unit keys; one writer per derived file; derived files rebuilt, atomic | partial: `counters.json` is atomic; `eval_success.csv` is append-only (B1–B3) |
 | 8 | `rollout_success.csv` rows are buffered until the PPO update that computes GAE — a crash loses rows since the last update, and a resume writes a new run dir; define the unit and truncate/stitch explicitly | not done; plot tools stitch resume chains with "child wins" **[read]** |

@@ -46,9 +46,23 @@ from V0.93c–V0.95. V0.99 is the first stamp that matches the code.
   `plot_run_trends.py` (now `$WANDB_ENTITY`, else the wandb default entity), and
   internal repository names in comments.
 
+**Hotfix**
+- **[numbers-affected]** Training RNG split: scene draws (episode layouts, HSR
+  respawn poses, training-time eval layouts) come from CPU streams keyed by
+  `(seed, kind, episode / segment / eval point)` (`envs/rng_streams.scene_ids`),
+  so GPU action sampling and the task order can no longer move a scene; the task
+  schedule uses a dedicated generator (`task_rng`) checkpointed in
+  `scheduler_state.json`. Same distributions, different draws from pre-V0.99
+  runs; `--legacy-rng` / `LEGACY_RNG=1` restores the old behaviour.
+- `oom_report.py`: a CUDA OOM in `main.py` or `eval_only.py` prints a summary and
+  writes `glob/oom_report.txt` (phase, episode / segment or eval unit, memory
+  settings, per-GPU memory, `memory_summary`, hints) before re-raising.
+- `tests/test_training_rng.py`.
+
 **Known issues**
+- Action sampling and the PPO minibatch shuffle still use global generators
+  ([`rng_and_io_notes.md`](rng_and_io_notes.md) checklist items 3, 4, 6).
 - GRPO collapses — see [`results/grpo.md`](results/grpo.md). Use PPO.
-- Training RNG is not yet isolated — see [`rng_and_io_notes.md`](rng_and_io_notes.md).
 
 ---
 
