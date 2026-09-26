@@ -1,0 +1,438 @@
+"""CRONOS — Task scheduler with per-group state and sub-group fan-out.
+
+Supports three ordering modes:
+- ``sequential``:       cycle through task_sequence in order
+- ``pure_random``:      sample randomly each segment (≠ previous),
+                        weighted by frequency in task_sequence
+- ``sequence_random``:  random permutation of unique tasks, reshuffle when exhausted
+
+M3: With ``fan_out=True`` (default, AutoRL behavior), each group's envs
+are further split into sub-groups, one per unique task in the pool. All tasks
+run simultaneously within each group. The assignment rotates each segment.
+
+Each group maintains its own cursor, permutation, and last-task state via
+``GroupState``.  The scheduler returns flat ``(objects, receptacles)`` lists
+of length ``num_envs`` where each group's envs are contiguous.
+"""
+
+from __future__ import annotations
+
+import itertools
+import math
+import random
+import warnings
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Union
+
+
+# Above this many orderings we stop materializing `itertools.permutations` and
+# switch to rejection-sampled shuffles. 8 tasks (40320 orderings) still fits
+# comfortably; 9 tasks — the `one_group_sequential_3x3` config — would be
+# 362880 tuples built just to draw 4 of them.
+_PERM_MATERIALIZE_LIMIT = 50_000
+
+
+def build_eval_sequences(
+    task_pool: List[str],
+    n_sequences: int,
+    seed: int,
+) -> List[List[str]]:
+    """Build the orderings for a sequential eval.
+
+    Sequence 0 is always the training order (AutoRL ``eval_training_seq=True``);
+    sequences 1..n-1 are distinct random permutations of it.
+
+    Shared by `eval_only.py` and `main.py --eval-sequential`, which previously
+    carried two hand-rolled copies of this logic.
+
+    For pools small enough to enumerate, the draw is bit-identical to the old
+    ``random.sample(list(itertools.permutations(pool))[1:], k)`` both call sites
+    used — `itertools.permutations` yields the identity ordering first, so
+    dropping it leaves exactly the same candidate list in the same order, and
+    the same seeded `random.sample` over it picks exactly the same orderings.
+    Past runs stay reproducible. Larger pools take the rejection-sampling path
+    instead of materializing a factorial number of tuples.
+    """
+    pool = list(task_pool)
+    n = len(pool)
+    training_seq = list(pool)
+    k = max(0, n_sequences - 1)
+    if k == 0 or n < 2:
+        return [training_seq]
+
+    rng = random.Random(seed)
+    total_orderings = math.factorial(n)
+
+    if total_orderings <= _PERM_MATERIALIZE_LIMIT:
+        candidates = list(itertools.permutations(pool))[1:]  # drop identity
+        # `random.sample` on a seeded module-level RNG is what both call sites
+        # used; a dedicated Random(seed) draws the same values.
+        sampled = rng.sample(candidates, min(k, len(candidates)))
+        return [training_seq] + [list(p) for p in sampled]
+
+    # Large pool: draw distinct shuffles instead of enumerating.
+    seen = {tuple(pool)}
+    out: List[List[str]] = []
+    max_attempts = 100 * max(1, k)
+    for _ in range(max_attempts):
+        if len(out) >= k:
+            break
+        cand = pool[:]
+        rng.shuffle(cand)
+        key = tuple(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+    return [training_seq] + out
+
+
+_PADDING_WARNED = set()
+
+
+def _warn_padding(msg: str) -> None:
+    """Warn once per distinct message. Padding is unreachable for YAML configs
+    that pass V3/V23 (per-group sums and even splits); it can only trigger via
+    the flat-pool path or a CLI --num-envs that disagrees with the YAML. Eval
+    (`evaluation/plan.py::check_env_partition`) refuses to pad at all."""
+    if msg not in _PADDING_WARNED:
+        _PADDING_WARNED.add(msg)
+        warnings.warn(f"[scheduler padding] {msg}", stacklevel=3)
+
+
+# ---------------------------------------------------------------------------
+# Per-group state
+# ---------------------------------------------------------------------------
+
+def _rng_state_to_json(state):
+    """`random.Random.getstate()` as JSON-serialisable lists."""
+    version, internal, gauss_next = state
+    return [version, list(internal), gauss_next]
+
+
+def _rng_state_from_json(state):
+    version, internal, gauss_next = state
+    return (version, tuple(internal), gauss_next)
+
+
+@dataclass
+class GroupState:
+    """Mutable scheduling state for one group."""
+    name: str
+    num_envs: int                     # envs allocated to this group
+    task_sequence: List[str]          # resolved task strings (may have repeats)
+    eval_tasks: List[str]             # resolved eval task strings
+    task_pool: List[str]              # unique tasks (deduplicated from sequence)
+    weights: List[float]              # sampling weights for pure_random (from frequency)
+    cursor: int = 0                   # current position in sequence (sequential)
+    shuffle_perm: List[int] = field(default_factory=list)  # current permutation (sequence_random)
+    shuffle_cursor: int = 0           # position in current permutation
+    last_task_idx: int = -1           # previous task pool index (pure_random: avoid repeat)
+
+    @staticmethod
+    def from_sequence(name: str, task_sequence: List[str],
+                      eval_tasks: List[str],
+                      num_envs: int = 0) -> "GroupState":
+        """Create a GroupState from a resolved task_sequence."""
+        # Build deduplicated pool preserving first-occurrence order
+        seen = set()
+        pool = []
+        for t in task_sequence:
+            if t not in seen:
+                seen.add(t)
+                pool.append(t)
+
+        # Compute weights from frequency in task_sequence
+        counts = {t: 0.0 for t in pool}
+        for t in task_sequence:
+            counts[t] += 1.0
+        total = sum(counts.values())
+        weights = [counts[t] / total for t in pool]
+
+        return GroupState(
+            name=name,
+            num_envs=num_envs,
+            task_sequence=task_sequence,
+            eval_tasks=eval_tasks,
+            task_pool=pool,
+            weights=weights,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+
+class TaskScheduler:
+    """Per-group task scheduler supporting 3 ordering modes and sub-group fan-out."""
+
+    def __init__(
+        self,
+        group_states: List[GroupState],
+        mode: str = "sequential",
+        num_envs: int = 64,
+        fan_out: bool = True,
+    ):
+        self.group_states = group_states
+        self.mode = mode
+        self.num_envs = num_envs
+        self.fan_out = fan_out
+
+        # Flat task_pool for backward compat (union of all groups' pools)
+        seen = set()
+        self.task_pool: List[str] = []
+        for gs in group_states:
+            for t in gs.task_pool:
+                if t not in seen:
+                    seen.add(t)
+                    self.task_pool.append(t)
+
+        # per-group fan-out cursor (rotates sub-group assignment)
+        self._fan_out_offsets: List[int] = [0] * len(group_states)
+
+        # Legacy compat
+        self.current_task_idx = 0
+
+        # Generator for the random task orders (`pure_random`, `sequence_random`).
+        # Defaults to the global `random` module (legacy); training installs a
+        # dedicated one via `set_rng` so the task schedule and the scene draws
+        # never share a stream.
+        self.rng = random
+
+    def set_rng(self, rng: random.Random) -> None:
+        """Use a dedicated generator for task draws (see `envs/rng_streams.task_rng`)."""
+        self.rng = rng
+
+    # ------------------------------------------------------------------
+    # Class methods for backward-compatible construction
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_flat_pool(
+        cls,
+        task_pool: List[str],
+        mode: str = "sequential",
+        num_envs: int = 64,
+        task_filter: Optional[List[Union[int, str]]] = None,
+        fan_out: bool = True,
+    ) -> "TaskScheduler":
+        """Legacy constructor: single flat task pool → one group with all tasks."""
+        if task_filter is not None:
+            filtered = cls._apply_filter(task_pool, task_filter)
+        else:
+            filtered = list(task_pool)
+        if not filtered:
+            raise ValueError("task_pool is empty after applying task_filter")
+
+        gs = GroupState.from_sequence(
+            name="default",
+            task_sequence=filtered,
+            eval_tasks=filtered,
+            num_envs=num_envs,
+        )
+        return cls(group_states=[gs], mode=mode, num_envs=num_envs, fan_out=fan_out)
+
+    @staticmethod
+    def _apply_filter(pool: List[str], filt: List[Union[int, str]]) -> List[str]:
+        """Restrict pool to entries matching filt (indices or task strings)."""
+        result = []
+        for entry in filt:
+            if isinstance(entry, int):
+                if 0 <= entry < len(pool):
+                    result.append(pool[entry])
+                else:
+                    raise ValueError(
+                        f"task_filter index {entry} out of range "
+                        f"(pool has {len(pool)} tasks)")
+            elif isinstance(entry, str):
+                matches = [t for t in pool if t == entry]
+                if not matches:
+                    raise ValueError(
+                        f"task_filter string '{entry}' not found in pool: {pool}")
+                result.extend(matches)
+            else:
+                raise ValueError(
+                    f"task_filter entries must be int or str, got {type(entry)}")
+        seen = set()
+        return [t for t in result if not (t in seen or seen.add(t))]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_obj_recep(task_str: str) -> Tuple[Optional[str], Optional[str]]:
+        """Extracts object and receptacle from a task string."""
+        m = re.search(r"put (.*?) on (.*)", task_str)
+        if m:
+            return m.group(1), m.group(2)
+        return None, None
+
+    def _pick_task_for_group(self, gs: GroupState) -> str:
+        """Pick the next task for a group based on the current mode."""
+        if self.mode == "sequential":
+            task = gs.task_sequence[gs.cursor % len(gs.task_sequence)]
+            return task
+
+        elif self.mode == "pure_random":
+            pool = gs.task_pool
+            if len(pool) == 1:
+                return pool[0]
+            # Weighted sample, different from last
+            attempts = 0
+            while attempts < 100:
+                idx = self.rng.choices(range(len(pool)), weights=gs.weights, k=1)[0]
+                if idx != gs.last_task_idx or len(pool) == 1:
+                    gs.last_task_idx = idx
+                    return pool[idx]
+                attempts += 1
+            # Fallback (shouldn't happen)
+            gs.last_task_idx = (gs.last_task_idx + 1) % len(pool)
+            return pool[gs.last_task_idx]
+
+        elif self.mode == "sequence_random":
+            pool = gs.task_pool
+            # Generate new permutation if needed
+            if not gs.shuffle_perm or gs.shuffle_cursor >= len(gs.shuffle_perm):
+                gs.shuffle_perm = list(range(len(pool)))
+                self.rng.shuffle(gs.shuffle_perm)
+                gs.shuffle_cursor = 0
+            idx = gs.shuffle_perm[gs.shuffle_cursor]
+            return pool[idx]
+
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+    # ------------------------------------------------------------------
+    # Core API
+    # ------------------------------------------------------------------
+
+    def get_next_tasks(self, num_groups: Optional[int] = None
+                       ) -> Tuple[List[str], List[str]]:
+        """Returns (objects, receptacles) for all envs.
+
+        Each group's envs are contiguous: envs[0:group_size] = group 0, etc.
+
+        With fan_out=True (M3, AutoRL default), each group's envs are
+        further split into sub-groups, one per unique task in the pool.
+        This matches AutoRL's behavior where all tasks run simultaneously.
+        """
+        n_groups = len(self.group_states)
+        if num_groups is not None:
+            n_groups = min(num_groups, n_groups)
+
+        objects: List[str] = []
+        receptacles: List[str] = []
+
+        for g_idx in range(n_groups):
+            gs = self.group_states[g_idx % len(self.group_states)]
+            g_size = gs.num_envs
+
+            if self.fan_out and len(gs.task_pool) > 1:
+                # fan out all unique tasks across sub-groups
+                n_tasks = len(gs.task_pool)
+                sub_size = g_size // n_tasks
+                offset = self._fan_out_offsets[g_idx % len(self._fan_out_offsets)]
+                for t_idx in range(n_tasks):
+                    task = gs.task_pool[(t_idx + offset) % n_tasks]
+                    obj, recep = self._extract_obj_recep(task)
+                    objects.extend([obj] * sub_size)
+                    receptacles.extend([recep] * sub_size)
+                # Handle remainder envs within group
+                remainder_in_group = g_size - sub_size * n_tasks
+                if remainder_in_group > 0:
+                    _warn_padding(f"group '{gs.name}': {remainder_in_group} env(s) beyond an even "
+                                  f"{n_tasks}-task split repeat the last task")
+                    objects.extend([objects[-1]] * remainder_in_group)
+                    receptacles.extend([receptacles[-1]] * remainder_in_group)
+            else:
+                # fan_out=False or single task: all envs get same task 
+                task = self._pick_task_for_group(gs)
+                obj, recep = self._extract_obj_recep(task)
+                objects.extend([obj] * g_size)
+                receptacles.extend([recep] * g_size)
+
+        # Pad to num_envs if needed (shouldn't happen with correct per-group sizes)
+        remainder = self.num_envs - len(objects)
+        if remainder > 0:
+            _warn_padding(f"per-group num_envs sum to {len(objects)} but num_envs={self.num_envs}; "
+                          f"{remainder} env(s) repeat the last task")
+            objects.extend([objects[-1]] * remainder)
+            receptacles.extend([receptacles[-1]] * remainder)
+
+        return objects, receptacles
+
+    def update_index(self):
+        """Advance all groups' cursors by one step.
+
+        With fan_out=True: rotates the sub-group assignment offset.
+        With fan_out=False: advances per-group task cursor .
+        """
+        for g_idx, gs in enumerate(self.group_states):
+            if self.fan_out and len(gs.task_pool) > 1:
+                # rotate sub-group assignment
+                self._fan_out_offsets[g_idx] = (
+                    self._fan_out_offsets[g_idx] + 1) % len(gs.task_pool)
+            else:
+                # advance single-task cursor
+                if self.mode == "sequential":
+                    gs.cursor = (gs.cursor + 1) % len(gs.task_sequence)
+                elif self.mode == "sequence_random":
+                    gs.shuffle_cursor += 1
+
+        # Legacy compat
+        if self.task_pool:
+            self.current_task_idx = (self.current_task_idx + 1) % len(self.task_pool)
+
+    def get_eval_tasks_per_group(self) -> List[Tuple[str, int, List[str]]]:
+        """Returns [(group_name, group_num_envs, [eval_task_strings]), ...] for all groups."""
+        return [(gs.name, gs.num_envs, gs.eval_tasks) for gs in self.group_states]
+
+    def get_max_eval_rounds(self) -> int:
+        """Max eval tasks across all groups (determines number of eval rounds)."""
+        if not self.group_states:
+            return 0
+        return max(len(gs.eval_tasks) for gs in self.group_states)
+
+    # ------------------------------------------------------------------
+    # State save/restore (for checkpoint resume)
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> Dict:
+        """Serialize scheduler state for checkpoint."""
+        return {
+            "mode": self.mode,
+            "fan_out": self.fan_out,
+            "current_task_idx": self.current_task_idx,
+            "fan_out_offsets": self._fan_out_offsets,
+            "groups": [
+                {
+                    "name": gs.name,
+                    "cursor": gs.cursor,
+                    "shuffle_perm": gs.shuffle_perm,
+                    "shuffle_cursor": gs.shuffle_cursor,
+                    "last_task_idx": gs.last_task_idx,
+                }
+                for gs in self.group_states
+            ],
+            # Dedicated task generator only; the global `random` is not ours to save.
+            "rng_state": (_rng_state_to_json(self.rng.getstate())
+                          if isinstance(self.rng, random.Random) else None),
+        }
+
+    def load_state(self, state: Dict):
+        """Restore scheduler state from checkpoint."""
+        self.current_task_idx = state.get("current_task_idx", 0)
+        saved_offsets = state.get("fan_out_offsets", [])
+        for i, off in enumerate(saved_offsets):
+            if i < len(self._fan_out_offsets):
+                self._fan_out_offsets[i] = off
+        for gs, gs_state in zip(self.group_states, state.get("groups", [])):
+            gs.cursor = gs_state.get("cursor", 0)
+            gs.shuffle_perm = gs_state.get("shuffle_perm", [])
+            gs.shuffle_cursor = gs_state.get("shuffle_cursor", 0)
+            gs.last_task_idx = gs_state.get("last_task_idx", -1)
+        rng_state = state.get("rng_state")
+        if rng_state is not None and isinstance(self.rng, random.Random):
+            self.rng.setstate(_rng_state_from_json(rng_state))

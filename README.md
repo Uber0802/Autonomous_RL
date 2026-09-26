@@ -1,0 +1,708 @@
+# CRONOS
+
+> **V0.99 — early release.** See [Version](#version) for known issues.
+
+CRONOS is a refactored robotic manipulation training benchmark designed for **non-episodic reinforcement learning** and **multi-task training**. It is built on the `RL4VLA` backbone with optimized modules from `AutoRL`.
+
+## Features
+- **YAML-driven experiment configs** — per-group objects, receptacles, task sequences, eval tasks, and fan-out settings in a single file.
+- **Sub-group fan-out** — all tasks in a group run simultaneously on different env sub-groups, matching AutoRL's default multi-task gradient mixing.
+- **Per-env rotation eval** — each env rotates through eval tasks across episodes; `num_eval_episode` controls sample count per task.
+- **Per-group objects/backgrounds** — different groups can have different physical objects and visual overlays in the same training run.
+- **Dual VLA support** — `--policy openvla|spatialvla` switches between OpenVLA-7B and SpatialVLA-4B adapters (7-token vs 3-token action sequences).
+- **PPO or GRPO** — `--alg-name grpo` swaps the critic-free path in (**experimental** — see [Version](#version)); grouping is selectable at three nesting levels (`batch` / `scene` / `task`), with `batch` verified bit-identical to AutoRL's `compute_returns_grpo`.
+- **Orthogonal reset dimensions** — LSR (learned reset policy), HSR (respawn fallen actors), EER (gripper re-home), and Perturbation (the reset goal is sometimes a *different receptacle* instead of the table), each toggled independently.
+- **Modular Environment** — decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
+- **Efficient Rollouts** — multi-task execution with GPU-parallelized ManiSkill environments, memory-mapped replay buffers.
+- **Analysis-ready outputs** — per-segment CSVs recording both sides of every segment boundary (see [Training-time outputs](#training-time-outputs)).
+
+## Installation
+
+The following steps assume a Linux environment with NVIDIA GPUs and Conda installed.
+
+### 1. Get the repository
+
+Clone (or download) and move into the repository directory:
+
+```bash
+git clone <repo-url>
+cd <repo-directory>
+```
+
+### 2. Create the conda environment
+
+Pick one of four envs depending on which policies you need and which GPU class you have:
+
+2×2 matrix (LM stack × GPU class). Names are `cronos_<lm-stack>_<torch-channel>`:
+`tf447` = transformers 4.47 / peft 0.14 (serves both VLAs), `tf440` = transformers
+4.40.1 / peft 0.11.1 (OpenVLA only); `cu121` = Ampere/Ada/Hopper, `cu128` = Blackwell.
+
+| Env | `setup.sh` args | Stack | Policies | GPU class | OpenVLA-7B PPO peak | When to use |
+|---|---|---|---|---|---|---|
+| `cronos_tf447_cu121` | `setup.sh all` | `torch==2.5.1+cu121` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Ampere / Ada / Hopper (sm_80…sm_90) | ~55 GB | Hopper / A100 (both VLAs); Ada (SpatialVLA only — OpenVLA OOMs 48 GB) |
+| **`cronos_tf447_cu128`** | `setup.sh all blackwell` | `torch==2.7.0+cu128` + `transformers==4.47.0` + `peft==0.14.0` + `tokenizers==0.21.0` | OpenVLA **+** SpatialVLA | Blackwell (sm_75…sm_120) | ~55 GB | Blackwell (both VLAs; 96 GB has plenty of room) |
+| `cronos_tf440_cu121` | `setup.sh openvla_v01` | `torch==2.2.0+cu121` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Ampere / Ada / Hopper (sm_50…sm_90) | ~40 GB | OpenVLA-only on Ada (48 GB) — fits where V0.4 OOMs; **bit-exact** to V0.1 baseline runs |
+| `cronos_tf440_cu128` | `setup.sh openvla_v01 blackwell` | `torch==2.7.0+cu128` + `transformers==4.40.1` + `peft==0.11.1` + `tokenizers==0.19.1` | OpenVLA only | Blackwell (sm_75…sm_120) | ~45 GB | OpenVLA-only on Blackwell with V0.1 transformers ABI (not bit-exact to V0.1 cu121 — cu128 changes cuBLAS/attention kernels — but transformers/peft surface identical) |
+
+```bash
+# Pick the env that matches your GPU + policy needs, e.g.:
+conda create -n cronos_tf447_cu128 -y python=3.10        # Blackwell + both VLAs
+conda activate cronos_tf447_cu128
+
+# or one of:
+#   cronos_tf447_cu121 — both VLAs on Hopper/A100 (SpatialVLA-only on Ada)
+#   cronos_tf440_cu121 — OpenVLA-only, Ada-friendly, V0.1-bit-exact
+#   cronos_tf440_cu128 — OpenVLA-only on Blackwell, V0.1 transformers ABI
+```
+
+> Memory figures are approximate; re-measure with `tools/bench_rollout.py` on your
+> hardware. For bit-exact comparisons, run every arm of an ablation in the same env.
+
+### 3. Run the setup script
+
+```bash
+cd CRONOS
+chmod +x *.sh
+
+# setup.sh [policy] [gpu]
+#   [policy]: openvla | spatialvla | all | openvla_v01    (default: all)
+#   [gpu]:    default | blackwell                          (default: default)
+
+# Four canonical invocations (one per 2x2 env above):
+./setup.sh all                       # → cronos_tf447_cu121 (cu121, Ada/Hopper, both VLAs)
+./setup.sh all blackwell             # → cronos_tf447_cu128 (cu128, Blackwell, both VLAs)
+./setup.sh openvla_v01               # → cronos_tf440_cu121 (cu121, Ada/Hopper, OpenVLA, V0.1-bit-exact)
+./setup.sh openvla_v01 blackwell     # → cronos_tf440_cu128 (cu128, Blackwell, OpenVLA)
+
+# Subset modes (dual-VLA stack with only one VLA pillar installed):
+./setup.sh openvla                   # dual-VLA, OpenVLA pillar only (skips SpatialVLA)
+./setup.sh spatialvla blackwell      # dual-VLA, SpatialVLA pillar only, Blackwell
+```
+
+`setup.sh` installs CRONOS plus its sibling pillars (`SimplerEnv`, `ManiSkill`, `openvla`, `SpatialVLA`), which must already be present in the same parent directory as `CRONOS/`. The script `cd`s to its own directory before each editable install, so the resolved paths are unambiguous regardless of the caller's `cwd`. A post-install Python sanity check verifies `torch.cuda`, `tensorflow_datasets`, `OpenVLAPolicy.act_token_len`, and (when present) `SpatialVLAPolicy`.
+
+**Hotfix** for the `runtime_version` ImportError (protobuf 4.x vs 5.x mismatch on `import tensorflow_datasets`):
+```bash
+pip install "tensorflow-metadata<1.21" "protobuf>=3.20,<5"
+```
+(setup.sh pins these permanently so this won't recur on fresh envs.)
+
+### 4. (Optional) Ubuntu 22.04 prerequisite
+
+If the Vulkan driver is missing on Ubuntu 22.04 (SAPIEN will warn about a missing ICD file at startup), install:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libglvnd-dev
+```
+
+### 5. (Optional) Blackwell GPU support
+
+Blackwell cards (RTX PRO 6000, RTX 5090, B200) ship `sm_120` SASS, which only `+cu128` torch wheels include. Pass `blackwell` as `setup.sh`'s 2nd arg to install the Blackwell-compatible variant of either LM stack:
+
+```bash
+./setup.sh all blackwell             # cronos_tf447_cu128 — both VLAs
+./setup.sh openvla_v01 blackwell     # cronos_tf440_cu128 — OpenVLA-only, V0.1 transformers ABI
+```
+
+### 6. (Optional) Lightweight OpenVLA-only env for Ada-class GPUs
+
+For 48 GB Ada-class GPUs (L40S, RTX 6000 Ada, A6000), where the dual-VLA stack's
+OpenVLA-7B PPO does not fit. OpenVLA only — `--policy spatialvla` is unavailable.
+
+```bash
+conda create -n cronos_tf440_cu121 -y python=3.10
+conda activate cronos_tf440_cu121
+cd CRONOS
+./setup.sh openvla_v01
+```
+
+### 7. Checkpoint portability across envs
+
+Checkpoints trained in a `tf447` env load in a `tf440` env and vice versa (handled
+by `SimplerEnv/simpler_env/policies/peft_compat.py`). Audit a checkpoint tree before a long eval, without loading a model:
+
+```bash
+python tools/check_ckpt_compat.py /path/to/runs                 # default target: tf440, the strict reader
+python tools/check_ckpt_compat.py /path/to/runs --target tf447
+python tools/check_ckpt_compat.py /path/to/runs --verbose       # one line per checkpoint
+```
+
+It exits non-zero if any checkpoint cannot be loaded by the target stack, so it
+also works as a preflight step in a shell script.
+
+## Quick Start
+
+### Training
+```bash
+# 9 positional args
+bash scripts/train.sh <mode> [seed] [cuda] [reset] [config] [vla] [eer] [algo] [perturb]
+#                      │      │      │      │       │        │     │     │      └─ off (default) | recep | mixed
+#                      │      │      │      │       │        │     │     └─ ppo (default) | grpo | grpo-scene | grpo-task
+#                      │      │      │      │       │        │     └─ on (default) | off — End-Effector Reset
+#                      │      │      │      │       │        └─ openvla (default) | spatialvla
+#                      │      │      │      │       └─ YAML config path (default: configs/one_group_seq_random_2x2.yaml)
+#                      │      │      │      └─ normal | LSR | HSR | HSR+LSR | noep | noep+LSR (default: normal)
+#                      │      │      └─ GPU id (default: 3)
+#                      │      └─ seed (default: 0)
+#                      └─ horizon tag: t80a..t2560c (4 horizons T80/T320/T1280/T2560 × 3 chained runs a/b/c = 12 modes)
+```
+
+Output directory: defaults to `./$RUN_TAG`, created before launch and passed as an
+**absolute** `--wandb-dir`. Override with `RUN_OUT_DIR=/data/runs/my-run`. The run
+fails at startup if wandb would write anywhere else.
+
+Examples:
+```bash
+# OpenVLA, T320 segment 'a', seed 0, GPU 3, normal reset
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2
+
+# SpatialVLA, T1280 segment 'b', seed 1, GPU 2, non-episodic (HSR + reset_mode=none)
+bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla
+
+# Same plus a learned reset policy — the mode `noep` should be compared against
+bash scripts/train.sh t1280b 1 2 noep+LSR four_group_sequential_2x2 spatialvla
+
+# Same, but with the end effector never repositioned between segments
+bash scripts/train.sh t1280b 1 2 noep four_group_sequential_2x2 spatialvla off
+
+# GRPO instead of PPO — AutoRL-compatible grouping (one group per segment)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo
+
+# GRPO grouped per scene (segment × YAML group — same objects/receptacles/background)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-scene
+
+# GRPO grouped per task (segment × fan-out sub-block — narrowest, most apples-to-apples)
+bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
+
+# Perturbation: the LSR reset goal is sometimes "put X on the OTHER receptacle"
+# instead of always "put X on table" — widens the forward policy's start states.
+# Needs a mode with LSR; plain `noep` has no reset segment to perturb.
+bash scripts/train.sh t320a 0 3 noep+LSR four_group_sequential_2x2 openvla on ppo mixed
+
+# Perturbation composes with GRPO (orthogonal dimensions)
+bash scripts/train.sh t320a 0 3 noep+LSR four_group_sequential_2x2 openvla on grpo-task recep
+
+# Any GRPO mode with the std term overridden (tagged, so it lands in its own dir)
+GRPO_STD_SCOPE=none bash scripts/train.sh t320a 0 3 normal four_group_sequential_2x2 openvla on grpo-task
+```
+
+`RUN_TAG` carries the VLA tag (`CRONOS-openvla-<config>-<horizon>-<reset>-seed<N>`), so OpenVLA and SpatialVLA runs land in separate output dirs.
+
+**Random streams.** Scenes and the task schedule are drawn independently, and
+neither depends on the policy's sampling on the GPU:
+
+| What | Drawn from |
+|---|---|
+| Object / receptacle layout at each episode reset | CPU stream keyed by `(seed, episode)` |
+| HSR respawn poses | CPU stream keyed by `(seed, episode, segment)` |
+| Layouts of training-time eval | CPU stream keyed by `(seed, eval point, domain, eval episode)`; the eval point is the number of training episodes completed (0 for `--eval-at-start`) |
+| Task order (`pure_random`, `sequence_random`) | a dedicated generator seeded by `seed`, saved in each checkpoint's `scheduler_state.json` |
+
+So two runs with the same seed see the same scenes whatever the policy does, and
+a resumed run continues exactly where it stopped. `LEGACY_RNG=1 bash scripts/train.sh …`
+(`--legacy-rng`) restores the older behaviour, in which layouts came from the GPU
+generator shared with action sampling — use it only to reproduce a run made before
+V0.99; it adds `-legacyRNG` to `RUN_TAG`.
+
+**Reset-mode legend:**
+
+| mode | CLI flags added | `RUN_TAG` | Meaning |
+|---|---|---|---|
+| `normal` | (nothing) | `normal` | hard `env.reset()` every episode |
+| `LSR` | `--enable-backward --backward-interval 1` | `LSR` | learn the backward policy (put X back) alternating with forward task switches |
+| `HSR` | `--reset-unsuitable` | `HSR` | respawn fallen / out-of-workspace actors at every task boundary |
+| `HSR+LSR` | HSR + LSR | `HSRLSR` | soft respawn + backward learning. `LSR+HSR` is still accepted as input |
+| `noep` | HSR + `--reset-mode none` | `HSRnoep` | non-episodic continuity (no inter-episode hard reset). **No LSR** |
+| `noep+LSR` | HSR + LSR + `--reset-mode none` | `HSRLSRnoep` | non-episodic continuity *with* a learned reset policy |
+
+`noep` means "HSR but no episodic reset" and does **not** include LSR — that is
+`noep+LSR`. The `HSR+LSR` / `noep` / `noep+LSR` triple is what separates "does
+removing the episodic reset hurt" from "does learning a reset policy pay for it".
+
+> ⚠️ Bare `noep` has no mechanism that returns a *successfully placed* object to
+> its initial state: HSR respawns only what its detector flags as fallen or out
+> of bounds, and there is no `env.reset()`. Start states therefore drift toward
+> already-satisfied tasks, which inflates both reward and rollout success rate.
+> `main.py` warns at startup. To check a run, compare the start-of-segment object
+> positions (`segment_pose.csv`, `phase=start`) with the spawn positions.
+
+**Perturbation** — the 9th positional arg, orthogonal to the reset modes but requiring one that includes LSR (`LSR`, `HSR+LSR`, `noep+LSR`):
+
+| perturb | CLI flags added | LSR reset goal |
+|---|---|---|
+| `off` (default) | (nothing) | always `put X on table` |
+| `recep` | `--backward-goal recep` | always another receptacle, chosen != the forward task's |
+| `mixed` | `--backward-goal mixed --backward-recep-prob P` | per-env draw between the two; `P` via `PERTURB_RECEP_PROB` |
+
+Both goals reuse existing `put <obj> on <recep>` tasks — no new task string or reward
+term. `off` is numerically identical to not having the option.
+
+**EER (End-Effector Reset)** — the 7th positional arg, orthogonal to every reset mode above:
+
+| eer | CLI flag added | Meaning |
+|---|---|---|
+| `on` (default) | (nothing — `--reset-robot` is already the `main.py` default) | gripper returns to its initial pose at every segment boundary, in every reset mode |
+| `off` | `--no-reset-robot` | fully continuous arm — nothing repositions the end effector between segments |
+
+`eer=off` appends `-noEER` to `RUN_TAG` so it lands in its own output directory;
+`eer=on` adds no flag and no tag.
+
+Key training flags:
+| Flag | Default | Description |
+|---|---|---|
+| `--config-path` | required | YAML experiment config |
+| `--policy` | `openvla` | `openvla` or `spatialvla` |
+| `--alg-name` | `ppo` | `ppo` (actor-critic + GAE) or `grpo` (critic-free) |
+| `--grpo-group-scope` | `batch` | GRPO only. What counts as one group: all three are per-segment. `batch` (whole segment — the statistic AutoRL uses, bit-identical) \| `scene` (segment × YAML group) \| `task` (segment × fan-out sub-block). Sizes for `four_group_sequential_2x2`: 64 / 16 / 4 |
+| `--grpo-std-scope` | `group` | GRPO only. Divide group-centred rewards by `group` / `global` std, or `none`. |
+| `--alg-grpo-fix` | on | GRPO only. Compute reward statistics from non-zero rewards only (AutoRL's `alg_grpo_fix`) |
+| `--wandb-dir` | `""` | Run output root. Created and validated before `wandb.init`; a run that cannot land here fails instead of silently going to `$TMPDIR` |
+| `--num-envs` | 64 | Total parallel environments |
+| `--segment-len` | 80 | Steps per segment (AutoRL: 80) |
+| `--ppo-update-len` | 160 | Steps between PPO updates (`train.sh` passes 80 for the T80 modes) |
+| `--eval-interval` | 4 | Eval every N episodes |
+| `--num-eval-episode` | 4 | Episodes per eval round |
+| `--eval-at-start` | false | Run eval before first training episode |
+| `--enable-backward` / `--backward-interval N` | off | LSR — backward policy alternating with forward at step interval N |
+| `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
+| `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
+| `--unsuitable-detector` | `low_z` | `low_z` (`z < 0.7`) is the only registered CLI value; the xyz-AABB detector is selected by a YAML `unsuitable_detector:` block (`name: workspace_aabb`), which overrides this flag |
+| `--reset-mode` | `per_episode` | `per_episode` \| `none` (non-episodic) |
+| `--reset-robot` / `--no-reset-robot` | on | EER — return the gripper to its initial pose at every segment boundary |
+| `--backward-goal` | `table` | LSR reset goal (perturbation). `table` = "put X on table" (unchanged) \| `recep` = another receptacle, != the forward task's \| `mixed` = per-env draw. Requires `--enable-backward` |
+| `--backward-recep-prob` | 0.5 | `mixed` only: P(receptacle variant) per env per reset segment |
+| `--segment-pose-phase` | `both` | `start` (state each segment begins from, after that boundary's resets) \| `end` (steady state the policy produced, before them) \| `both` |
+| `--legacy-rng` | off | Draw scenes and task order from the global generators, as before V0.99 (see *Random streams*) |
+| `--record-segment-pose` | **on** | Dump every object/receptacle slot + gripper pose (position + quaternion) at both sides of every segment boundary (`--segment-pose-phase start|end|both`) to `glob/segment_pose.csv`; disable with `--no-record-segment-pose` |
+
+### Training-time outputs
+
+Written to the run's `glob/` on every run.
+
+| File | Contents |
+|---|---|
+| `rollout_success.csv` | one row per (episode, segment, env): `success` / grasp at segment end, `reward_sum`, `return_discounted`, `return_gae`, `value_mean`, `advantage_mean`, plus a `direction` column marking forward vs backward segments |
+| `segment_pose.csv` | one row per (episode, segment, phase, env, actor) with full `pq`; on by default, `--no-record-segment-pose` disables |
+| `eval_success.csv` | aggregate per (eval point, group, task) |
+
+`rollout_success.csv` uses the **same** `success` definition as eval — the value
+at the segment's final step — so rollout and eval curves are directly
+comparable; they differ only in when they are sampled. Under a mode with LSR
+(`LSR`, `HSR+LSR`, `noep+LSR`), filter `direction == 'forward'` before
+aggregating: `backward` (to-table) segments score 0 by construction, and
+`backward_recep` (perturbation) segments score a *different* task, since the
+env's success predicate follows the current goal. Modes without LSR — including bare `noep` —
+log every row as `forward`, so the filter is a harmless no-op there.
+
+### Evaluation (standalone)
+
+`eval_only.py` (and `main.py --eval-single / --eval-sequential`, which share its
+loop in `evaluation/`) evaluates a checkpoint on **every scene** (YAML group) of
+the checkpoint's **training config file** — found from the checkpoint (the
+`experiment_config.yaml` snapshot training writes next to it, else the
+`config_path` in its `run_config`). A config passed explicitly must define the same
+scenes as training, or eval stops before loading the model
+(`--allow-config-mismatch` to override on purpose).
+
+**Rounds.** A round is one reset followed by every task of the scene without
+resets (AutoRL `render_seq`). Each scene's envs are split into 4 order blocks, as
+fan-out training splits them, and each block runs its own order. With 4 tasks
+there are 6 cycles × 4 rotations = 24 orderings, so a **pose set is 6 rounds**:
+
+| round | kind | blocks run |
+|---|---|---|
+| 0, 6, 12, … | training | ABCD BCDA CDAB DABC — exactly the training rotations |
+| 1–5, 7–11, … | random | the 4 rotations of one untrained cycle (same cycle order in every pose set) |
+
+Round numbers are global and the **only selector** (`rounds`). Everything about a
+round — orders, start poses, action-sampling seed — is a function of its number
+and the seed, so any subset reproduces those rounds of a full run.
+
+**Start poses.** Every round, order and scene of a pose set starts from the same
+poses (one per block slot, 4 with 16-env scenes); round 6 starts pose set 1 with
+new poses. `pose_sets: K` gives K × 24 orderings on 4K start layouts.
+
+**Resume / shards.** After a crash, rerun the same command with
+`--eval-resume <glob>`: finished rounds are skipped, a half-finished round is
+rerun. Rounds can also be split across GPUs (`--eval-rounds 0-2` / `3-5`) and merged
+with `tools/rebuild_eval_outputs.py --out <dir> <glob_a> <glob_b>`.
+`eval_success.csv` is written only when the eval is complete *and* covers every
+round of every pose set (a shard gets none until merged); `eval_status.json`
+always says what is done and missing.
+
+**Settings** live in the `eval:` block of the training config (training ignores
+it); CLI flags override it:
+
+```yaml
+eval:
+  mode: sequential                 # sequential | single (one task slot per round, blocks run A/B/C/D)
+  pose_sets: 1                     # sets of start poses; 6 rounds each (4 tasks)
+  rounds: all                      # all | 3 | 3-5 | 3- | 0,6-11
+  sequence_seed: -1                # cycle order; -1 = --seed
+  layout_seed: -1                  # start poses; -1 = --seed
+  policy_seed: -1                  # per-round action-sampling reseed; -1 = --seed
+  layout_slots: -1                 # start poses per block; -1 = one per env of the block, 1 = one pose
+  scene_schedule: parallel         # parallel: all scenes in one batch | serial: one scene x all envs
+  domains: [in_domain, out_of_domain]
+  record_video: true
+  video_envs_per_block: 1          # first K envs of each block; -1 = all
+  record_pose: true                # eval_segment_pose.csv (training segment_pose.csv columns)
+  pose_phase: both
+```
+
+**Wrapper script** (recommended — sets the right env vars):
+```bash
+# Args: <checkpoint_dir> [config|-] [cuda] [num_eval_episode] [extra eval_only.py flags...]
+# config empty or "-" = the checkpoint's training config
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0 4 --eval-rounds 0-5 --eval-domains in_domain
+bash scripts/eval.sh /path/to/glob/episode_0128 - 0 4 --eval-resume /path/to/eval/wandb/offline-run-…/glob
+```
+
+`--num-envs` is **not** needed — it is the sum of per-group `num_envs`, and eval
+refuses a batch that does not match it (no padding envs).
+
+**OpenVLA and SpatialVLA** use the same command. `policy`, `vla_path`,
+`vla_unnorm_key`, `vla_temperature_eval` and `vla_lora_rank` come from the
+checkpoint's training `run_config` (then the config YAML, then defaults matching
+`train.sh` — SpatialVLA: `bridge_orig/1.0.0`, greedy decoding). Pass
+`--policy spatialvla` etc. after the 4th argument only to override, e.g. for a
+checkpoint without a run_config. The resolved values and their sources are printed
+at startup and stored in `eval_plan.json`.
+
+**Coverage** (`four_group_sequential_2x2`, one pose set, per domain, per scene):
+training round 64 trials (16 per task), random rounds 320 trials (80 per task),
+4 start poses; 245,760 env-steps for all scenes and both domains. `serial` gives
+4× trials and 16 poses at 4× the steps. Printed before rollout, checked after.
+
+**Outputs** (under a fresh `wandb/offline-run-<timestamp>-<id>/glob/`):
+
+| File | Contents |
+|---|---|
+| `eval_plan.json` | resolved settings and their sources, fingerprint, config provenance, every round's orders per block, units, RNG keys and ids, planned coverage, resume history |
+| `eval_status.json` | complete?, done / partial / missing units |
+| `eval_per_trial.csv` | source: one row per (domain, round, task slot, env) — `success`, `success_chained`, grasp, `seq_kind`, `group`, `order`, `pose_set` |
+| `eval_layouts.csv` | source: per reset and env, layout slot, stream key, id, applied pose/quat/overlay ids |
+| `eval_segment_pose.csv` | source: poses at every task start/end, training `segment_pose.csv` columns + eval keys |
+| `eval_sequence_summary.csv` / `eval_coverage.csv` / `eval_report.txt` | derived, rebuilt whole; always split by `seq_kind` |
+| `eval_success.csv` | derived, `eval_kind` = `in_domain_training`, `in_domain_random`, …; **complete evals only** |
+| `eval_videos/<domain>/<seq_kind>/round<N>/task<M>/…` | videos |
+| `experiment_config.yaml`, `run_config.json` | config and args used |
+
+Eval flags (the bracketed name is the `eval:` key):
+| Flag | Default | Description |
+|---|---|---|
+| `--vla-load-path` | required | Checkpoint dir (`episode_XXXX/`) |
+| `--config-path` | checkpoint's training config | must define the same scenes as training |
+| `--allow-config-mismatch` | false | evaluate on a config whose scenes differ from training |
+| `--eval-resume` | — | glob dir of an interrupted eval |
+| `--eval-mode` [mode] | `sequential` | `sequential` or `single` |
+| `--eval-pose-sets` [pose_sets] | 1 | sets of start poses |
+| `--eval-rounds` [rounds] | `all` | global round selection |
+| `--eval-sequence-seed` / `--eval-layout-seed` / `--eval-policy-seed` | -1 | streams; -1 = `--seed` |
+| `--eval-layout-slots` [layout_slots] | -1 | start poses per block |
+| `--eval-scene-schedule` [scene_schedule] | `parallel` | `parallel` or `serial` |
+| `--eval-domains` [domains] | `in_domain,out_of_domain` | comma-separated; `--no-eval-ood` = `in_domain` |
+| `--record-video` / `--video-envs-per-block` | true / -1 | videos, first K envs of each block |
+| `--record-eval-pose` / `--eval-pose-phase` | true / `both` | pose CSV |
+| `--segment-len` | 80 | Steps per task rollout |
+| `--policy` / `--vla-path` / `--vla-unnorm-key` / `--vla-temperature-eval` / `--vla-lora-rank` | from the checkpoint | override the training policy settings |
+| `--action-chunk` | 1 | SpatialVLA open-loop chunk length |
+
+**Note:** the per-env rotation eval lives only inside `train()` for training-time
+eval. Use `--eval-at-start` for rotation eval of a checkpoint loaded by `main.py`.
+
+### Monitoring a run
+
+`main.py` refreshes a live dashboard in the run's `glob/` after every eval point
+(`tools/plot_run_trends.py`; failures are non-fatal). It can also be run by hand.
+Offline plotting and statistics tools (cross-run aggregation, per-segment curves,
+position distributions, sequence-eval bars, McNemar tests) are not part of this
+release.
+
+#### Per-run live dashboard — `tools/plot_run_trends.py`
+
+Refreshes a 4-panel `trends.png` directly inside a running training run's `glob/` dir. Pulls per-episode aggregates (`approx_kl`, `clip_fraction`, `explained_var`) from wandb cloud history and per-eval-point success/grasp from the local `eval_success.csv`. Read-only on the training process; safe to call mid-run between eval points.
+
+```bash
+# Render trends.png for one in-progress run; also drops a copy at <run-dir>/trends.png
+python tools/plot_run_trends.py \
+  --run-dir wandb/run-20260618_103000-abcd1234/glob \
+  --max-episodes 32 \
+  --out reports/figures/2026-06-18_t320a-trends.png
+```
+
+Layout (each panel is one PPO health signal):
+
+| Panel | Metric | What to watch |
+|---|---|---|
+| (0,0) Task performance | rollout success/grasp (5-ep MA) + eval ID/OOD per eval point | task-side learning curve |
+| (0,1) Policy drift | per-ep mean(`approx_kl`) | should stay ≈ const; spikes ⇒ unstable ratio |
+| (1,0) LoRA trust region | per-ep mean(`clip_fraction`) | "trust region pulse" — fraction of minibatches outside the PPO clip band |
+| (1,1) Value head | per-ep mean(`explained_var`) | critic quality; flat 0 ⇒ value head not learning |
+
+For **resumed** runs (`--resume-from`), pass each prior wandb run id and prior `eval_success.csv` path so the dashboard covers ep 1…ep<max> in one image:
+
+```bash
+python tools/plot_run_trends.py \
+  --run-dir wandb/run-<current>/glob \
+  --max-episodes 32 --out reports/figures/<date>_trends.png \
+  --prior-run-id <parent_run_id> --prior-eval-csv /path/to/parent/glob/eval_success.csv \
+  --prior-run-id <grandparent_run_id> --prior-eval-csv /path/to/grandparent/glob/eval_success.csv
+```
+
+(Auto-renders a sibling `<stem>-per_task.png` per-task breakdown next to `--out`.)
+
+### Training config → eval config mapping
+
+Standalone eval now uses the **training config itself** (see [Evaluation (standalone)](#evaluation-standalone)).
+The configs under `configs/eval/` are legacy reduced-env copies: they differ from
+training in `num_envs`, so they only run with `--allow-config-mismatch`.
+
+| Training config | Eval config | Notes |
+|---|---|---|
+| `one_group_half_train_2x2.yaml` | `eval/one_group_half_train_2x2.yaml` | Generalization: trained on 2 of 4 tasks, eval on all 4 |
+| `one_group_pure_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Default 2x2 single-group eval |
+| `one_group_seq_random_2x2.yaml` | `eval/one_group_2x2.yaml` | Same eval as pure_random — neither has a canonical training order |
+| `one_group_sequential_3x3.yaml` | `eval/one_group_3x3.yaml` | 9 tasks; sequence 0 = auto-generated NxM order from training config |
+| `two_group_sequential_2x2.yaml` | `eval/two_group_2x2.yaml` | legacy; the training config itself now carries an `eval:` block |
+| `four_group_sequential_2x2.yaml` | — | use the training config; every `eval:` key spelled out |
+
+### Out-of-memory errors
+
+If training or eval runs out of GPU memory, the process still exits with the
+error, and first prints a summary and writes `glob/oom_report.txt` (or
+`oom_report.txt` directly under `--wandb-dir` when the run directory does not
+exist yet, e.g. an OOM while loading the policy): the phase
+(`init`, `rollout`, `ppo_update` / `grpo_update`, `train_eval`,
+`standalone_eval`), episode and segment (or eval domain and round), the settings
+that decide peak memory, per-GPU allocated / reserved / free memory, an
+abbreviated `torch.cuda.memory_summary()` and hints (lower `--buffer-inferbatch` for rollout,
+`--buffer-minibatch` for the update; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+when reserved memory far exceeds allocated).
+
+## YAML Config Format
+
+Configs live in `configs/`. A single YAML file fully describes an experiment.
+
+### Top-level fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `cronos_version` | string | — | Human annotation only. The loader accepts the key but never reads or validates it, so it is not a compatibility gate. The *code* version is stamped into each run's `run_config.json` from [`version.py`](CRONOS/version.py). |
+| `task_order` | string | `sequential` | `sequential`, `pure_random`, or `sequence_random` |
+| `fan_out` | bool | `true` | All tasks run simultaneously within each group (AutoRL default) |
+
+### Per-group fields
+
+Each entry in the `groups:` list defines one group:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Group identifier (used in logs and CSV) |
+| `num_envs` | int | yes | Number of parallel envs for this group |
+| `obj` | list[int] | yes | 1-based object indices |
+| `recep` | list[int] | yes | 1-based receptacle indices |
+| `table` | string | no | Stage mesh (default: `flat_table`) |
+| `background` | int/string | no | Overlay index (int) or `"default"` (episode-based) |
+| `task_sequence` | list[str] | no | Training task list using symbolic refs (`obj1`, `recep2`). Auto-generated if omitted. |
+| `eval_tasks` | list[str] | no | Eval task list. Defaults to unique tasks from `task_sequence`. |
+
+### Object index reference (1-based)
+
+| Index | Name | Index | Name | Index | Name |
+|---|---|---|---|---|---|
+| 1 | carrot | 10 | toy bear | 19 | nonstop can |
+| 2 | kitchen shovel | 11 | fast food cup | 20 | potato |
+| 3 | bread | 12 | plant | 21 | baguette |
+| 4 | plastic bottle | 13 | banana | 22 | champagne glass |
+| 5 | 7up can | 14 | hamburger | 23 | kitchen spoon |
+| 6 | zuchinni | 15 | golf ball | 24 | onion |
+| 7 | ketchup bottle | 16 | BBQ sauce | 25 | cup |
+| 8 | watering can | 17 | travel cup | | |
+| 9 | pipe | 18 | pepper | | |
+
+### Receptacle index reference (1-based)
+
+| Index | Name | Index | Name | Index | Name |
+|---|---|---|---|---|---|
+| 1 | yellow plate | 7 | tomato slice | 13 | cutting board |
+| 2 | cloth | 8 | pizza | 14 | chess board |
+| 3 | carpet | 9 | flat bowl | 15 | manhole cover |
+| 4 | newspaper | 10 | gramophone disk | 16 | envelope |
+| 5 | sheet metal | 11 | frying pan | 17 | notepad |
+| 6 | drawing tablet | 12 | mouse pad | | |
+
+### Symbolic task format
+
+Tasks use `put obj{N} on recep{M}` where N/M are 1-based indices into the group's `obj`/`recep` lists. Resolved at load time to real names (e.g. `put ketchup bottle on yellow_plate`).
+
+### Divisibility constraints
+
+The config loader validates:
+
+| Rule | Constraint | Purpose |
+|---|---|---|
+| V22 | `group_envs >= n_unique_train_tasks` | Enough envs for fan-out |
+| V23 | `group_envs % n_unique_train_tasks == 0` | Even split for training |
+| V24 | `group_envs % n_eval_tasks == 0` | Even split for eval rotation |
+| V25 | `n_eval_tasks % n_unique_train_tasks == 0` | Eval aligns with train sub-groups |
+
+### Example configs
+
+| Config | Description |
+|---|---|
+| `two_group_sequential_2x2.yaml` | 2 groups, different obj/recep/background, sequential |
+| `one_group_sequential_3x3.yaml` | 1 group, 3x3 (9 tasks), sequential |
+| `one_group_half_train_2x2.yaml` | 1 group, 2 train tasks, 4 eval tasks (generalization test) |
+| `one_group_seq_random_2x2.yaml` | 1 group, sequence_random order |
+| `one_group_pure_random_2x2.yaml` | 1 group, pure_random order |
+
+### Minimal single-group config
+
+```yaml
+cronos_version: V0.99
+task_order: sequential
+
+groups:
+  - name: "default"
+    num_envs: 64
+    obj: [7, 2]
+    recep: [1, 2]
+    # task_sequence and eval_tasks auto-generated: all 4 NxM combinations
+```
+
+### Two-group config with different objects and receptacles
+
+```yaml
+cronos_version: V0.99
+task_order: sequential
+
+groups:
+  - name: "group_A"
+    num_envs: 32
+    obj: [7, 2]              # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]            # yellow_plate, cloth
+    background: 0
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  - name: "group_B"
+    num_envs: 32
+    obj: [3, 5]              # bread, 7up_can
+    recep: [4, 3]            # newspaper, carpet
+    background: 1
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+```
+
+## Eval Design
+
+CRONOS has two distinct eval semantics for two different use-cases.
+
+### Training-time eval — per-env rotation
+
+Used inside `main.py train()` (eval-at-start + periodic mid-training eval). Fan-out across envs: each env independently rotates through the eval tasks so all eval tasks are scored every eval round without idle envs.
+
+Per-env rotation formula:
+```
+task_for_env_i_at_episode_e = eval_tasks[(i % n_eval_tasks + e) % n_eval_tasks]
+```
+
+Samples per task = `num_eval_episode * group_envs / n_eval_tasks`.
+
+Divisibility constraints (validated at config load):
+- `group_envs % n_eval_tasks == 0`
+- `n_eval_tasks % n_train_tasks == 0`
+
+In non-episodic mode (`reset_mode=none`), the training scene state is snapshotted before each mid-training eval and restored after, so eval's `env.reset` calls don't break the live simulation continuity that non-episodic training relies on.
+
+### Standalone eval — per-scene rounds
+
+Used by `eval_only.py` and `main.py --eval-single` / `--eval-sequential`. Each
+scene runs on its own env range (`scene_schedule: parallel`) or on all envs one
+scene at a time (`serial`), split into 4 order blocks; each block runs its own
+order for `segment_len` steps per task.
+
+| Mode | Behavior | AutoRL analog |
+|---|---|---|
+| `sequential` (default) | rounds selected by number; each pose set = 6 rounds = all 24 orderings (round 6k training rotations, 6k+1..6k+5 the other cycles); every round of a pose set starts from the same poses; tasks within a round switch without env reset. Round N is reproducible per seed. | `render_seq(eval_training_seq=True)` |
+| `single` | One task slot per round from a fresh reset; the blocks run tasks A/B/C/D side by side. | `render` |
+
+
+#### Sequential scoring: independent vs chained
+
+A sequential eval emits **both** semantics per trial, so one run answers both
+questions and no re-run is needed to switch lens:
+
+| Column in `eval_per_trial.csv` | Semantics |
+|---|---|
+| `success` | **independent** — this task judged on its own, whatever happened earlier in the sequence. AutoRL's semantics. |
+| `success_chained` | **chained** — cumulative AND along `task_idx` within one `(obj_set, sequence, env)`. Once an env fails a task, every later task in that sequence scores 0 for it. |
+
+Independent measures single-task capability; chained measures how far into a
+sequence the policy survives, and is deliberately order-sensitive — the same
+task set under different permutations gives different chained values. They
+coincide at `task_idx == 0`.
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `tools/plot_run_trends.py` | Per-run live 4-panel dashboard, refreshed by `main.py` after each eval (see [Monitoring a run](#monitoring-a-run)) |
+| `tools/rebuild_eval_outputs.py` | Rebuild standalone-eval derived files from per-trial rows; merge round shards of one eval |
+| `tools/check_ckpt_compat.py` | Preflight: can a checkpoint tree be loaded by the target LM stack (`tf440` / `tf447`)? No GPU or model load needed |
+| `tools/bench_rollout.py` | Rollout throughput + GPU peak memory per package stack, with a phase breakdown (inference / env.step / buffer / PPO update) |
+
+`bench_rollout.py` exists to make the four-env split answerable rather than
+permanent: it attributes the OpenVLA memory regression (~40 GB → ~55 GB after the
+transformers/peft upgrade needed by SpatialVLA) to a phase and a package set. Run
+the identical command under each env and diff the JSONs — keep the seed, config
+and all length flags fixed, since throughput depends on `num_envs`,
+`segment_len` and `buffer_inferbatch`.
+
+```bash
+python tools/bench_rollout.py \
+    --config-path configs/one_group_seq_random_2x2.yaml \
+    --policy openvla --vla-path openvla/openvla-7b --vla-unnorm-key bridge_orig \
+    --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
+    --bench-episodes 2 --bench-warmup-episodes 1 \
+    --bench-out reports/bench/openvla_tf447_cu121.json
+```
+
+## Architecture
+- `envs/` — Environment wrapper, config loader, task scheduler, bridge_multi env
+- `training/` — PPO and GRPO algorithms, replay buffer, metrics/CSV recorders
+- `main.py` — Training entry point (train + eval)
+- `eval_only.py` — Standalone eval script (no training)
+- `evaluation/` — Standalone eval: plan (settings, scenes, rounds, coverage, fingerprint), records (CSV schemas, readers/writers), outputs (derived files, status, resume/merge), provenance (training config), sequential (rollout loop)
+- `tests/` — CPU-only tests for eval planning, RNG streams, records, the eval loop and peft checkpoint compatibility (`python -m pytest tests/ -q`)
+- `run_paths.py` — Run output directory resolution, shared by both entry points
+- `oom_report.py` — CUDA out-of-memory report (`glob/oom_report.txt`), written by both entry points
+- `version.py` — Single source for the version stamped into every `run_config.json`
+- `configs/` — Sample YAML training configs
+- `configs/eval/` — Legacy reduced-env eval configs (need `--allow-config-mismatch`)
+- `scripts/` — `train.sh`, `eval.sh`, and the plotting requirements `setup.sh` installs
+- `tools/` — Eval-shard merging, checkpoint compatibility, benchmarking, live dashboard
+- `plotting/` — Plotting and statistics tools; not included in V0.99 (planned for a later release)
+
+## Version
+
+This is **CRONOS V0.99**, an early release. The version is defined in
+[`CRONOS/version.py`](CRONOS/version.py) and stamped into every run's
+`run_config.json`; compare runs only within one version.
+
+Known issues:
+
+- **GRPO is experimental.** `--alg-name grpo` degrades the SFT policy instead of
+  improving it (the objective favours inaction). Use PPO, the default.
+- **Action sampling and the PPO minibatch shuffle still use the global
+  generators.** They no longer affect scenes or the task order, but two runs are
+  not bit-identical across GPUs or package stacks.

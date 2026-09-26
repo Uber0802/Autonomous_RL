@@ -1,0 +1,7 @@
+# Plotting dependencies, installed by setup.sh. Needed by the training-time
+# dashboard (tools/plot_run_trends.py, called from main.py after each eval).
+# Pinned to the versions it was verified with.
+
+pandas==2.3.3
+numpy==1.26.4
+matplotlib==3.10.8

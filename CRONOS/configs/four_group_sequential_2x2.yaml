@@ -1,0 +1,85 @@
+# Four-group config: distinct (obj, recep, background) per group.
+# Total: 4 groups × 16 envs = 64 envs, 4 unique tasks per group (2x2 fan_out → 4 envs per task).
+# Object pool: 8 distinct carrots across all groups.
+# Receptacle pool: 8 distinct plates across all groups.
+# Background pool: 4 distinct overlay+table-texture pairs (per-group `background: k`).
+#
+# Stage mesh is shared (`flat_table` default) — per-group stage geometry (sink vs flat_table)
+# requires multiple gym.make calls and is not supported yet.
+#
+# Groups A and B are bit-identical to two_group_sequential_2x2.yaml so any baseline trained
+# on that config remains comparable on its first 32 envs of this one.
+
+cronos_version: V0.99
+task_order: sequential
+fan_out: true
+
+# Standalone eval (eval_only.py / scripts/eval.sh) reads this same file; training
+# ignores this block. Keys: evaluation/plan.py::EVAL_SETTING_SPEC; README "Evaluation (standalone)".
+eval:
+  mode: sequential                 # sequential (AutoRL render_seq) | single (AutoRL render; blocks run tasks side by side)
+  pose_sets: 1                     # sets of start poses. One set = 6 rounds = all 24 orders (4 tasks);
+                                   #   round 6 is the training round of set 1, round 12 of set 2, ...
+  rounds: all                      # global round numbers: all | 3 | 3-5 | 3- | 0,6-11
+                                   #   round r: pose set r // 6; r % 6 == 0 training (ABCD BCDA CDAB DABC
+                                   #   on the 4 order blocks), otherwise the rotations of an untrained cycle
+  sequence_seed: -1                # cycle-order stream; -1 = --seed
+  layout_seed: -1                  # start-pose stream; -1 = --seed
+  policy_seed: -1                  # action sampling reseeded per (domain, round, pass); -1 = --seed
+  layout_slots: -1                 # start poses per order block, shared by every round/order/scene of a set;
+                                   #   -1 = one per env of the block (4 here), 1 = one pose for all envs
+  scene_schedule: parallel         # parallel: all scenes in one batch | serial: one scene x all envs
+  domains: [in_domain, out_of_domain]
+  record_video: true
+  video_envs_per_block: 1          # first env of each order block = one video per order per round; -1 = all
+  record_pose: true                # eval_segment_pose.csv (training segment_pose.csv columns)
+  pose_phase: both                 # start | end | both
+
+groups:
+  # Group A — bit-identical to two_group_sequential_2x2.yaml group A
+  - name: "group_A"
+    num_envs: 16
+    obj: [7, 2]              # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]            # yellow_plate, cloth
+    background: 0
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group B — bit-identical to two_group_sequential_2x2.yaml group B
+  - name: "group_B"
+    num_envs: 16
+    obj: [3, 5]              # bread, 7up_can
+    recep: [4, 3]            # newspaper, carpet
+    background: 1
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group C — produce + utensils on metallic / bowl surfaces
+  - name: "group_C"
+    num_envs: 16
+    obj: [1, 13]             # carrot, banana
+    recep: [5, 9]            # sheet_metal, flat_bowl
+    background: 2
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+
+  # Group D — packaged food + container on cooking-surface receptacles
+  - name: "group_D"
+    num_envs: 16
+    obj: [14, 4]             # hamburger, plastic_bottle
+    recep: [11, 13]          # frying_pan, cutting_board
+    background: 3
+    task_sequence:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
