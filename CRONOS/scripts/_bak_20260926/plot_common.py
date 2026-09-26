@@ -45,7 +45,6 @@ import pandas as pd
 _PLOT_PY_TOP_KEYS = {
     "smoothing_window", "n_interp_points", "end_steps", "end_resets",
     "figsize", "eval_kinds", "x_axes", "horizon_lines", "legend",
-    "axis", "sr_ylim", "aspect_ratio",
 }
 _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 
@@ -64,7 +63,6 @@ TOOL_OPTION_KEYS = {
     "final_eval_runs",
     # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
-    "rollout_style", "rollout_figsize", "rollout_ylim",
     # plot_sequence_eval.py
     "seq_kind",
 }
@@ -301,24 +299,12 @@ CURVE_BOX_ASPECT = 3 / 4
 FLAT_FIGSIZE = (12.0, 7.0)
 FLAT_BOX_ASPECT = 9 / 16
 
-# The one axis-label vocabulary every curve tool uses. Steps are shown in
-# millions (`steps_in_millions`) rather than with a "1e6" offset in the corner.
 X_LABEL = {
-    "total_steps": "environment steps (M)",
+    "total_steps": "environment steps",
     "total_resets": "number of resets",
     "segment": "segment index (80 steps each)",
     "episode": "episode",
 }
-
-
-STEPS_UNIT = 1e6
-
-
-def steps_in_millions(ax) -> None:
-    """Tick labels of a raw-step x axis in millions, to match X_LABEL."""
-    from matplotlib.ticker import FuncFormatter
-    ax.xaxis.set_major_formatter(
-        FuncFormatter(lambda v, _: f"{v / STEPS_UNIT:g}"))
 
 
 def new_curve_figure(figsize=None):
@@ -526,8 +512,7 @@ def curve_ylim(peak: float):
 def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
                      y_max=None, legend=True, box_aspect=None,
                      legend_outside=False, legend_kw=None,
-                     legend_reverse=False, label_pt=None, tick_pt=None,
-                     y_range=None):
+                     legend_reverse=False):
     """Shared axis dressing. Call it AFTER every curve is drawn: the y bound is
     fitted to what is on the axes.
 
@@ -539,33 +524,11 @@ def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
     box. `legend_kw` is passed to `ax.legend` on top of the fitted defaults
     (`loc`, `fontsize`, `framealpha`, ...) and `legend_reverse` flips the entry
     order, for a panel read bottom-up.
-
-    `label_pt` / `tick_pt` override `AXIS_LABEL_PT` / `TICK_LABEL_PT`.
-    `y_range` = `(lower, upper)` fixes the y bounds instead of fitting them;
-    either end may be None to keep the fitted value. The same 2% of the range is
-    padded onto both ends as the fitted bound gets, so a curve lying on the
-    bound is not half clipped.
     """
-    ax.set_xlabel(X_LABEL.get(x_axis, x_axis),
-                  fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
-    if x_axis == "total_steps":
-        steps_in_millions(ax)
-    ax.set_ylabel(y_label,
-                  fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
-    ax.tick_params(labelsize=TICK_LABEL_PT if tick_pt is None else tick_pt)
-    if tick_pt is not None:          # the "1e6" multiplier follows the ticks
-        ax.xaxis.get_offset_text().set_fontsize(tick_pt)
-        ax.yaxis.get_offset_text().set_fontsize(tick_pt)
-    lo, hi = curve_ylim(axes_peak(ax) if y_max is None else float(y_max))
-    lower, upper = y_range or (None, None)
-    if lower is not None or upper is not None:
-        lower = 0.0 if lower is None else float(lower)
-        upper = hi / 1.02 if upper is None else float(upper)   # fitted top
-        if upper <= lower:
-            raise ValueError(f"y range upper {upper} <= lower {lower}")
-        pad = 0.02 * (upper - lower)
-        lo, hi = lower - pad, upper + pad
-    ax.set_ylim(lo, hi)
+    ax.set_xlabel(X_LABEL.get(x_axis, x_axis), fontsize=AXIS_LABEL_PT)
+    ax.set_ylabel(y_label, fontsize=AXIS_LABEL_PT)
+    ax.tick_params(labelsize=TICK_LABEL_PT)
+    ax.set_ylim(*curve_ylim(axes_peak(ax) if y_max is None else float(y_max)))
     # Left edge pinned to 0 so the anchored origin is actually visible.
     ax.set_xlim(0.0, None if not x_max else float(x_max))
     ax.grid(alpha=CURVE_GRID_ALPHA)

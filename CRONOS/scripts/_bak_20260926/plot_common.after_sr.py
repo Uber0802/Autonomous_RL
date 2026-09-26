@@ -64,7 +64,6 @@ TOOL_OPTION_KEYS = {
     "final_eval_runs",
     # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
-    "rollout_style", "rollout_figsize", "rollout_ylim",
     # plot_sequence_eval.py
     "seq_kind",
 }
@@ -301,24 +300,12 @@ CURVE_BOX_ASPECT = 3 / 4
 FLAT_FIGSIZE = (12.0, 7.0)
 FLAT_BOX_ASPECT = 9 / 16
 
-# The one axis-label vocabulary every curve tool uses. Steps are shown in
-# millions (`steps_in_millions`) rather than with a "1e6" offset in the corner.
 X_LABEL = {
-    "total_steps": "environment steps (M)",
+    "total_steps": "environment steps",
     "total_resets": "number of resets",
     "segment": "segment index (80 steps each)",
     "episode": "episode",
 }
-
-
-STEPS_UNIT = 1e6
-
-
-def steps_in_millions(ax) -> None:
-    """Tick labels of a raw-step x axis in millions, to match X_LABEL."""
-    from matplotlib.ticker import FuncFormatter
-    ax.xaxis.set_major_formatter(
-        FuncFormatter(lambda v, _: f"{v / STEPS_UNIT:g}"))
 
 
 def new_curve_figure(figsize=None):
@@ -548,8 +535,6 @@ def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
     """
     ax.set_xlabel(X_LABEL.get(x_axis, x_axis),
                   fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
-    if x_axis == "total_steps":
-        steps_in_millions(ax)
     ax.set_ylabel(y_label,
                   fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
     ax.tick_params(labelsize=TICK_LABEL_PT if tick_pt is None else tick_pt)

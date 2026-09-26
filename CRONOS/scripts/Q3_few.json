@@ -1,0 +1,66 @@
+{
+  "out_dir": "/mnt/scratch/AutoRL_Dian/CRONOS/fig/Q3",
+  "name": "Q3f",
+  "smoothing_window": 5,
+  "actor_kind": "obj,recep",
+  "end_steps": 1310720,
+  "end_resets": 500,
+  "legend": {
+    "fontsize": 24
+  },
+  "axis": {
+    "label_fontsize": 24,
+    "tick_fontsize": 18
+  },
+  "aspect_ratio": "4:3",
+  "sr_ylim": {
+    "in_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.7
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.5
+      }
+    },
+    "out_of_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.7
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.4
+      }
+    }
+  },
+  "groups": [
+    {
+      "label": "PR",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s0__p0",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s0__p1"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s1__p0",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s1__p1"
+        ]
+      ]
+    },
+    {
+      "label": "HSR",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/HSR/wandb/run-20260826_111110-z7bp4a01/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/HSR/wandb/run-20260906_211312-te2l90g0/glob"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/HSR/wandb/run-20260826_111112-9od26c34/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/HSR/wandb/run-20260906_211317-r719de9f/glob"
+        ]
+      ]
+    }
+  ]
+}

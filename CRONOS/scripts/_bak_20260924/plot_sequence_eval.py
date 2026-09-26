@@ -91,9 +91,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import json
-import re
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -101,11 +98,11 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plot_common import (AXIS_LABEL_PT, CURVE_BOX_ASPECT,  # noqa: E402
-                         CURVE_DPI, CURVE_GRID_ALPHA, Group, NoData,
-                         PlotConfig, TICK_LABEL_PT, default_colors,
-                         load_plot_config, metric_axis_label, out_variant,
-                         read_table, unique_slugs, warn)
+from plot_common import (CURVE_BOX_ASPECT, CURVE_DPI,  # noqa: E402
+                         CURVE_GRID_ALPHA, Group, NoData,
+                         PlotConfig, default_colors, legend_pt,
+                         load_plot_config, out_variant, read_table,
+                         unique_slugs, warn)
 
 _METRICS = ("success", "success_chained", "grasp", "obj_grasped")
 _SEQ_KINDS = ("training", "random")
@@ -132,34 +129,12 @@ _ROUND_KEY = ["eval_kind", "pass_label", "seq_idx", "env_idx"]
 ALL_TASKS = "__all__"
 ALL_SCENES = "__all__"
 
-SEQ_LEGEND_PT = 15
 BAR_FIGSIZE = (6.4, 4.8)
 BAR_YLIM = (0.0, 1.02)
 BAR_EDGE_WIDTH = 1.8
 IN_DOMAIN_HATCH = "///"
 # Task names are whole phrases, so the per-task figures lean their tick labels.
-TASK_TICK_PT = TICK_LABEL_PT - 3   # 16 two-line task ticks on one axis
-# The task family is one figure: plain success, every round kind pooled.
-TASK_METRIC = "success"
-# A task axis carries 16 of those ticks, each two lines wide: the panel is
-# widened and flattened for them, where the position axis (4 ticks) is not.
-TASK_FIGSIZE = (13.0, 4.8)
-TASK_BOX_ASPECT = 0.30
 TASK_X_ROTATE = 20.0
-
-
-def task_tick_label(task: str) -> str:
-    """`put X on Y` -> "X\nY": the object over its receptacle.
-
-    Upright two-line ticks, not one leaning line — a slanted sentence is read
-    by turning the page, and the two halves are what actually differ between
-    the tasks. Anything that does not parse is left as it is.
-    """
-    t = str(task).strip()
-    if t.lower().startswith("put "):
-        t = t[4:]
-    obj, sep, recep = t.partition(" on ")
-    return f"{obj}\n{recep}" if sep else t
 
 
 def hatch_color(color, factor: float = 0.55):
@@ -397,9 +372,7 @@ def aggregate_group(label: str, series, metric: str, *, rates_fn, key):
 def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                 metric: str, x_col: str = "position",
                 x_label: str = "position in sequence", x_rotate: float = 0.0,
-                x_tick_fmt=str, x_tick_pt: float = TICK_LABEL_PT,
-                figsize=BAR_FIGSIZE, box_aspect: float = CURVE_BOX_ASPECT,
-                legend_outside: bool = False):
+                legend_title=None):
     """One bar chart: x = `x_col` (the position in the round, or the task), one
     bar per group at each of its values.
 
@@ -424,7 +397,7 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
     xvals = sorted(table[x_col].unique())
     n_bars = len(groups)
     width = 0.8 / max(1, n_bars)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=BAR_FIGSIZE)
     x0 = np.arange(len(xvals), dtype=float)
 
     for gi, (group, color) in enumerate(zip(groups, colors)):
@@ -458,22 +431,20 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                         markeredgewidth=2.4, zorder=5, clip_on=False,
                         color=hatch_color(color) if hatched else color)
 
-    ax.set_xticks(x0, [x_tick_fmt(v) for v in xvals])
+    ax.set_xticks(x0, [str(v) for v in xvals])
     if x_rotate:
         # Task names are sentences ("put carrot on plate"): upright they
         # overlap, so they lean and end under their own tick.
         plt.setp(ax.get_xticklabels(), rotation=x_rotate, ha="right",
                  rotation_mode="anchor")
-    ax.set_xlabel(x_label, fontsize=AXIS_LABEL_PT)
-    ax.set_ylabel(metric_axis_label(metric), fontsize=AXIS_LABEL_PT)
-    ax.tick_params(labelsize=TICK_LABEL_PT)
-    ax.tick_params(axis="x", labelsize=x_tick_pt)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(metric.replace("_", " "))
     ax.set_ylim(*BAR_YLIM)
     ax.grid(axis="y", alpha=CURVE_GRID_ALPHA, zorder=0)
     ax.set_axisbelow(True)
     # Same 4:3 box as the curve figures — `figsize` alone does not give one,
     # since the margins depend on how wide the tick labels come out.
-    ax.set_box_aspect(box_aspect)
+    ax.set_box_aspect(CURVE_BOX_ASPECT)
 
     # Two keys: colour = group (omitted for a single group, where it would label
     # the only hue), fill = domain (omitted on a one-domain figure, whose legend
@@ -488,20 +459,11 @@ def render_bars(table: pd.DataFrame, color_of: dict, out_path: Path, *,
                       for d in domains]
     handles = group_handles + (domain_handles
                                if len(domains) > 1 or not group_handles else [])
-    # Inside the axes, upper right: success falls with position, so the right
-    # of the panel is the empty corner. `legend_outside` moves it clear of the
-    # box instead, for a panel whose bars reach the top right (a scene's four
-    # tasks). No title — the figure is named by its filename and its caption.
-    # A notch under the shared `legend_pt`: the key sits inside the panel and
-    # carries up to four group labels plus the domain fills, so the full 15pt
-    # covered the bars it sits over — but 8pt was too small to read.
-    if legend_outside:
-        ax.legend(handles=handles, loc="upper left",
-                  bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0,
-                  fontsize=SEQ_LEGEND_PT, frameon=False)
-    else:
-        ax.legend(handles=handles, loc="upper right", fontsize=SEQ_LEGEND_PT,
-                  frameon=False)
+    # Outside the axes: bars reach 1.0, and no corner is reliably empty.
+    ax.legend(handles=handles, title=legend_title, loc="upper left",
+              bbox_to_anchor=(1.01, 1.0), fontsize=legend_pt(-1),
+              title_fontsize=legend_pt(-1),
+              frameon=False)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,7 +490,6 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
                per_task: bool) -> list:
     """Every figure. Per metric and round kind (`seq_kind`):
 
-        both domains in one bar, pooled     <name>_seq_position_<metric>_<kind>_both.png
         one per domain, pooled over tasks   <name>_seq_position_<metric>_<kind>_<domain>.png
         one per task, both domains in it    <name>_seq_position_<metric>_<kind>_per_task/...
 
@@ -551,19 +512,15 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
             tag = SEQ_LABEL.get(kind, kind)
             stem = f"{cfg.name}_seq_position_{metric}_{tag}"
             pooled = kt[kt["task"] == ALL_TASKS]
-            # Both domains in one bar: the in-domain / out-of-domain gap is
-            # read here, the per-domain panels below without the second set of
-            # bars halving the width.
-            written.append(render_bars(
-                pooled, color_of, cfg.out_dir / f"{stem}_both.png",
-                metric=metric))
             for domain in _DOMAINS:
                 dt = pooled[pooled["eval_kind"] == domain]
                 if dt.empty:
                     continue
                 written.append(render_bars(
                     dt, color_of, cfg.out_dir / f"{stem}_{domain}.png",
-                    metric=metric))
+                    metric=metric,
+                    legend_title=f"{_DOMAIN_LABEL[domain]}\n"
+                                 f"{SEQ_LEGEND.get(kind, kind)}"))
             if per_task:
                 task_dir = cfg.out_dir / f"{stem}_per_task" / f"{stem}.png"
                 for task in tasks:
@@ -573,147 +530,51 @@ def render_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
                     written.append(render_bars(
                         kt[kt["task"] == task], color_of,
                         out_variant(task_dir, slugs[task]),
-                        metric=metric))
+                        metric=metric,
+                        legend_title=f"{task}\n{SEQ_LEGEND.get(kind, kind)}"))
     return [w for w in written if w is not None]
 
 
-# ---------------------------------------------------------------------------
-# The checkpoint's own last training eval
-# ---------------------------------------------------------------------------
+def render_task_all(table: pd.DataFrame, cfg: PlotConfig, *, metrics,
+                    per_scene: bool) -> list:
+    """Every position-free figure. Per metric and round kind (`seq_kind`):
 
+        x = task, both domains in one bar   <name>_seq_task_<metric>_<kind>.png
+        the same, one scene each            <name>_seq_task_<metric>_<kind>_per_scene/...
 
-def final_eval_source(run_dir: Path, override=None):
-    """(training glob dir, episode) whose eval produced this checkpoint.
-
-    The standalone eval records which checkpoint it loaded; that checkpoint
-    sits inside the training run's `glob/`, next to the `eval_success.csv`
-    holding the rotation eval of every episode — including its own. A
-    checkpoint COPIED somewhere else (a `uber_CKPT` bundle) has no such
-    neighbour, which is what `final_eval_runs` in the config is for.
-    """
-    rc = Path(run_dir) / "run_config.json"
-    if not rc.exists():
-        return None, None
-    load = str(json.loads(rc.read_text()).get("vla_load_path") or "").rstrip("/")
-    m = re.search(r"episode_(\d+)$", load)
-    if not m:
-        return None, None
-    episode = int(m.group(1))
-    home = Path(override) if override else Path(load).parent
-    return (home if (home / "eval_success.csv").exists() else None), episode
-
-
-def final_eval_table(cfg: PlotConfig, *, required: bool) -> pd.DataFrame:
-    """Per (group, scene, task, domain): the rate the checkpoint's own last
-    training eval measured, averaged over the group's series.
-
-    One row per bar of the `_final_eval_task` figures. Empty when no series
-    could be resolved — the caller then writes no figure.
-    """
-    overrides = cfg.option("final_eval_runs", None, {}) or {}
-    rows = []
-    for group in cfg.groups:
-        over = overrides.get(group.label) or []
-        for i, chain in enumerate(group.chains):
-            run_dir = Path(chain[-1])
-            home, episode = final_eval_source(
-                run_dir, over[i] if i < len(over) else None)
-            if home is None:
-                warn(f"group '{group.label}': {run_dir} — no training "
-                     f"eval_success.csv for its checkpoint; set "
-                     f"`final_eval_runs` to point at one")
-                continue
-            df = read_table(home / "eval_success.csv", what="eval_success.csv",
-                            required_cols=("episode", "eval_kind", "group",
-                                           "task", "success"))
-            df = df[df["episode"].astype(int) == episode]
-            if df.empty:
-                warn(f"group '{group.label}': {home}/eval_success.csv has no "
-                     f"episode {episode}")
-                continue
-            rows.append(df.assign(series=i, label=group.label))
-    if not rows:
-        if required:
-            raise SystemExit("[seq] no series resolved a training eval")
-        return pd.DataFrame(columns=["group", "eval_kind", "scene", "task",
-                                     "mean", "std", "n_series"])
-    df = pd.concat(rows, ignore_index=True)
-    per_series = (df.groupby(["label", "eval_kind", "group", "task", "series"],
-                             as_index=False)["success"].mean())
-    agg = (per_series.groupby(["label", "eval_kind", "group", "task"])
-           .agg(mean=("success", "mean"),
-                std=("success", lambda v: v.std(ddof=1) if len(v) > 1 else np.nan),
-                n_series=("series", "nunique")).reset_index())
-    return agg.rename(columns={"label": "group", "group": "scene"})
-
-
-def render_final_eval(table: pd.DataFrame, cfg: PlotConfig, color_of: dict, *,
-                      per_scene: bool) -> list:
-    """The `_final_eval_task` figures: x = task, both domains in one bar.
-
-        every scene's tasks      <name>_final_eval_task.png
-        one scene each           <name>_final_eval_task_per_scene/...
-    """
-    if table.empty:
-        return []
-    written = [render_bars(
-        table, color_of, cfg.out_dir / f"{cfg.name}_final_eval_task.png",
-        metric="success", x_col="task", x_label="task",
-        x_tick_fmt=task_tick_label, x_tick_pt=TASK_TICK_PT,
-        figsize=TASK_FIGSIZE, box_aspect=TASK_BOX_ASPECT)]
-    if per_scene:
-        scenes = sorted(table["scene"].unique())
-        slugs = unique_slugs(scenes)
-        scene_dir = (cfg.out_dir / f"{cfg.name}_final_eval_task_per_scene"
-                     / f"{cfg.name}_final_eval_task.png")
-        for scene in scenes:
-            written.append(render_bars(
-                table[table["scene"] == scene], color_of,
-                out_variant(scene_dir, slugs[scene]), metric="success",
-                x_col="task", x_label="task", x_tick_fmt=task_tick_label,
-                legend_outside=True))
-    return [w for w in written if w is not None]
-
-
-def render_task_all(table: pd.DataFrame, cfg: PlotConfig, *,
-                    per_scene: bool = True) -> list:
-    """The position-free figures — ONE of them, plus a scene breakdown:
-
-        x = task, both domains in one bar   <name>_seq_task.png
-        the same, one scene each            <name>_seq_task_per_scene/...
-
-    Which task is hard does not depend on where in the round it was met, so
-    this family pools every round kind and shows plain `success` only: the
-    seen / unseen split and the chained metric are questions about position,
-    and they are answered by the `_seq_position` figures.
+    The pooled figure is the one to read for "which task is hard"; the
+    per-scene ones split it by the scene the env belongs to, since the same
+    task string is a different scene's objects and table.
     """
     color_of = group_colors(table, cfg)
     scenes = sorted(s for s in table["scene"].unique() if s != ALL_SCENES)
     slugs = unique_slugs(scenes)
+    kinds = figure_kinds(table)
 
     written = []
-    for metric in (TASK_METRIC,):
-        for kind in ("",):
-            kt = table[table["metric"] == metric]
+    for metric in metrics:
+        for kind in kinds:
+            kt = table[(table["metric"] == metric) & (table["seq_kind"] == kind)]
             if kt.empty:
                 continue
-            stem = f"{cfg.name}_seq_task"
+            tag = SEQ_LABEL.get(kind, kind)
+            stem = f"{cfg.name}_seq_task_{metric}_{tag}"
             written.append(render_bars(
                 kt[kt["scene"] == ALL_SCENES], color_of,
                 cfg.out_dir / f"{stem}.png", metric=metric,
-                x_col="task", x_label="task",
-                x_tick_fmt=task_tick_label, x_tick_pt=TASK_TICK_PT,
-                figsize=TASK_FIGSIZE, box_aspect=TASK_BOX_ASPECT))
+                x_col="task", x_label="task", x_rotate=TASK_X_ROTATE,
+                legend_title=SEQ_LEGEND.get(kind, kind)))
             if per_scene:
                 scene_dir = cfg.out_dir / f"{stem}_per_scene" / f"{stem}.png"
                 for scene in scenes:
-                    # One scene's four tasks, same style as the pooled figure.
+                    # The scene goes in the legend title, as the task does on a
+                    # per-task figure: no suptitle, and a folder of bar charts
+                    # must still say which scene each one is.
                     written.append(render_bars(
                         kt[kt["scene"] == scene], color_of,
                         out_variant(scene_dir, slugs[scene]), metric=metric,
-                        x_col="task", x_label="task",
-                        x_tick_fmt=task_tick_label, x_tick_pt=TASK_TICK_PT,
-                        legend_outside=True))
+                        x_col="task", x_label="task", x_rotate=TASK_X_ROTATE,
+                        legend_title=f"{scene}\n{SEQ_LEGEND.get(kind, kind)}"))
     return [w for w in written if w is not None]
 
 
@@ -766,12 +627,10 @@ def main():
                         "kind — 'seen'/'training' or 'unseen'/'random'")
     p.add_argument("--no-per-task", dest="per_task", action="store_false",
                    help="write only the average position figure")
-    p.add_argument("--no-final-eval", dest="final_eval", action="store_false",
-                   help="skip the figures of the checkpoint's own last "
-                        "training eval (single-task success, per scene)")
-    p.add_argument("--no-per-scene", dest="per_scene", action="store_false",
-                   help="write only the pooled task figure, without the "
-                        "per-scene breakdown (`group` in eval_per_trial.csv)")
+    p.add_argument("--per-scene", action="store_true",
+                   help="also split the per-task figures by scene (`group` in "
+                        "eval_per_trial.csv): one extra figure per scene, "
+                        "holding that scene's tasks")
     args = p.parse_args()
 
     if args.config:
@@ -810,14 +669,8 @@ def main():
     series = load_groups(cfg, seq_kind=seq_kind, required=required)
     table = collect(cfg, series, metrics=metrics, rates_fn=position_rates,
                     key=_KEY, pooled=("task", ALL_TASKS))
-    # The task family pools the round kinds: which task is hard is not a
-    # question about where in the round it was met.
-    task_series = {label: [(chain, df.assign(seq_kind=POOLED))
-                           for chain, df in entries]
-                   for label, entries in series.items()}
-    task_table = collect(cfg, task_series, metrics=[TASK_METRIC],
-                         rates_fn=task_rates, key=_TASK_KEY,
-                         pooled=("scene", ALL_SCENES))
+    task_table = collect(cfg, series, metrics=metrics, rates_fn=task_rates,
+                         key=_TASK_KEY, pooled=("scene", ALL_SCENES))
     print(f"[seq] metrics={metrics}, seq_kind={seq_kind}; bar = mean across "
           f"series", file=sys.stderr)
     report(table)
@@ -828,18 +681,8 @@ def main():
         t.to_csv(path, index=False)
         print(f"[ok] wrote {path}", file=sys.stderr)
     written = (render_all(table, cfg, metrics=metrics, per_task=args.per_task)
-               + render_task_all(task_table, cfg, per_scene=args.per_scene))
-    if args.final_eval:
-        # The single-task rates the checkpoint was last measured at in
-        # training: the same tasks, evaluated one at a time rather than in a
-        # sequence, so the sequence cost is read against them.
-        final = final_eval_table(cfg, required=required)
-        if not final.empty:
-            path = cfg.out_dir / f"{cfg.name}_final_eval_task.csv"
-            final.to_csv(path, index=False)
-            print(f"[ok] wrote {path}", file=sys.stderr)
-            written += render_final_eval(final, cfg, group_colors(table, cfg),
-                                         per_scene=True)
+               + render_task_all(task_table, cfg, metrics=metrics,
+                                 per_scene=args.per_scene))
     for path in written:
         print(f"[ok] wrote {path}", file=sys.stderr)
 

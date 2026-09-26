@@ -99,17 +99,13 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from matplotlib.collections import LineCollection  # noqa: E402
-
 from plot_common import (FLAT_BOX_ASPECT, FLAT_FIGSIZE,  # noqa: E402
                          RESET_SPLIT_MIN_EPISODE_LEN,
                          RESET_SPLIT_MIN_PIECE, SHORT_HORIZON_COLOR, X_LABEL,
-                         NoData, axes_peak, concat_chain, curve_legend,
-                         curve_ylim, legend_pt, AXIS_LABEL_PT, TICK_LABEL_PT,
-                         steps_in_millions,
+                         NoData, concat_chain, curve_legend, legend_pt,
                          metric_axis_label,
                          piece_colors,
-                         default_colors, horizon_changes, load_plot_config,
+                         default_colors, load_plot_config,
                          mark_horizon_changes, new_curve_figure,
                          out_variant, piece_labels, plot_group_curve,
                          plot_reset_segmented_curve, prepend_origin,
@@ -281,8 +277,6 @@ def render(df: pd.DataFrame, out_path: Path, *, direction: str, by: str,
         ax1.set_title(f"per-segment success by {by}")
 
     axes[-1][0].set_xlabel(X_LABEL[x_key])
-    if x_key == "total_steps":
-        steps_in_millions(axes[-1][0])
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -511,225 +505,71 @@ def reset_split_plan(curve: GroupCurve):
     return (pieces, colors, labels), None
 
 
-# ---------------------------------------------------------------------------
-# Paper look (`tools/rollout_success.txt`): serif type, steps in millions, no
-# top spine, a short wide panel. Before a horizon switch the curve is
-# grey; after it every inter-reset piece is drawn on its own, with a dotted
-# rule and a marker at each reset, a solid rule at the switch, and each
-# regime's T written above it. `style` picks how the pieces are drawn:
-#   plain     one blue line per piece
-#   fill      plus a red wash under each piece, down to the piece's minimum
-#   gradient  each piece coloured coolwarm by its position between resets
-#             (blue right after a reset, red just before the next)
-# ---------------------------------------------------------------------------
-
-ROLLOUT_STYLES = ("plain", "fill", "gradient")
-ROLLOUT_FIGSIZE = (8.0, 2.8)       # (4.5, 2.8) for a half-width wrapfigure
-# Same (default sans) family as plot_eval_success.py, so the two tools' axis
-# labels match; sizes come from the config's `axis` block.
-ROLLOUT_RC = {"font.size": 10}
-BLUE, GRAY, RED = "#2b6cb0", "gray", "#e53e3e"
-X_SCALE = 1e6                      # plot in millions of steps
-
-
-def _finish_rollout_axes(ax, x_max: float, y_range, metric: str,
-                         axis_style=None):
-    """Axes limits / labels / spines, and the y top the markers hang from.
-
-    Labels are `plot_eval_success.py`'s — the same X_LABEL wording, and the
-    config's `axis` sizes (`label_fontsize` / `tick_fontsize`, falling back to
-    AXIS_LABEL_PT / TICK_LABEL_PT) — so the two tools' figures read alike.
-
-    `y_range` = (lower, upper), either end None for fitted: the upper bound
-    is the highest drawn value plus 30% headroom, rounded up to 0.05.
-    """
-    lower, upper = y_range or (None, None)
-    if upper is None:
-        top = curve_ylim(axes_peak(ax))[1] / 1.02
-    else:
-        top = float(upper)
-    lower = 0.0 if lower is None else float(lower)
-    ax.set_xlim(0, x_max)
-    ax.set_ylim(lower, top)
-    a = axis_style or {}
-    label_pt = a.get("label_fontsize") or AXIS_LABEL_PT
-    tick_pt = a.get("tick_fontsize") or TICK_LABEL_PT
-    ax.set_xlabel(X_LABEL["total_steps"], fontsize=label_pt)
-    ax.set_ylabel(metric_axis_label(metric), fontsize=label_pt)
-    ax.tick_params(labelsize=tick_pt)
-    ax._rollout_tick_pt = tick_pt          # for the regime labels above the box
-    ax.spines["top"].set_visible(False)
-    return lower, top
-
-
-def _save_rollout(fig, out_path: Path) -> Path:
-    """PNG at `out_path`."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
-def render_main(curves, colors, out_path: Path, *, metric: str,
-                figsize=ROLLOUT_FIGSIZE, y_range=None, axis_style=None) -> Path:
+def render_main(curves, colors, out_path: Path, *, metric: str) -> Path:
     """Every group on one axes, one hue each, each curve drawn whole."""
-    with plt.rc_context(ROLLOUT_RC):
-        fig, ax = plt.subplots(figsize=tuple(figsize))
-        x_max = 0.0
-        for curve, color in zip(curves, colors):
-            x = curve.x / X_SCALE
-            ax.plot(x, curve.mean, color=color, lw=1.2, label=curve.label)
-            if curve.n_series > 1:
-                ax.fill_between(x, curve.mean - curve.std, curve.mean + curve.std,
-                                color=color, alpha=0.12, lw=0)
-            x_max = max(x_max, float(np.nanmax(x)) if x.size else 0.0)
-        # No legend: the groups are the config's own, named in whatever
-        # caption uses the figure, and the key covered the curves it labelled.
-        _finish_rollout_axes(ax, x_max, y_range, metric, axis_style)
-        return _save_rollout(fig, out_path)
-
-
-def _stretches(curve: GroupCurve, plan):
-    """[(lo, hi, is_long)] index ranges to draw, in order.
-
-    With a reset-split plan these are its pieces (a short-horizon stretch is
-    the grey pre-switch part). Without one the curve is cut only at horizon
-    switches, and a panel with a single regime is drawn as one blue piece.
-    """
-    n = curve.x.size
-    if plan:
-        pieces, colors, _ = plan
-        return [(lo, hi, c != SHORT_HORIZON_COLOR)
-                for (lo, hi), c in zip(pieces, colors)]
-    hor = curve.horizons
-    if hor is None or not horizon_changes(curve.x, hor):
-        return [(0, n, True)]
-    hor = pd.Series(hor).ffill().bfill().to_numpy(dtype=float)
-    long = hor >= RESET_SPLIT_MIN_EPISODE_LEN
-    edges = np.flatnonzero(np.diff(long.astype(int))) + 1
-    return [(lo, hi, bool(long[lo])) for lo, hi in zip(np.r_[0, edges], np.r_[edges, n])]
-
-
-def plan_resets_at(stretches, k: int, plan) -> bool:
-    """Whether stretch `k` starts at a reset (vs. at a horizon switch)."""
-    return (bool(plan) and 0 < k < len(stretches)
-            and stretches[k - 1][2] and stretches[k][2])
+    fig, ax = new_curve_figure(FLAT_FIGSIZE)
+    x_max = 0.0
+    for curve, color in zip(curves, colors):
+        plot_group_curve(ax, curve.x, curve.mean, curve.std, color=color,
+                         label=curve.label, n_series=curve.n_series)
+        x_max = max(x_max, float(curve.x.max()) if curve.x.size else 0.0)
+    # No legend: the groups are the config's own, named in whatever caption
+    # uses the figure, and the key covered the curves it labelled.
+    style_curve_axes(ax, x_axis="total_steps", y_label=metric_axis_label(metric), x_max=x_max,
+                     box_aspect=FLAT_BOX_ASPECT, legend=False)
+    return save_curve_figure(fig, out_path)
 
 
 def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
-                       metric: str, split: bool, style: str = "plain",
-                       figsize=ROLLOUT_FIGSIZE, y_range=None,
-                       axis_style=None) -> Path:
-    """One group on its own axes in the `rollout_success.txt` look.
+                       metric: str, split: bool) -> Path:
+    """One group on its own axes, split at its resets when that is meaningful.
 
-    Split at its resets when that is meaningful (`reset_split_plan`); a
-    declined split is drawn whole and says why on stderr. No legend: the
-    rules and the T labels are what the figure is read by, and the group is
-    named by the filename.
+    When the curve is split the group's label goes in the legend's TITLE, since
+    the pieces occupy the entries and the panel would otherwise not say which
+    condition it shows (`save_curve_figure` deliberately writes no suptitle —
+    the run identity lives in the filename). It is parked beside the box rather
+    than inside it: these curves climb into the upper-left corner, so an inside
+    legend covers the very stretch it labels. When the curve is drawn whole
+    there is no legend at all — its one entry would be the group label, which
+    the filename already carries.
+
+    A horizon switch — the T320 -> T2560 point of a curriculum chain — is marked
+    with a solid grey rule either way, since it is what separates the two
+    regimes the panel shows. On a panel that HAS one the legend is dropped
+    whether or not the curve is split: the rule is then the whole reading of the
+    figure ("before the switch" / "after it"), and a legend enumerating reset
+    indices next to it only competes with it.
     """
+    fig, ax = new_curve_figure(FLAT_FIGSIZE)
     plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
-    x = curve.x / X_SCALE
-    y, sd = curve.mean, curve.std
-    band = curve.n_series > 1
-    stretches = _stretches(curve, plan)
-    with plt.rc_context(ROLLOUT_RC):
-        fig, ax = plt.subplots(figsize=tuple(figsize))
-        resets = []
-        for k, (lo, hi, is_long) in enumerate(stretches):
-            if not is_long and k + 1 < len(stretches) and stretches[k + 1][2] \
-                    and not plan_resets_at(stretches, k + 1, plan):
-                # Pre-switch stretch: run it on to the first post-switch point,
-                # so the line does not break at the switch (no reset there).
-                hi = min(hi + 1, x.size)
-            xi, yi, si = x[lo:hi], y[lo:hi], sd[lo:hi]
-            if is_long:
-                # Run the piece out to the reset rules on either side (half a
-                # segment each way), holding its end values, so the curve
-                # meets the rule instead of stopping short of it. A piece that
-                # starts at a reset also starts from where the previous piece
-                # ended, so the drop at the reset is a vertical stroke on the
-                # rule and the curve stays one unbroken line.
-                if plan_resets_at(stretches, k, plan) and lo > 0:
-                    r0 = 0.5 * (x[lo - 1] + x[lo])
-                    xi = np.r_[r0, r0, xi]
-                    yi = np.r_[y[lo - 1], yi[0], yi]
-                    si = np.r_[sd[lo - 1], si[0], si]
-                if plan_resets_at(stretches, k + 1, plan) and hi < x.size:
-                    r1 = 0.5 * (x[hi - 1] + x[hi])
-                    xi, yi, si = np.r_[xi, r1], np.r_[yi, yi[-1]], np.r_[si, si[-1]]
-            if xi.size < 2:
-                continue
-            if not is_long:
-                ax.plot(xi, yi, color=GRAY, lw=1.2)
-                if band:
-                    ax.fill_between(xi, yi - si, yi + si, color=GRAY,
-                                    alpha=0.15, lw=0)
-                continue
-            if plan and k > 0 and stretches[k - 1][2]:
-                # A reset between two pieces of the same regime.
-                resets.append(0.5 * (x[lo - 1] + x[lo]))
-            if style == "gradient":
-                t = (xi - xi[0]) / max(xi[-1] - xi[0], 1e-12)
-                pts = np.array([xi, yi]).T.reshape(-1, 1, 2)
-                lc = LineCollection(np.concatenate([pts[:-1], pts[1:]], 1),
-                                    cmap="coolwarm", lw=1.6)
-                lc.set_array(t[:-1])
-                lc.set_clim(0, 1)
-                ax.add_collection(lc)
-            else:
-                ax.plot(xi, yi, color=BLUE, lw=1.2)
-                if style == "fill" and np.isfinite(yi).any():
-                    ax.fill_between(xi, np.nanmin(yi), yi, color=RED,
-                                    alpha=0.15, lw=0)
-            if band and style != "gradient":
-                ax.fill_between(xi, yi - si, yi + si, color=BLUE, alpha=0.12, lw=0)
-
-        x_max = float(np.nanmax(x)) if x.size else 0.0
-        _, top = _finish_rollout_axes(ax, x_max, y_range, metric, axis_style)
-
-        # Scene resets, then the curriculum switch and each regime's T.
-        for r in resets:
-            ax.axvline(r, color="k", ls=":", lw=0.6)
-            ax.plot(r, top, marker="v", color="k", ms=4, clip_on=False)
-        changes = horizon_changes(curve.x, curve.horizons)
-        for xc, _, _ in changes:
-            ax.axvline(xc / X_SCALE, color="k", lw=1.2)
-        bounds = [0.0] + [xc / X_SCALE for xc, _, _ in changes] + [x_max]
-        hor = curve.horizons
-        if hor is not None:
-            hor = pd.Series(hor).ffill().bfill().to_numpy(dtype=float)
-            for a, b in zip(bounds[:-1], bounds[1:]):
-                h = hor[np.searchsorted(x, 0.5 * (a + b)).clip(0, x.size - 1)]
-                if np.isfinite(h):
-                    # Above the box, not inside it: a label box in the panel
-                    # cut through the reset rule (and any curve) behind it.
-                    # Raised past the reset markers that sit on the top edge.
-                    ax.annotate(f"$T={h:g}$", xy=(0.5 * (a + b), 1.0),
-                                xycoords=ax.get_xaxis_transform(),
-                                xytext=(0, 6), textcoords="offset points",
-                                ha="center", va="bottom",
-                                fontsize=getattr(ax, "_rollout_tick_pt", None))
-
-        if plan:
-            n_short = sum(not lg for _, _, lg in stretches)
-            print(f"[rollout] {curve.label}: split into {len(stretches) - n_short} "
-                  f"inter-reset pieces"
-                  + (f" + {n_short} short-horizon stretch drawn grey" if n_short else ""),
-                  file=sys.stderr)
-        else:
-            print(f"[rollout] {curve.label}: drawn whole — {declined}", file=sys.stderr)
-        if changes:
-            print(f"[rollout] {curve.label}: horizon switch at "
-                  + ", ".join(f"{xc:.4g}" for xc, _, _ in changes), file=sys.stderr)
-        return _save_rollout(fig, out_path)
+    if plan:
+        pieces, colors, labels = plan
+        plot_reset_segmented_curve(
+            ax, curve.x, curve.mean, curve.std, pieces=pieces,
+            labels=labels, colors=colors, n_series=curve.n_series)
+        n_short = sum(c == SHORT_HORIZON_COLOR for c in colors)
+        print(f"[rollout] {curve.label}: split into {len(pieces) - n_short} "
+              f"inter-reset pieces"
+              + (f" + {n_short} short-horizon stretch drawn whole" if n_short else ""),
+              file=sys.stderr)
+    else:
+        plot_group_curve(ax, curve.x, curve.mean, curve.std, color=color,
+                         label=curve.label, n_series=curve.n_series)
+        print(f"[rollout] {curve.label}: drawn whole — {declined}", file=sys.stderr)
+    rules = mark_horizon_changes(ax, curve.x, curve.horizons)
+    if rules:
+        print(f"[rollout] {curve.label}: horizon switch at "
+              + ", ".join(f"{v:.4g}" for v in rules)
+              + " (grey rule; legend dropped)", file=sys.stderr)
+    x_max = float(curve.x.max()) if curve.x.size else 0.0
+    style_curve_axes(ax, x_axis="total_steps", y_label=metric_axis_label(metric), x_max=x_max,
+                     legend=False, box_aspect=FLAT_BOX_ASPECT)
+    return save_curve_figure(fig, out_path)
 
 
 def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
                   smooth: int, metric: str, per_group: bool = True,
-                  reset_split: bool = True, style: str = "plain",
-                  figsize=ROLLOUT_FIGSIZE, y_range=None,
-                  axis_style=None) -> list:
+                  reset_split: bool = True) -> list:
     """The whole `--config` figure set. Returns the paths written."""
     curves = []
     for group in cfg.groups:
@@ -762,17 +602,14 @@ def render_groups(cfg, out_path: Path, *, direction: str, x_key: str,
     colors = default_colors(len(curves))
     # No title on the main figure: direction / smoothing / band meaning are
     # settings, not findings, and they are already on stderr above.
-    written = [render_main(curves, colors, out_path, metric=metric,
-                           figsize=figsize, y_range=y_range,
-                           axis_style=axis_style)]
+    written = [render_main(curves, colors, out_path, metric=metric)]
 
     if per_group:
         slugs = unique_slugs([c.label for c in curves])
         for curve, color in zip(curves, colors):
             written.append(render_group_panel(
                 curve, color, out_variant(out_path, slugs[curve.label]),
-                metric=metric, split=reset_split, style=style,
-                figsize=figsize, y_range=y_range, axis_style=axis_style))
+                metric=metric, split=reset_split))
     return written
 
 
@@ -835,9 +672,6 @@ def main():
                          f"a shorter run is drawn whole and says so on stderr.")
     rs.add_argument("--no-reset-split", dest="reset_split", action="store_false",
                     help="draw every per-group curve whole")
-    p.add_argument("--style", default=None, choices=["plain", "fill", "gradient"],
-                   help="--config mode: how the inter-reset pieces are drawn "
-                        "(see tools/rollout_success.txt). Default plain.")
     args = p.parse_args()
 
     if args.config:
@@ -848,25 +682,11 @@ def main():
         args.smooth = int(cfg.option("smooth", args.smooth, 5))
         args.per_group = bool(cfg.option("per_group", args.per_group, True))
         args.reset_split = bool(cfg.option("reset_split", args.reset_split, True))
-        style = cfg.option("rollout_style", args.style, "plain")
-        if style not in ROLLOUT_STYLES:
-            raise SystemExit(f"rollout_style {style!r}: expected one of {ROLLOUT_STYLES}")
-        figsize = tuple(cfg.option("rollout_figsize", None, ROLLOUT_FIGSIZE))
-        yl = cfg.option("rollout_ylim", None, None) or {}
-        if set(yl) - {"lower", "upper"}:
-            raise SystemExit("rollout_ylim: expected only lower / upper")
-        # `axis` is plot_eval_success.py's key; read here too so both tools'
-        # axis labels come out the same size.
-        import json
-        axis_style = json.loads(Path(args.config).read_text()).get("axis") or {}
         out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_rollout_success.png"
         for path in render_groups(cfg, out, direction=args.direction,
                                   x_key="total_steps", smooth=args.smooth,
                                   metric=args.metric, per_group=args.per_group,
-                                  reset_split=args.reset_split, style=style,
-                                  figsize=figsize,
-                                  y_range=(yl.get("lower"), yl.get("upper")),
-                                  axis_style=axis_style):
+                                  reset_split=args.reset_split):
             print(f"[ok] wrote {path}", file=sys.stderr)
         return
 

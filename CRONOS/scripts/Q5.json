@@ -1,0 +1,82 @@
+{
+  "out_dir": "/mnt/scratch/AutoRL_Dian/CRONOS/fig/Q5",
+  "name": "Q5",
+  "smoothing_window": 5,
+  "step_range": "0:655360",
+  "actor_kind": "obj,recep",
+  "legend": {
+    "fontsize": 24
+  },
+  "axis": {
+    "label_fontsize": 24,
+    "tick_fontsize": 18
+  },
+  "aspect_ratio": "4:3",
+  "sr_ylim": {
+    "in_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.65
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.65
+      }
+    },
+    "out_of_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.55
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.55
+      }
+    }
+  },
+  "groups": [
+    {
+      "label": "GRPO T=80",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO_80/wandb/run-20260901_234655-fdh5hwcw/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO_80/wandb/run-20260904_140641-0fddmf8i/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO_80/wandb/run-20260906_211956-5f7llcd0/glob"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO_80/wandb/run-20260901_234659-jae20zns/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO_80/wandb/run-20260904_140644-5st8d9e6/glob"
+        ]
+      ]
+    },
+    {
+      "label": "PPO T=80",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T80__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T80__s1"
+      ]
+    },
+    {
+      "label": "GRPO T=2560",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO/wandb/run-20260829_165226-41unprib/glob"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/GRPO/wandb/run-20260829_165231-80pznnd9/glob"
+        ]
+      ]
+    },
+    {
+      "label": "PPO T=2560",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s0__p0"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/spatial_noCL/s1__p0"
+        ]
+      ]
+    }
+  ]
+}

@@ -44,8 +44,7 @@ import pandas as pd
 # ONE config file drives all three plot tools instead of each needing its own.
 _PLOT_PY_TOP_KEYS = {
     "smoothing_window", "n_interp_points", "end_steps", "end_resets",
-    "figsize", "eval_kinds", "x_axes", "horizon_lines", "legend",
-    "axis", "sr_ylim", "aspect_ratio",
+    "figsize", "eval_kinds", "x_axes", "horizon_lines",
 }
 _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 
@@ -58,13 +57,8 @@ TOOL_OPTION_KEYS = {
     # plot_segment_positions.py
     "actor_kind", "phase", "workspace_scale", "step_range", "density",
     "bin_size", "per_task", "dense_min", "color_by",
-    # plot_sequence_eval.py: label -> one training glob dir per series, used
-    # when a checkpoint's own directory carries no `eval_success.csv` (a
-    # checkpoint copied into a bundle).
-    "final_eval_runs",
     # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
-    "rollout_style", "rollout_figsize", "rollout_ylim",
     # plot_sequence_eval.py
     "seq_kind",
 }
@@ -229,27 +223,6 @@ def default_colors(n: int):
 # relative sizes: the main curve legends sit at the base, legends inside a
 # crowded panel or a small grid subplot sit one to three notches under it.
 # Change this number and re-run the tools; nothing else needs touching.
-# Axis dressing: one notch up from matplotlib's 10pt defaults, so the units
-# stay readable when a figure is shrunk into a column.
-# What a metric is called on an axis. Every tool draws the same quantity —
-# the fraction of trials that succeeded — so it reads the same everywhere,
-# `success_chained` included: the chaining is the figure's subject, not a
-# different unit.
-METRIC_AXIS_LABEL = {
-    "success": "success rate",
-    "success_chained": "success rate",
-    "grasp": "grasp rate",
-    "obj_grasped": "object-grasped rate",
-}
-
-
-def metric_axis_label(metric: str) -> str:
-    """The axis name for `metric`; unknown metrics keep their own spelling."""
-    return METRIC_AXIS_LABEL.get(metric, str(metric).replace("_", " "))
-
-
-AXIS_LABEL_PT = 18
-TICK_LABEL_PT = 15
 LEGEND_PT = 16
 LEGEND_MIN_PT = 7          # below this the labels stop being readable in print
 
@@ -301,24 +274,12 @@ CURVE_BOX_ASPECT = 3 / 4
 FLAT_FIGSIZE = (12.0, 7.0)
 FLAT_BOX_ASPECT = 9 / 16
 
-# The one axis-label vocabulary every curve tool uses. Steps are shown in
-# millions (`steps_in_millions`) rather than with a "1e6" offset in the corner.
 X_LABEL = {
-    "total_steps": "environment steps (M)",
+    "total_steps": "environment steps",
     "total_resets": "number of resets",
     "segment": "segment index (80 steps each)",
     "episode": "episode",
 }
-
-
-STEPS_UNIT = 1e6
-
-
-def steps_in_millions(ax) -> None:
-    """Tick labels of a raw-step x axis in millions, to match X_LABEL."""
-    from matplotlib.ticker import FuncFormatter
-    ax.xaxis.set_major_formatter(
-        FuncFormatter(lambda v, _: f"{v / STEPS_UNIT:g}"))
 
 
 def new_curve_figure(figsize=None):
@@ -525,9 +486,7 @@ def curve_ylim(peak: float):
 
 def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
                      y_max=None, legend=True, box_aspect=None,
-                     legend_outside=False, legend_kw=None,
-                     legend_reverse=False, label_pt=None, tick_pt=None,
-                     y_range=None):
+                     legend_outside=False):
     """Shared axis dressing. Call it AFTER every curve is drawn: the y bound is
     fitted to what is on the axes.
 
@@ -536,47 +495,18 @@ def style_curve_axes(ax, *, x_axis: str, y_label: str, x_max=None,
     single unsplit curve wants — its one entry would only repeat the filename.
     `box_aspect` overrides `CURVE_BOX_ASPECT` (`FLAT_BOX_ASPECT` for a curve
     read along its x range), and `legend_outside` moves the legend clear of the
-    box. `legend_kw` is passed to `ax.legend` on top of the fitted defaults
-    (`loc`, `fontsize`, `framealpha`, ...) and `legend_reverse` flips the entry
-    order, for a panel read bottom-up.
-
-    `label_pt` / `tick_pt` override `AXIS_LABEL_PT` / `TICK_LABEL_PT`.
-    `y_range` = `(lower, upper)` fixes the y bounds instead of fitting them;
-    either end may be None to keep the fitted value. The same 2% of the range is
-    padded onto both ends as the fitted bound gets, so a curve lying on the
-    bound is not half clipped.
+    box.
     """
-    ax.set_xlabel(X_LABEL.get(x_axis, x_axis),
-                  fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
-    if x_axis == "total_steps":
-        steps_in_millions(ax)
-    ax.set_ylabel(y_label,
-                  fontsize=AXIS_LABEL_PT if label_pt is None else label_pt)
-    ax.tick_params(labelsize=TICK_LABEL_PT if tick_pt is None else tick_pt)
-    if tick_pt is not None:          # the "1e6" multiplier follows the ticks
-        ax.xaxis.get_offset_text().set_fontsize(tick_pt)
-        ax.yaxis.get_offset_text().set_fontsize(tick_pt)
-    lo, hi = curve_ylim(axes_peak(ax) if y_max is None else float(y_max))
-    lower, upper = y_range or (None, None)
-    if lower is not None or upper is not None:
-        lower = 0.0 if lower is None else float(lower)
-        upper = hi / 1.02 if upper is None else float(upper)   # fitted top
-        if upper <= lower:
-            raise ValueError(f"y range upper {upper} <= lower {lower}")
-        pad = 0.02 * (upper - lower)
-        lo, hi = lower - pad, upper + pad
-    ax.set_ylim(lo, hi)
+    ax.set_xlabel(X_LABEL.get(x_axis, x_axis))
+    ax.set_ylabel(y_label)
+    ax.set_ylim(*curve_ylim(axes_peak(ax) if y_max is None else float(y_max)))
     # Left edge pinned to 0 so the anchored origin is actually visible.
     ax.set_xlim(0.0, None if not x_max else float(x_max))
     ax.grid(alpha=CURVE_GRID_ALPHA)
     ax.set_box_aspect(CURVE_BOX_ASPECT if box_aspect is None else box_aspect)
     if legend:
-        handles, labels = ax.get_legend_handles_labels()
-        kw = curve_legend(len(handles), outside=legend_outside)
-        kw.update(legend_kw or {})
-        if legend_reverse:
-            handles, labels = handles[::-1], labels[::-1]
-        ax.legend(handles, labels, **kw)
+        ax.legend(**curve_legend(len(ax.get_legend_handles_labels()[0]),
+                                 outside=legend_outside))
 
 
 def save_curve_figure(fig, out_path) -> Path:
@@ -856,32 +786,10 @@ def plot_reset_segmented_curve(ax, x, mean, std=None, resets=None, *,
 HORIZON_RULE = {"color": "0.35", "linewidth": 2.2, "zorder": 2.5}
 
 
-# The label a horizon rule carries, above the panel with an arrow down to the
-# rule: inside the box it lands on the curves or on the legend.
-HORIZON_LABEL_DY = 12.0
-
-
-def annotate_horizon_rule(ax, x: float, text: str) -> None:
-    """`text` above the panel, centred on the rule at `x`, arrow pointing down."""
-    ax.annotate(text, xy=(x, 1.0), xycoords=("data", "axes fraction"),
-                xytext=(0.0, HORIZON_LABEL_DY), textcoords="offset points",
-                ha="center", va="bottom", fontsize=AXIS_LABEL_PT - 2,
-                color=HORIZON_RULE["color"], annotation_clip=False,
-                arrowprops=dict(arrowstyle="->", color=HORIZON_RULE["color"],
-                                linewidth=1.4, shrinkA=2.0, shrinkB=0.0))
-
-
-def horizon_switch_label(old: float, new: float) -> str:
-    """`T = 320 -> 2560`, the two episode lengths the switch ran between."""
-    fmt = lambda v: f"{v:g}"
-    return f"T = {fmt(old)} \u2192 {fmt(new)}"
-
-
 def horizon_changes(x, horizons):
     """x positions where `horizons` steps to a new value.
 
-    Each entry is `(x, old_horizon, new_horizon)`. The x is the midpoint
-    between the last point of the old horizon and the first
+    Each is the midpoint between the last point of the old horizon and the first
     of the new one, which is where the switch actually happened — the same
     convention as the reset rule. NaNs (gap points, or a run that did not record
     its `episode_len`) carry the last known horizon forward rather than counting
@@ -901,19 +809,14 @@ def horizon_changes(x, horizons):
         if last is not None and h[i] != last and last_i is not None:
             a, b = x[last_i], x[i]
             if np.isfinite(a) and np.isfinite(b):
-                out.append((0.5 * (a + b), last, h[i]))
+                out.append(0.5 * (a + b))
         last, last_i = h[i], i
     return out
 
 
-def mark_horizon_changes(ax, x, horizons, *, label: bool = True) -> list:
-    """Draw the rule at every horizon switch, labelled with the two episode
-    lengths it ran between. Returns the x positions."""
-    changes = horizon_changes(x, horizons)
-    xs = []
-    for xc, old, new in changes:
+def mark_horizon_changes(ax, x, horizons) -> list:
+    """Draw the black rule at every horizon switch. Returns the x positions."""
+    xs = horizon_changes(x, horizons)
+    for xc in xs:
         ax.axvline(xc, **HORIZON_RULE)
-        if label:
-            annotate_horizon_rule(ax, xc, horizon_switch_label(old, new))
-        xs.append(xc)
     return xs

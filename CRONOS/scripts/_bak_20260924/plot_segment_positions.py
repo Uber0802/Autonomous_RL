@@ -103,8 +103,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from plot_common import (AXIS_LABEL_PT, CURVE_BOX_ASPECT, NoData,  # noqa: E402
-                         TICK_LABEL_PT, default_colors, legend_pt,
+from plot_common import (CURVE_BOX_ASPECT, NoData,  # noqa: E402
+                         default_colors, legend_pt,
                          load_plot_config, out_variant, read_run_config,
                          read_table, slugify, unique_slugs, warn)
 
@@ -365,14 +365,16 @@ def _shared_limits(df: pd.DataFrame, pad: float = 0.01, robust: bool = True,
                           _robust_range(df["py"], pad=pad, enabled=robust))
 
 
-# The panel is SQUARE, and the axes are equal-aspect — the xy plane is a
-# physical table and squashing it to fit would move the points relative to
-# each other. So the BOX is made square by widening the VIEW, never by scaling
-# the data: the extra width is empty table.
-PANEL_BOX_RATIO = 1.0                             # width:height, i.e. square
-# These panels carry no key (see `_finish_panel`), so none of that width has to
-# be kept clear for one: the view is widened evenly and the cloud stays centred.
-PANEL_EXTRA_LEFT = 0.0
+# The panel is 4:3 like every other figure, but the axes are equal-aspect —
+# the xy plane is a physical table and squashing it to fit would move the
+# points relative to each other. So the BOX is made 4:3 by widening the VIEW,
+# never by scaling the data: the extra width is empty table.
+PANEL_BOX_RATIO = 1.0 / CURVE_BOX_ASPECT          # width:height, i.e. 4:3
+# ...and all of it is added on the left, which puts the cloud right of the box
+# centre. That is where the room for the count legend comes from: it sits in
+# the lower-left corner, and on a view fitted to the cloud it lands on top of
+# the points.
+PANEL_EXTRA_LEFT = 1.0
 
 
 def _fit_box_ratio(xlim, ylim, ratio: float = PANEL_BOX_RATIO,
@@ -813,8 +815,8 @@ def _keep_forward(df: pd.DataFrame, pose_csv: Path) -> pd.DataFrame:
 
 
 def _new_panel():
-    """One figure, one xy scatter. Square, to hold the equal-aspect box that
-    `_fit_box_ratio` gives the shared view."""
+    """One figure, one xy scatter. Landscape, to hold the 4:3 equal-aspect box
+    that `_fit_box_ratio` gives the shared view."""
     return plt.subplots(figsize=(5.8 * PANEL_BOX_RATIO, 5.8))
 
 
@@ -845,18 +847,17 @@ def _finish_panel(ax, *, xlim, ylim, workspace) -> None:
     # belongs to whatever document uses the figure. `report_panel` prints the
     # counts. The workspace rectangle keeps its label only so a reader who
     # enables it can still tell what the dashed box is — see below.
+    # No px / py axis labels either: every figure is the same top-down table
+    # view, so the labels only repeat what the caption says. Ticks stay, so
+    # coordinates can still be read off.
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.25)
-    # No legend at all: the dashed red rectangle is the workspace and the
-    # marker sizes are the per-cell counts, both caption material, and on a
-    # square panel fitted to the cloud any key lands on the points.
-    # The axes ARE labelled: every figure is the same top-down table view, but
-    # without the names the reader has to be told which way x runs.
-    ax.set_xlabel("x (m)", fontsize=AXIS_LABEL_PT)
-    ax.set_ylabel("y (m)", fontsize=AXIS_LABEL_PT)
-    ax.tick_params(labelsize=TICK_LABEL_PT)
+    if workspace:
+        # Upper LEFT: the widened 4:3 view puts the cloud right of centre, so
+        # that corner is the empty one (the count legend takes the lower one).
+        ax.legend(loc="upper left", fontsize=legend_pt(-2))
 
 
 _DENSITY_MODES = ("emphasis", "size", "shade", "scatter")
@@ -1033,17 +1034,14 @@ def _draw_cloud(fig, ax, sub: pd.DataFrame, *, xlim, ylim, density: str,
         sizes = np.maximum(4.0, s_max * cells["count"] / c_max)
         ax.scatter(cells["x"], cells["y"], s=sizes, color=color, alpha=0.55,
                    linewidths=0.4, edgecolors="white")
-        if count_legend:
-            refs = sorted({1, max(1, c_max // 10), c_max})
-            handles = [ax.scatter([], [], s=max(4.0, s_max * v / c_max),
-                                  color=color, alpha=0.55, linewidths=0.4,
-                                  edgecolors="white") for v in refs]
-            ax.add_artist(ax.legend(handles, [str(v) for v in refs],
-                                    title="count", loc="lower left",
-                                    fontsize=legend_pt(-3),
-                                    title_fontsize=legend_pt(-3),
-                                    labelspacing=1.2, borderpad=0.8,
-                                    framealpha=0.8))
+        refs = sorted({1, max(1, c_max // 10), c_max})
+        handles = [ax.scatter([], [], s=max(4.0, s_max * v / c_max), color=color,
+                              alpha=0.55, linewidths=0.4, edgecolors="white")
+                   for v in refs]
+        ax.add_artist(ax.legend(handles, [str(v) for v in refs], title="count",
+                                loc="lower left", fontsize=legend_pt(-3),
+                                title_fontsize=legend_pt(-3),
+                                labelspacing=1.2, borderpad=0.8, framealpha=0.8))
     else:
         x_edges = np.arange(np.floor(xlim[0] / bin_size),
                             np.ceil(xlim[1] / bin_size) + 1) * bin_size
@@ -1164,8 +1162,7 @@ def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
             fig, ax = _new_panel()
             _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=density,
                         bin_size=bin_size, hexbin=hexbin, count_max=c_max,
-                        dense_min=dense_min,
-                                    count_legend=False)
+                        dense_min=dense_min)
             _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=workspace)
             written.append(_save_panel(fig, out_variant(task_dir, slugs[task], kind)))
         if not written:
@@ -1181,8 +1178,7 @@ def render(df: pd.DataFrame, out_base: Path, *, hexbin: bool, workspace,
         fig, ax = _new_panel()
         _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=density,
                     bin_size=bin_size, hexbin=hexbin, episode_range=(ep_lo, ep_hi),
-                    count_max=c_max, dense_min=dense_min,
-                                count_legend=False)
+                    count_max=c_max, dense_min=dense_min)
         report_panel(f"{label} {kind}".strip(), sub)
         # A single distinct xy means the pose is pinned rather than sparsely
         # sampled. Say so; a lone dot on a clipped axis is otherwise easy to
@@ -1694,8 +1690,7 @@ def render_groups(cfg, out_base: Path, *, args) -> list:
         # synthetic share is reported by `report_panel`.
         _draw_cloud(fig, ax, sub, xlim=xlim, ylim=ylim, density=args.density,
                     bin_size=args.bin_size, hexbin=args.hexbin, color=color,
-                    count_max=c_max, dense_min=args.dense_min,
-                                count_legend=False)
+                    count_max=c_max, dense_min=args.dense_min)
         _finish_panel(ax, xlim=xlim, ylim=ylim, workspace=args.workspace)
         parts = [slugs[label]] + ([rtag] if rtag else [])
         if task:

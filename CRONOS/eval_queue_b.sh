@@ -1,0 +1,1 @@
+RUN_OUT_DIR=/mnt/scratch/AutoRL_Dian/CRONOS_eval/80_opVLA bash scripts/eval.sh /mnt/scratch/AutoRL_Dian/CRONOS/EER_80_SpVLA/wandb/run-20260916_125842-ukalwn2k/glob/episode_0576 - 3
