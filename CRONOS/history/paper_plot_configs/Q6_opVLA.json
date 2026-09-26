@@ -1,0 +1,122 @@
+{
+  "out_dir": "/mnt/scratch/AutoRL_Dian/CRONOS/fig/Q6",
+  "name": "Q6_opVLA",
+  "smoothing_window": 5,
+  "actor_kind": "obj,recep",
+  "end_steps": 2949120,
+  "legend": {
+    "total_resets": {
+      "framealpha": 0.0,
+      "loc": "lower right"
+    },
+    "total_steps": {
+      "framealpha": 0.0,
+      "reverse": true
+    },
+    "fontsize": 24
+  },
+  "axis": {
+    "label_fontsize": 24,
+    "tick_fontsize": 18
+  },
+  "aspect_ratio": "4:3",
+  "sr_ylim": {
+    "in_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 1.0
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 1.0
+      }
+    },
+    "out_of_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.95
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.95
+      }
+    }
+  },
+  "rollout_style": "plain",
+  "rollout_figsize": [
+    8.0,
+    5.0
+  ],
+  "rollout_ylim": {
+    "lower": 0.0,
+    "upper": null
+  },
+  "groups": [
+    {
+      "label": "T=80",
+      "runs": [
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed0/wandb/run-20260705_224522-b2fskd0o/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed0/wandb/run-20260709_103147-fox8odd9/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed0/wandb/run-20260717_033208-tjfhvk5l/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed0/wandb/run-20260726_171449-w2yj48mz/glob",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/EER_80_SpVLA/wandb/run-20260916_125842-ukalwn2k/glob"
+        ],
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed1/wandb/run-20260705_224522-x8ith5h7/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed1/wandb/run-20260709_103147-8bksijet/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T80-normal-seed1/wandb/run-20260714_215034-gifyuend/glob"
+        ]
+      ]
+    },
+    {
+      "label": "T=320 w\\ EER",
+      "runs": [
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed0/wandb/run-20260606_030246-u970egwv/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T320-normal-seed0/wandb/run-20260629_220308-rhraxpqq/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T320-normal-seed0/wandb/run-20260712_034802-3lf3fdsz/glob"
+        ],
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260602_200103-21hzvche/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260629_220404-d23mli2z/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260712_034822-xrug4kpa/glob"
+        ]
+      ]
+    },
+    {
+      "label": "T=2560 w\\ EER",
+      "runs": [
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s0__p0",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s0__p1",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s0__p2"
+        ],
+        [
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s1__p0",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s1__p1",
+          "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q6/open_noCL/s1__p2"
+        ]
+      ]
+    },
+    {
+      "label": "T=2560 w\\ CL, EER",
+      "runs": [
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed0/wandb/run-20260606_030246-u970egwv/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed0/wandb/run-20260705_224551-9upn5z9r/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed0/wandb/run-20260713_023408-ug438a8s/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed0/wandb/run-20260714_214755-6n2szqlc/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed0/wandb/run-20260717_033206-1qprqqv2/glob"
+        ],
+        [
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-V0.3-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260602_200103-21hzvche/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed1/wandb/run-20260705_224624-9c7ae9gz/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed1/wandb/run-20260713_023335-xol2voqw/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed1/wandb/run-20260714_214848-tlxlq7wl/glob",
+          "/mnt/home/ChengDian/CRONOS_CodeRefactoring/V0.1/CRONOS/CRONOS-openvla-four_group_sequential_2x2-T2560-normal-seed1/wandb/run-20260717_033206-xgnyi26e/glob"
+        ]
+      ]
+    }
+  ]
+}

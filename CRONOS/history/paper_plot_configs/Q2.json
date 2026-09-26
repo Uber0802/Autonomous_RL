@@ -1,0 +1,75 @@
+{
+  "out_dir": "/mnt/scratch/AutoRL_Dian/CRONOS/fig/Q2",
+  "name": "Q2",
+  "smoothing_window": 5,
+  "actor_kind": "obj,recep",
+  "legend": {
+    "fontsize": 24
+  },
+  "axis": {
+    "label_fontsize": 24,
+    "tick_fontsize": 12
+  },
+  "aspect_ratio": "4:3",
+  "sr_ylim": {
+    "in_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.85
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.85
+      }
+    },
+    "out_of_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.7
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.7
+      }
+    }
+  },
+  "rollout_style": "plain",
+  "rollout_figsize": [
+    8.0,
+    2.8
+  ],
+  "rollout_ylim": {
+    "lower": 0.0,
+    "upper": null
+  },
+  "groups": [
+    {
+      "label": "T=320 w\\o EER",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T320__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T320__s1"
+      ]
+    },
+    {
+      "label": "T=320 w\\ EER",
+      "runs": [
+        "/mnt/home/guest/code_refactoring/CRONOS/CRONOS-spatialvla-four_group_sequential_2x2-T320-normal-seed0/wandb/run-20260618_024221-hx0auaz4/glob",
+        "/mnt/home/guest/code_refactoring/CRONOS/CRONOS-spatialvla-four_group_sequential_2x2-T320-normal-seed1/wandb/run-20260716_142950-kswafd2b/glob"
+      ]
+    },
+    {
+      "label": "T=2560 w\\o EER",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T2560__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T2560__s1"
+      ]
+    },
+    {
+      "label": "T=2560 w\\ EER",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q2/T2560-normal-EER__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q2/T2560-normal-EER__s1"
+      ]
+    }
+  ]
+}

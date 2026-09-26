@@ -1,0 +1,60 @@
+{
+  "out_dir": "/mnt/scratch/AutoRL_Dian/CRONOS/fig/Q1",
+  "name": "Q1_SpVLA",
+  "smoothing_window": 5,
+  "step_range": "0:655360",
+  "actor_kind": "obj,recep",
+  "legend": {
+    "fontsize": 24
+  },
+  "axis": {
+    "label_fontsize": 24,
+    "tick_fontsize": 18
+  },
+  "aspect_ratio": "4:3",
+  "sr_ylim": {
+    "in_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.7
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.7
+      }
+    },
+    "out_of_domain": {
+      "total_steps": {
+        "lower": 0.0,
+        "upper": 0.6
+      },
+      "total_resets": {
+        "lower": 0.0,
+        "upper": 0.6
+      }
+    }
+  },
+  "groups": [
+    {
+      "label": "T=80",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T80__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T80__s1"
+      ]
+    },
+    {
+      "label": "T=320",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T320__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T320__s1"
+      ]
+    },
+    {
+      "label": "T=2560",
+      "runs": [
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T2560__s0",
+        "/mnt/scratch/AutoRL_Dian/CRONOS/uber_exp/Q1/T2560__s1"
+      ]
+    }
+  ]
+}

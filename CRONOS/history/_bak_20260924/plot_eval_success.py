@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""Success-curve aggregator + plotter — reads long-form `eval_success.csv` files.
+
+Input CSV schema (written by `main.py`'s `SuccessRecorder`):
+
+    episode, total_steps, total_resets, eval_kind, group, task, scene, n_envs,
+    success, grasp, obj_grasped
+
+Workflow
+--------
+1. Edit `plot_config.json` to list run groups (label -> [csv_paths]).
+2. Run: `python tools/plot_eval_success.py --config tools/plot_config.json`.
+3. Outputs land under `<out_dir>/`, all prefixed `<name>_` so configs can share
+   a directory (`out_dir` empty/absent = the config file's own directory):
+   - `<name>_aggregated.csv` (long-form mean + std per group, eval_kind, x_axis, x_value)
+   - `<name>_summary.csv` (final-value mean ± std per group × eval_kind)
+   - 4 main PNGs: `<name>_<eval_kind>_<x_axis>.png`
+   - 2 gap PNGs: `<name>_gap_<eval_kind>.png` (success vs grasp overlaid)
+
+Adding a new run = append its `eval_success.csv` path to the right group's
+`csv_paths` list, then rerun. No code changes.
+
+The figures are drawn to the parameters in `tools/plot_common.py`, shared with
+`tools/plot_rollout_success.py`: the two tools measure the same rate at
+different sampling points (eval rounds vs 80-step boundaries) and are read side
+by side, so they use one look, one x label vocabulary and one (0, 0) anchor
+rather than each inventing its own.
+
+Requires: pandas, numpy, matplotlib.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import matplotlib
+matplotlib.use("Agg")
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_common import (CURVE_FIGSIZE, HORIZON_RULE, NoData, gap_mask,  # noqa: E402
+                         default_colors, sample_step, starts_at_origin,
+                         new_curve_figure, plot_group_curve, prepend_origin,
+                         read_table, resolve_out_dir, save_curve_figure,
+                         style_curve_axes, warn)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GroupSpec:
+    label: str
+    # Each entry is ONE seed's data. Can be:
+    #   - a string (path to a single eval_success.csv), OR
+    #   - a list of strings, treated as a resume chain that is concatenated
+    #     end-to-end (parent first, child last). Duplicate (total_steps,
+    #     eval_kind, group, task) keep the LATER (downstream) row's value.
+    # Example chain (T320 parent + T1280 child resumed from its ep_0032):
+    #   ["/path/to/T320_run/glob/eval_success.csv",
+    #    "/path/to/T1280_run/glob/eval_success.csv"]
+    csv_paths: List
+    color: Optional[str] = None
+    # Optional: only keep these CRONOS groups (e.g. ["group_A", "group_B"]).
+    # If None, all CRONOS groups in the CSV are aggregated together.
+    cronos_group_filter: Optional[List[str]] = None
+    # Optional: only keep these tasks. Default None = all tasks.
+    task_filter: Optional[List[str]] = None
+
+
+@dataclass
+class PlotConfig:
+    out_dir: str
+    name: str = "v04"
+    groups: List[GroupSpec] = field(default_factory=list)
+    end_steps: Optional[float] = None       # crop x-axis (total_steps)
+    end_resets: Optional[float] = None      # crop x-axis (total_resets)
+    smoothing_window: int = 5
+    n_interp_points: int = 500
+    # Shared with plot_rollout_success.py; a group's `color` still overrides the
+    # per-group colour, and `figsize` the panel size.
+    figsize: Tuple[float, float] = CURVE_FIGSIZE
+    eval_kinds: Tuple[str, ...] = ("in_domain", "out_of_domain")
+    x_axes: Tuple[str, ...] = ("total_steps", "total_resets")
+    # Vertical rules marking an event inside the run — the curriculum switch is
+    # what this exists for. One list of x positions per x_axis, e.g.
+    #   "horizon_lines": {"total_steps": [655360], "total_resets": [2048]}
+    # drawn with the same heavy grey rule plot_rollout_success.py puts at a
+    # horizon change, so the two tools mark the same event the same way.
+    horizon_lines: Optional[Dict[str, List[float]]] = None
+
+
+def _runs_to_csv_paths(entries: List) -> List:
+    """Map the shared `runs` key (glob dirs) onto this script's `csv_paths`.
+
+    `runs` is the format `tools/plot_common.py` uses, and it points at a run's
+    `glob/` DIRECTORY rather than at one CSV inside it. A directory is the more
+    useful unit — it holds `eval_success.csv`, `rollout_success.csv` and
+    `segment_pose.csv` — so one config can drive this script and the two
+    per-segment plot tools. Here each run dir simply resolves to its
+    `eval_success.csv`; nesting (a resume chain) is preserved.
+    """
+    out = []
+    for e in entries:
+        if isinstance(e, str):
+            out.append(str(Path(e) / "eval_success.csv"))
+        elif isinstance(e, list):
+            out.append([str(Path(x) / "eval_success.csv") for x in e])
+        else:
+            raise ValueError(
+                f"`runs` entries must be a run-dir string or a list of them "
+                f"(a resume chain), got {type(e).__name__}")
+    return out
+
+
+def _parse_horizon_lines(raw) -> Optional[Dict[str, List[float]]]:
+    """`horizon_lines` from the config: {x_axis: [x, ...]}, validated here so a
+    typo fails at load rather than silently drawing nothing."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("`horizon_lines` must be a mapping of x_axis -> list "
+                         "of x positions, e.g. {\"total_steps\": [655360]}")
+    out = {}
+    for axis, values in raw.items():
+        if axis not in ("total_steps", "total_resets"):
+            raise ValueError(f"`horizon_lines` key {axis!r}: expected "
+                             f"'total_steps' or 'total_resets'")
+        if isinstance(values, (int, float)):
+            values = [values]
+        out[axis] = [float(v) for v in values]
+    return out
+
+
+def draw_horizon_lines(ax, cfg: "PlotConfig", x_axis: str) -> None:
+    """Rules for this panel's axis; nothing drawn when the config set none."""
+    for x in (cfg.horizon_lines or {}).get(x_axis, []):
+        ax.axvline(x, **HORIZON_RULE)
+
+
+def load_config(path: str) -> PlotConfig:
+    raw = json.loads(Path(path).read_text())
+    groups = []
+    for g in raw.get("groups", []):
+        # `runs` (glob dirs, shared with the per-segment tools) or the original
+        # `csv_paths` (direct eval_success.csv paths). Both accepted so a single
+        # config file drives every plot tool; `runs` is the preferred spelling.
+        if "runs" in g and "csv_paths" in g:
+            raise ValueError(
+                f"group '{g.get('label')}' sets both `runs` and `csv_paths`; "
+                f"use one (prefer `runs`, which points at the glob dir)")
+        if "runs" in g:
+            csv_paths = _runs_to_csv_paths(g["runs"])
+        else:
+            csv_paths = g["csv_paths"]
+        groups.append(GroupSpec(
+            label=g["label"],
+            csv_paths=csv_paths,
+            color=g.get("color"),
+            cronos_group_filter=g.get("cronos_group_filter"),
+            task_filter=g.get("task_filter"),
+        ))
+    cfg = PlotConfig(
+        out_dir=raw.get("out_dir") or "",
+        name=raw.get("name", "v04"),
+        groups=groups,
+        end_steps=raw.get("end_steps"),
+        end_resets=raw.get("end_resets"),
+        smoothing_window=int(raw.get("smoothing_window", 5)),
+        n_interp_points=int(raw.get("n_interp_points", 500)),
+        figsize=tuple(raw.get("figsize", CURVE_FIGSIZE)),
+        eval_kinds=tuple(raw.get("eval_kinds", ("in_domain", "out_of_domain"))),
+        x_axes=tuple(raw.get("x_axes", ("total_steps", "total_resets"))),
+        horizon_lines=_parse_horizon_lines(raw.get("horizon_lines")),
+    )
+    if not cfg.groups:
+        raise ValueError("config has no groups")
+    for g in cfg.groups:
+        if not g.csv_paths:
+            raise ValueError(f"group '{g.label}' has no csv_paths")
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Data layer
+# ---------------------------------------------------------------------------
+
+
+def load_run_csv(csv_path: str,
+                 cronos_group_filter: Optional[List[str]] = None,
+                 task_filter: Optional[List[str]] = None) -> pd.DataFrame:
+    """Load one eval_success.csv and apply optional filters.
+
+    Returns a long-form DataFrame with the original columns.
+
+    Every "there is nothing here" case — absent, zero bytes, header-only, or an
+    older file without a column — raises `NoData`, which `aggregate_all` catches
+    per group: one such run is named on stderr and skipped rather than costing
+    every other group its figure. Only a config that yields NO group at all is
+    fatal, because that is a configuration error rather than a missing file.
+    """
+    df = read_table(csv_path, what="eval_success.csv",
+                    required_cols=("episode", "total_steps", "total_resets",
+                                   "eval_kind", "group", "task", "success",
+                                   "grasp"))
+    if cronos_group_filter:
+        df = df[df["group"].isin(cronos_group_filter)].copy()
+    if task_filter:
+        df = df[df["task"].isin(task_filter)].copy()
+    # This file's own eval cadence on each x axis, carried per row so a resume
+    # chain whose legs eval at different intervals (T320 every 4 episodes,
+    # T2560 every episode) judges holes against the right one.
+    for x_axis in ("total_steps", "total_resets"):
+        step = sample_step(df[x_axis].to_numpy(dtype=float)) if len(df) else None
+        df[f"_step_{x_axis}"] = np.nan if step is None else step
+    return df
+
+
+def load_seed(seed_entry, cronos_group_filter: Optional[List[str]] = None,
+              task_filter: Optional[List[str]] = None) -> pd.DataFrame:
+    """Load one seed's data. `seed_entry` is either a str (single CSV) or a
+    list of str (resume chain: parent CSV first, downstream CSV last).
+
+    For a chain, the CSVs are loaded in order and concatenated. Duplicate
+    `(total_steps, eval_kind, group, task)` rows keep the LATER (downstream)
+    value — that's the right behavior when a child run re-evals at the resume
+    point and you'd rather trust the child's measurement.
+
+    Returns one long-form DataFrame spanning the whole chain.
+    """
+    if isinstance(seed_entry, str):
+        return load_run_csv(seed_entry, cronos_group_filter, task_filter)
+    if not isinstance(seed_entry, list) or not all(isinstance(p, str) for p in seed_entry):
+        raise TypeError(f"csv_paths entry must be a str or list[str], got {type(seed_entry).__name__}")
+    if not seed_entry:
+        raise ValueError("csv_paths chain entry is empty")
+    dfs = [load_run_csv(p, cronos_group_filter, task_filter) for p in seed_entry]
+    chained = pd.concat(dfs, ignore_index=True)
+    # Dedupe by the eval-round key; keep the LATER segment's row when both
+    # report the same (total_steps, eval_kind, group, task) — the child run's
+    # measurement is the source of truth at the resume boundary.
+    dedup_keys = ["total_steps", "eval_kind", "group", "task"]
+    chained = (chained
+               .sort_values("total_steps", kind="mergesort")
+               .drop_duplicates(subset=dedup_keys, keep="last")
+               .reset_index(drop=True))
+    return chained
+
+
+def per_run_series(df: pd.DataFrame, eval_kind: str, x_axis: str,
+                   metric: str = "success") -> pd.DataFrame:
+    """Reduce one run's CSV to (x_axis -> mean_over_tasks_and_groups).
+
+    Each eval round writes one row per (group, task) pair. We:
+      1. Filter to eval_kind.
+      2. Group by the eval-round key (episode, x_axis) and take the mean of
+         `metric` over (group, task) — an "average across tasks" line.
+      3. Return a single-column frame indexed by `x_axis` with `metric` values.
+
+    If the run never logged this `eval_kind`, returns an empty frame.
+    """
+    sub = df[df["eval_kind"] == eval_kind]
+    step_col = f"_step_{x_axis}"
+    if sub.empty:
+        return pd.DataFrame(columns=[x_axis, metric, step_col])
+    if step_col not in sub.columns:
+        sub = sub.assign(**{step_col: np.nan})
+    means = (sub
+             .groupby(["episode", x_axis], as_index=False)
+             .agg(**{metric: (metric, "mean"), step_col: (step_col, "first")})
+             .sort_values(x_axis))
+    return means[[x_axis, metric, step_col]].reset_index(drop=True)
+
+
+def per_run_series_per_task(df: pd.DataFrame, eval_kind: str, x_axis: str,
+                            metric: str = "success") -> pd.DataFrame:
+    """Same as per_run_series but keep tasks as columns (pivot wide).
+
+    Columns: x_axis + one column per (group, task) combination.
+    """
+    sub = df[df["eval_kind"] == eval_kind]
+    if sub.empty:
+        return pd.DataFrame(columns=[x_axis])
+    sub = sub.assign(task_label=sub["group"] + " :: " + sub["task"])
+    pv = (sub
+          .pivot_table(index=[x_axis], columns="task_label",
+                       values=metric, aggfunc="mean")
+          .reset_index()
+          .sort_values(x_axis))
+    return pv
+
+
+def interpolate_runs_to_grid(series_list: List[pd.DataFrame], x_axis: str,
+                              metric: str, n_points: int,
+                              x_clip: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Interpolate each run's `metric` onto a common x grid.
+
+    series_list: list of single-metric frames from `per_run_series`.
+    Returns (x_grid, stacked) where stacked has shape (N_runs, n_points).
+    Runs that are entirely empty are dropped.
+
+    A grid point a run did not measure is NaN in that run's row, never a
+    value bridged from its neighbours: before its first eval when its
+    beginning is missing (only a run that starts at its first eval round is
+    anchored at (0, 0)), and inside any hole `gap_mask` finds — judged against
+    each leg's own eval interval. Callers average with nan-aware reductions, so such a point is
+    the mean of the runs that have it, and NaN (a break in the line) when none
+    do.
+    """
+    usable = [s for s in series_list if not s.empty]
+    if not usable:
+        return np.empty((0,)), np.empty((0, n_points))
+    prepped = []
+    for s in usable:
+        x = s[x_axis].to_numpy(dtype=float)
+        y = s[metric].to_numpy(dtype=float)
+        step_col = f"_step_{x_axis}"
+        step = (s[step_col].to_numpy(dtype=float) if step_col in s.columns
+                else np.full(x.size, np.nan))
+        mask = np.isfinite(x) & np.isfinite(y)
+        x, y, step = x[mask], y[mask], step[mask]
+        if x.size == 0:
+            continue
+        if x[0] > 0.0 and starts_at_origin(x, step):
+            x = np.concatenate(([0.0], x))
+            y = np.concatenate(([0.0], y))
+            step = np.concatenate((step[:1], step))
+        prepped.append((x, y, step))
+    if not prepped:
+        return np.empty((0,)), np.empty((0, n_points))
+    # Common grid: 0 to min of right edges.
+    x_min = 0.0
+    x_max = min(x.max() for x, _, _ in prepped)
+    if x_clip is not None:
+        x_max = min(x_max, float(x_clip))
+    grid = np.linspace(x_min, x_max, n_points)
+    rows = []
+    for x, y, step in prepped:
+        row = np.interp(grid, x, y)
+        row[(grid < x[0]) | (grid > x[-1])] = np.nan
+        if x.size > 1:
+            # Grid points strictly inside a hole between two evals.
+            holes = gap_mask(x, step)
+            i = np.clip(np.searchsorted(x, grid, side="right"), 1, x.size - 1)
+            inside = (grid > x[i - 1]) & (grid < x[i])
+            row[holes[i - 1] & inside] = np.nan
+        rows.append(row)
+    return grid, np.stack(rows, axis=0)
+
+
+def moving_average(y: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return y
+    y = np.asarray(y, dtype=float)
+    out = np.full_like(y, np.nan, dtype=float)
+    half = window // 2
+    for i in range(len(y)):
+        lo = max(0, i - half)
+        hi = min(len(y), i + half + 1)
+        if not np.isfinite(y[i]):
+            continue            # a hole stays a hole; neighbours do not fill it
+        seg = y[lo:hi]
+        seg = seg[np.isfinite(seg)]
+        out[i] = seg.mean()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Aggregation across groups → single long-form table
+# ---------------------------------------------------------------------------
+
+
+# Columns `aggregate_all` produces. Named so the empty case can still carry
+# them: `pd.DataFrame([])` has no columns at all, so every downstream
+# `long_df["eval_kind"]` raised `KeyError: 'eval_kind'` from deep inside pandas
+# instead of saying that nothing was aggregated.
+_AGG_COLUMNS = ("group", "eval_kind", "x_axis", "x_value",
+                "metric", "mean", "std", "n_runs")
+_SUMMARY_COLUMNS = ("group", "eval_kind", "x_axis", "metric",
+                    "final_x", "final_mean", "final_std", "n_runs")
+
+
+def aggregate_all(cfg: PlotConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the long-form `aggregated` table + the `summary` table.
+
+    `aggregated` columns: group, eval_kind, x_axis, x_value, metric, mean, std, n_runs
+    `summary` columns:    group, eval_kind, x_axis, metric, final_x, final_mean,
+                          final_std, n_runs
+
+    Both frames come back with those columns even when no group yielded a
+    single row, so a caller can test `.empty` instead of tripping over a
+    missing column.
+    """
+    long_rows = []
+    summary_rows = []
+    metrics = ("success", "grasp")
+    for spec in cfg.groups:
+        # Load seeds (each may be a single CSV or a resume chain).
+        try:
+            dfs = [load_seed(entry, spec.cronos_group_filter, spec.task_filter)
+                   for entry in spec.csv_paths]
+        except (NoData, FileNotFoundError, TypeError, ValueError) as e:
+            print(f"  [WARN] {spec.label}: {e}")
+            continue
+        if all(d.empty for d in dfs):
+            print(f"  [WARN] {spec.label}: every CSV loaded but held no rows "
+                  f"after cronos_group_filter / task_filter")
+            continue
+        rows_before = len(long_rows)
+        # Apply BOTH end_steps and end_resets crops at the row level so every
+        # x_axis view sees the same eval-point subset. Without this, a run
+        # cropped to end_steps on the step-axis would still contribute its
+        # post-crop rows to the reset-axis view (its post-crop total_steps
+        # rows still have valid total_resets), producing curves that no longer
+        # look like re-scaled versions of each other.
+        def _row_crop(d):
+            if cfg.end_steps is not None:
+                d = d[d["total_steps"] <= float(cfg.end_steps)]
+            if cfg.end_resets is not None:
+                d = d[d["total_resets"] <= float(cfg.end_resets)]
+            return d
+        dfs = [_row_crop(d) for d in dfs]
+        for eval_kind in cfg.eval_kinds:
+            for x_axis in cfg.x_axes:
+                x_clip = (cfg.end_steps if x_axis == "total_steps"
+                          else cfg.end_resets if x_axis == "total_resets"
+                          else None)
+                for metric in metrics:
+                    series_list = [per_run_series(d, eval_kind, x_axis, metric) for d in dfs]
+                    grid, stacked = interpolate_runs_to_grid(
+                        series_list, x_axis, metric,
+                        n_points=cfg.n_interp_points, x_clip=x_clip)
+                    if stacked.size == 0:
+                        continue
+                    # NaN = that run did not measure this x; the mean is over
+                    # the runs that did, and NaN where none did.
+                    have = np.isfinite(stacked)
+                    counts = have.sum(axis=0)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        total = np.where(have, stacked, 0.0).sum(axis=0)
+                        mean = np.where(counts > 0, total / np.maximum(counts, 1), np.nan)
+                        sq = np.where(have, (stacked - mean) ** 2, 0.0).sum(axis=0)
+                        std = np.where(counts > 0, np.sqrt(sq / np.maximum(counts, 1)), np.nan)
+                    for x_v, m_v, s_v, c in zip(grid, mean, std, counts):
+                        long_rows.append({
+                            "group": spec.label, "eval_kind": eval_kind,
+                            "x_axis": x_axis, "x_value": float(x_v),
+                            "metric": metric, "mean": float(m_v),
+                            "std": float(s_v), "n_runs": int(c),
+                        })
+                    last = np.flatnonzero(counts > 0)
+                    if last.size == 0:
+                        continue
+                    last = last[-1]
+                    summary_rows.append({
+                        "group": spec.label, "eval_kind": eval_kind,
+                        "x_axis": x_axis, "metric": metric,
+                        "final_x": float(grid[last]),
+                        "final_mean": float(mean[last]),
+                        "final_std": float(std[last]),
+                        "n_runs": int(counts[last]),
+                    })
+        if len(long_rows) == rows_before:
+            # The CSVs loaded but nothing survived. Report the group's own
+            # contents so the cause is visible without opening the files: it is
+            # almost always an `eval_kind` that is not in `cfg.eval_kinds`, or a
+            # filter / crop that removed every row.
+            kinds = sorted({k for d in dfs for k in d["eval_kind"].unique()})
+            print(f"  [WARN] {spec.label}: loaded {sum(len(d) for d in dfs)} rows "
+                  f"but produced no curve. eval_kind present: {kinds or '(none)'}; "
+                  f"config wants: {list(cfg.eval_kinds)}. Also check "
+                  f"cronos_group_filter / task_filter / end_steps / end_resets.")
+    return (pd.DataFrame(long_rows, columns=list(_AGG_COLUMNS)),
+            pd.DataFrame(summary_rows, columns=list(_SUMMARY_COLUMNS)))
+
+
+# ---------------------------------------------------------------------------
+# Plot layer
+# ---------------------------------------------------------------------------
+
+
+def _group_color(cfg: PlotConfig, index: int, palette) -> object:
+    """A group's colour: its own `color` if the config set one, else the shared
+    palette `plot_rollout_success.py` also draws from."""
+    return cfg.groups[index].color or palette[index]
+
+
+def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
+                     cfg: PlotConfig, out_path: Path) -> bool:
+    """One PNG per (eval_kind × x_axis). Overlays mean ± std envelopes for each
+    config group on the same axes (one line per group)."""
+    sub = long_df[(long_df["eval_kind"] == eval_kind) &
+                  (long_df["x_axis"] == x_axis) &
+                  (long_df["metric"] == "success")]
+    if sub.empty:
+        # Returning False rather than writing an empty axes: a blank panel reads
+        # as "every group scored zero", and `main` used to announce it as
+        # written even though no file was ever saved.
+        warn(f"{eval_kind} / {x_axis}: no group has success rows — no figure")
+        return False
+    fig, ax = new_curve_figure(cfg.figsize)
+    palette = default_colors(len(cfg.groups))
+    x_max = 0.0
+    for i, spec in enumerate(cfg.groups):
+        g_sub = sub[sub["group"] == spec.label].sort_values("x_value")
+        if g_sub.empty:
+            continue
+        x = g_sub["x_value"].to_numpy()
+        m = moving_average(g_sub["mean"].to_numpy(), cfg.smoothing_window)
+        s = moving_average(g_sub["std"].to_numpy(), cfg.smoothing_window)
+        n = int(g_sub["n_runs"].max())
+        x, m, s = prepend_origin(x, m, s)
+        plot_group_curve(ax, x, m, s, color=_group_color(cfg, i, palette),
+                         label=spec.label, n_series=n)
+        x_max = max(x_max, float(x.max()) if len(x) else 0.0)
+    draw_horizon_lines(ax, cfg, x_axis)
+    style_curve_axes(ax, x_axis=x_axis, y_label="success", x_max=x_max)
+    # No title / suptitle: eval_kind and x_axis are already in the filename, and
+    # the smoothing window and band meaning are settings rather than findings.
+    save_curve_figure(fig, out_path)
+    return True
+
+
+def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
+                    cfg: PlotConfig, out_path: Path) -> bool:
+    """Success vs grasp overlaid. A persistent gap (grasp high, success low)
+    is the placement-collapse signature."""
+    sub = long_df[(long_df["eval_kind"] == eval_kind) &
+                  (long_df["x_axis"] == "total_steps")]
+    if sub.empty:
+        warn(f"gap / {eval_kind}: no group has rows on total_steps — no figure")
+        return False
+    fig, ax = new_curve_figure(cfg.figsize)
+    palette = default_colors(len(cfg.groups))
+    x_max = 0.0
+    for i, spec in enumerate(cfg.groups):
+        color = _group_color(cfg, i, palette)
+        for metric, ls in (("success", "-"), ("grasp", ":")):
+            g_sub = sub[(sub["group"] == spec.label) & (sub["metric"] == metric)] \
+                .sort_values("x_value")
+            if g_sub.empty:
+                continue
+            x = g_sub["x_value"].to_numpy()
+            m = moving_average(g_sub["mean"].to_numpy(), cfg.smoothing_window)
+            x, m = prepend_origin(x, m)
+            # No band here: two overlaid metrics per group already crowd the
+            # panel, and the gap between the lines is what this figure is for.
+            ax.plot(x, m, label=f"{spec.label} ({metric})", color=color, ls=ls,
+                    linewidth=2.0)
+            x_max = max(x_max, float(x.max()) if len(x) else 0.0)
+    draw_horizon_lines(ax, cfg, "total_steps")
+    style_curve_axes(ax, x_axis="total_steps", y_label="success / grasp",
+                     x_max=x_max)
+    save_curve_figure(fig, out_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--config", required=True, help="Path to plot config JSON")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    out_dir = resolve_out_dir(cfg.out_dir, args.config)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[plot] config={args.config}")
+    print(f"[plot] out_dir={out_dir}")
+    for spec in cfg.groups:
+        # Each entry in csv_paths may be a string (1 CSV) or list (chain).
+        seed_status = []
+        for entry in spec.csv_paths:
+            if isinstance(entry, str):
+                seed_status.append("1" if Path(entry).is_file() else "0")
+            else:
+                ok = sum(Path(p).is_file() for p in entry)
+                seed_status.append(f"{ok}/{len(entry)}")
+        chain_note = "(chain)" if any(isinstance(e, list) for e in spec.csv_paths) else ""
+        print(f"  - {spec.label:50s}  seeds={len(spec.csv_paths)}  segs/seed=[{','.join(seed_status)}]  {chain_note}")
+
+    print("[plot] aggregating...")
+    long_df, summary_df = aggregate_all(cfg)
+    if long_df.empty:
+        # Stop here rather than at the first `long_df["eval_kind"]` in the plot
+        # layer: every group already printed a [WARN] naming its own reason, and
+        # continuing would only bury those behind a pandas KeyError.
+        raise SystemExit(
+            "[plot] nothing was aggregated — no figure can be drawn.\n"
+            "  The per-group [WARN] lines above give the reason. The usual ones:\n"
+            "    * a `runs`/`csv_paths` path does not exist (the segs/seed line\n"
+            "      above shows 0 for those), or points at a run dir instead of\n"
+            "      its glob/ subdirectory\n"
+            "    * the run is eval-only / too early and eval_success.csv has no\n"
+            "      rows yet\n"
+            "    * `eval_kinds` in the config does not match the eval_kind values\n"
+            "      in the CSV\n"
+            "    * cronos_group_filter / task_filter matches nothing\n"
+            "    * end_steps / end_resets crop away every eval point")
+    # `<name>_` prefixed like every PNG below: without it two configs sharing an
+    # out_dir silently overwrite each other's aggregates.
+    agg_csv = out_dir / f"{cfg.name}_aggregated.csv"
+    sum_csv = out_dir / f"{cfg.name}_summary.csv"
+    long_df.to_csv(agg_csv, index=False)
+    summary_df.to_csv(sum_csv, index=False)
+    print(f"[plot] wrote {agg_csv.name} ({len(long_df)} rows)")
+    print(f"[plot] wrote {sum_csv.name} ({len(summary_df)} rows)")
+
+    # Pretty-print final values per group / eval_kind.
+    if not summary_df.empty:
+        print("\n[final values @ rightmost eval]")
+        view = (summary_df[summary_df["x_axis"] == "total_steps"]
+                .pivot_table(index=["group", "eval_kind"],
+                             columns="metric",
+                             values=["final_mean", "final_std", "n_runs"]))
+        with pd.option_context("display.width", 200, "display.precision", 3):
+            print(view)
+
+    print("\n[plot] plotting...")
+    for eval_kind in cfg.eval_kinds:
+        for x_axis in cfg.x_axes:
+            png = out_dir / f"{cfg.name}_{eval_kind}_{x_axis}.png"
+            if plot_main_panel(long_df, eval_kind, x_axis, cfg, png):
+                print(f"  wrote {png.name}")
+        gap_png = out_dir / f"{cfg.name}_gap_{eval_kind}.png"
+        if plot_gap_panel(long_df, eval_kind, cfg, gap_png):
+            print(f"  wrote {gap_png.name}")
+
+    print("[plot] done")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
