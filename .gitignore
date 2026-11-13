@@ -74,3 +74,10 @@ CRONOS/history/_venv/
 CRONOS/history/changelog_src/
 CRONOS/history/doc_tmp/
 reports/
+# Scratch renders / tables (doc/tmp), regenerated figures (the pre-V0.99 output
+# dir and the current one; see plotting/figures/README.md — figures are never
+# committed, only the tools that make them), and local config backups.
+CRONOS/doc/tmp/
+CRONOS/figures/
+CRONOS/plotting/figures/**/*.png
+CRONOS/scripts/_bak_*/
