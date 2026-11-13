@@ -28,6 +28,7 @@ from envs.scheduler import TaskScheduler
 from envs import rng_streams
 from oom_report import is_oom, write_oom_report
 import envs.bridge_multi  # Trigger environment registration
+import envs.stack_cube  # registers StackCubeBridge-v1
 from training.ppo import CronosPPO, aggregate_train_results
 from training.grpo import CronosGRPO
 from training.buffer import CronosReplayBuffer

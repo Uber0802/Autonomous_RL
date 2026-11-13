@@ -1,0 +1,35 @@
+# StackCubeBridge-v1: two cubes, one scene, one task.
+#
+# Needs ENV_ID=StackCubeBridge-v1 (scripts/train.sh) / --env-id StackCubeBridge-v1
+# (main.py). With that env, `obj` / `recep` are 1-based cube colours
+# (envs/stack_cube.py CUBE_NAMES):
+#   1 green  2 yellow  3 red  4 blue  5 orange  6 purple
+# The env holds len(obj) + len(recep) = 2 cubes.
+#
+# Task "put obj1 on recep1" is the internal task id ("put green on yellow");
+# the instruction the VLA sees is "stack the green block on the yellow block"
+# (SimplerEnv StackGreenCubeOnYellowCube wording).
+#
+# Reward / success: the existing RewardShaper (grasp 0.1 + consecutive grasp
+# 0.1 + success-while-ever-grasped 1.0, potential diff). `success` = green on
+# yellow with contact (SimplerEnv definition), may still be held.
+#
+# Initial poses: training / in-domain eval on the 6x6 grid ±(0.075, 0.075) m;
+# the out-of-domain eval (obj_set rand_ood) on the same grid stretched to
+# ±(0.11, 0.15) m — no xy point shared with in-domain.
+#
+# Reset modes: normal only (EER on or off). HSR and LSR are rejected at startup.
+
+cronos_version: V0.99
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "stack_green_on_yellow"
+    num_envs: 64
+    obj: [1]                 # green cube  (picked)
+    recep: [2]               # yellow cube (stacked on)
+    task_sequence:
+      - "put obj1 on recep1"
+    eval_tasks:
+      - "put obj1 on recep1"

@@ -4,6 +4,7 @@ import torch
 from .reset import ResetStrategy
 from .reward import RewardShaper
 from .unsuitable import build_workspace_aabb
+from . import stack_cube
 
 class CronosWrapper:
     """Unified environment wrapper for CRONOS, integrating decoupled modules."""
@@ -32,6 +33,8 @@ class CronosWrapper:
         if args.env_id == "PickPlaceNxM-v1":
             env_config["N"] = getattr(args, "env_n", 2)
             env_config["M"] = getattr(args, "env_m", 1)
+        elif args.env_id == stack_cube.ENV_ID:
+            env_config.update(stack_cube.gym_kwargs(args))
         # pass named scene spec to env constructor
         scene_name = getattr(args, "scene", "")
         if scene_name:
@@ -176,6 +179,9 @@ class CronosWrapper:
                 options[f"plate{i+1}_index"] = t
             if self._per_env_overlay is not None:
                 options["select_overlay_ids"] = self._per_env_overlay
+        elif self.args.env_id == stack_cube.ENV_ID:
+            # seeding reset in __init__, before set_group_specs
+            options.update(stack_cube.seed_reset_options(self.args))
         else:
             # global scalars
             options["obj1_index"] = self.args.obj1_index

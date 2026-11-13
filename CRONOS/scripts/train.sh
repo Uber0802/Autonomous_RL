@@ -144,7 +144,10 @@ case $VLA in
   *) echo "Unknown vla: $VLA"; echo "Valid: openvla|spatialvla"; exit 1 ;;
 esac
 
-ENV_ARGS="--env-id PickPlaceNxM-v1 $VLA_ARGS"
+# ENV_ID overrides the env (default unchanged). StackCubeBridge-v1 reads the
+# YAML group's obj / recep as cube colours (envs/stack_cube.py).
+ENV_ID="${ENV_ID:-PickPlaceNxM-v1}"
+ENV_ARGS="--env-id $ENV_ID $VLA_ARGS"
 
 # --- Horizon tag ---
 case $MODE in
