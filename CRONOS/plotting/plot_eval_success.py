@@ -122,6 +122,12 @@ class PlotConfig:
     sr_ylim: Dict[str, object] = field(default_factory=dict)
     # Plot-box width:height, e.g. "4:3" (default), "16:9", or a number (= w/h).
     aspect_ratio: Optional[object] = None
+    # Optional caption on every figure of this config (none by default):
+    #   "caption": "OpenVLA"   or
+    #   "caption": {"text": "OpenVLA", "fontsize": 40, "position": "top"}
+    # position "top" (above the box, clear of any legend) or "bottom" (under
+    # the x-axis title).
+    caption: Optional[Dict[str, object]] = None
 
 
 def _runs_to_csv_paths(entries: List) -> List:
@@ -266,6 +272,50 @@ def _check_style(raw: dict) -> None:
             ends_only(vv, f"{k}.{kk}")
 
 
+def _parse_caption(raw) -> Optional[Dict[str, object]]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = {"text": raw}
+    if not isinstance(raw, dict) or not raw.get("text"):
+        raise ValueError("`caption` must be a string or {\"text\": ..., "
+                         "\"fontsize\": ..., \"position\": \"top\"|\"bottom\"}")
+    bad = set(raw) - {"text", "fontsize", "position"}
+    if bad:
+        raise ValueError(f"`caption` has unknown keys {sorted(bad)}")
+    pos = raw.get("position", "top")
+    if pos not in ("top", "bottom"):
+        raise ValueError(f"`caption.position` {pos!r}: expected top or bottom")
+    return {"text": str(raw["text"]), "fontsize": raw.get("fontsize"),
+            "position": pos}
+
+
+def draw_caption(fig, ax, cfg: "PlotConfig") -> None:
+    """The config's caption, centred on the plot box, placed outside
+    everything already drawn on that side (tick labels, axis title, a legend
+    parked above the box) so it never overlaps them. `save_curve_figure`
+    saves with bbox_inches="tight", which grows the image to include it."""
+    cap = cfg.caption
+    if not cap:
+        return
+    # Settle the layout first (save_curve_figure re-runs the same one), so
+    # the box does not move after the caption is placed against it.
+    fig.tight_layout()
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    inv = fig.transFigure.inverted()
+    (x0, y0), (x1, y1) = inv.transform(ax.get_tightbbox(renderer).get_points())
+    box = ax.get_position()
+    x = 0.5 * (box.x0 + box.x1)
+    gap = 6 / 72 / fig.get_figheight()          # 6 pt between it and the rest
+    if cap["position"] == "top":
+        fig.text(x, y1 + gap, cap["text"], ha="center", va="bottom",
+                 fontsize=cap["fontsize"])
+    else:
+        fig.text(x, y0 - gap, cap["text"], ha="center", va="top",
+                 fontsize=cap["fontsize"])
+
+
 def _figsize(raw: dict) -> Tuple[float, float]:
     """`figsize` if the config set one; otherwise the default height with the
     width following `aspect_ratio`. A fixed 8x6 figure cannot widen, so a
@@ -320,6 +370,7 @@ def load_config(path: str) -> PlotConfig:
         axis=raw.get("axis") or {},
         sr_ylim=raw.get("sr_ylim") or {},
         aspect_ratio=raw.get("aspect_ratio"),
+        caption=_parse_caption(raw.get("caption")),
     )
     parse_aspect(cfg.aspect_ratio)
     _check_style(raw)
@@ -727,6 +778,7 @@ def plot_main_panel(long_df: pd.DataFrame, eval_kind: str, x_axis: str,
     y_shown = (lo + pad, hi - pad)
     # No title / suptitle: eval_kind and x_axis are already in the filename, and
     # the smoothing window and band meaning are settings rather than findings.
+    draw_caption(fig, ax, cfg)
     save_curve_figure(fig, out_path)
     return y_shown
 
@@ -764,6 +816,7 @@ def plot_gap_panel(long_df: pd.DataFrame, eval_kind: str,
     style_curve_axes(ax, x_axis="total_steps", y_label="success / grasp rate",
                      legend_kw=legend_kw, legend_reverse=legend_reverse,
                      x_max=x_max, **axis_options(cfg))
+    draw_caption(fig, ax, cfg)
     save_curve_figure(fig, out_path)
     return True
 

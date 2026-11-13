@@ -45,7 +45,7 @@ import pandas as pd
 _PLOT_PY_TOP_KEYS = {
     "smoothing_window", "n_interp_points", "end_steps", "end_resets",
     "figsize", "eval_kinds", "x_axes", "horizon_lines", "legend",
-    "axis", "sr_ylim", "aspect_ratio",
+    "axis", "sr_ylim", "aspect_ratio", "caption",
 }
 _PLOT_PY_GROUP_KEYS = {"color", "cronos_group_filter", "task_filter"}
 
@@ -64,7 +64,7 @@ TOOL_OPTION_KEYS = {
     "final_eval_runs",
     # plot_rollout_success.py (`metric` is also plot_sequence_eval.py's)
     "direction", "by", "metric", "smooth", "per_group", "reset_split",
-    "rollout_style", "rollout_figsize", "rollout_ylim",
+    "rollout_style", "rollout_figsize", "rollout_ylim", "rollout_axis",
     # plot_sequence_eval.py
     "seq_kind",
 }

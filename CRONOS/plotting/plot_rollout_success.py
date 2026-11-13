@@ -525,9 +525,33 @@ def reset_split_plan(curve: GroupCurve):
 
 ROLLOUT_STYLES = ("plain", "fill", "gradient")
 ROLLOUT_FIGSIZE = (8.0, 2.8)       # (4.5, 2.8) for a half-width wrapfigure
-# Same (default sans) family as plot_eval_success.py, so the two tools' axis
-# labels match; sizes come from the config's `axis` block.
-ROLLOUT_RC = {"font.size": 10}
+# fig/targe.png: DejaVu Serif (matplotlib's bundled serif). Set only inside
+# this tool's figures (rc_context), never globally — the other plot tools keep
+# their own face. Math text ($T=2560$) stays matplotlib's DejaVu Sans.
+ROLLOUT_RC = {"font.size": 10, "font.family": "serif"}
+# This tool's own capitalised axis titles (fig/targe.png); plot_common's
+# X_LABEL / METRIC_AXIS_LABEL stay as the other tools use them.
+ROLLOUT_X_LABEL = "Environment steps (M)"
+GRADIENT_CMAP = "coolwarm"          # blue right after a reset -> red before the next
+# Every size below (type, line widths, rules, markers) is stated for a figure
+# ROLLOUT_REF_WIDTH inches wide and scaled with the actual width, so the runs'
+# figures read alike whatever `rollout_figsize` each config picked — and the
+# config's `axis` / `rollout_axis` sizes mean "at the reference width".
+ROLLOUT_REF_WIDTH = 16.0
+LW_CURVE = 3.2        # the rollout curve (plain / gradient pieces, main figure)
+LW_SHORT = 2.6        # the grey pre-switch stretch
+LW_RESET = 1.0        # dotted reset rule
+LW_SWITCH = 2.0       # solid horizon-switch rule
+MS_RESET = 7          # reset marker
+# Type sizes at the reference width. One set for every run's figure, so the
+# runs match; a config's `rollout_axis` overrides it. (Not the config's
+# `axis`: that sizes its eval figures, and configs differ there.)
+ROLLOUT_LABEL_PT = 24
+ROLLOUT_TICK_PT = 18
+
+
+def _scale(fig) -> float:
+    return fig.get_figwidth() / ROLLOUT_REF_WIDTH
 BLUE, GRAY, RED = "#2b6cb0", "gray", "#e53e3e"
 X_SCALE = 1e6                      # plot in millions of steps
 
@@ -536,9 +560,9 @@ def _finish_rollout_axes(ax, x_max: float, y_range, metric: str,
                          axis_style=None):
     """Axes limits / labels / spines, and the y top the markers hang from.
 
-    Labels are `plot_eval_success.py`'s — the same X_LABEL wording, and the
-    config's `axis` sizes (`label_fontsize` / `tick_fontsize`, falling back to
-    AXIS_LABEL_PT / TICK_LABEL_PT) — so the two tools' figures read alike.
+    Labels are this tool's own (ROLLOUT_X_LABEL, "Rollout <metric label>"). Sizes: `axis_style` =
+    {"label_fontsize", "tick_fontsize"} from `rollout_axis`, else
+    ROLLOUT_LABEL_PT / ROLLOUT_TICK_PT; both at ROLLOUT_REF_WIDTH.
 
     `y_range` = (lower, upper), either end None for fitted: the upper bound
     is the highest drawn value plus 30% headroom, rounded up to 0.05.
@@ -552,12 +576,14 @@ def _finish_rollout_axes(ax, x_max: float, y_range, metric: str,
     ax.set_xlim(0, x_max)
     ax.set_ylim(lower, top)
     a = axis_style or {}
-    label_pt = a.get("label_fontsize") or AXIS_LABEL_PT
-    tick_pt = a.get("tick_fontsize") or TICK_LABEL_PT
-    ax.set_xlabel(X_LABEL["total_steps"], fontsize=label_pt)
-    ax.set_ylabel(metric_axis_label(metric), fontsize=label_pt)
+    k = _scale(ax.figure)
+    label_pt = (a.get("label_fontsize") or ROLLOUT_LABEL_PT) * k
+    tick_pt = (a.get("tick_fontsize") or ROLLOUT_TICK_PT) * k
+    ax.set_xlabel(ROLLOUT_X_LABEL, fontsize=label_pt)
+    ax.set_ylabel(f"Rollout {metric_axis_label(metric)}", fontsize=label_pt)
     ax.tick_params(labelsize=tick_pt)
-    ax._rollout_tick_pt = tick_pt          # for the regime labels above the box
+    ax._rollout_tick_pt = tick_pt          # for the T / Reset labels
+    ax._rollout_label_pt = label_pt        # for the colorbar title
     ax.spines["top"].set_visible(False)
     return lower, top
 
@@ -579,7 +605,8 @@ def render_main(curves, colors, out_path: Path, *, metric: str,
         x_max = 0.0
         for curve, color in zip(curves, colors):
             x = curve.x / X_SCALE
-            ax.plot(x, curve.mean, color=color, lw=1.2, label=curve.label)
+            ax.plot(x, curve.mean, color=color, lw=LW_CURVE * _scale(fig),
+                    label=curve.label)
             if curve.n_series > 1:
                 ax.fill_between(x, curve.mean - curve.std, curve.mean + curve.std,
                                 color=color, alpha=0.12, lw=0)
@@ -631,10 +658,16 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
     plan, declined = reset_split_plan(curve) if split else (None, "--no-reset-split")
     x = curve.x / X_SCALE
     y, sd = curve.mean, curve.std
-    band = curve.n_series > 1
+    # fig/targe.png: the gradient panel carries no ±std band — the colour is
+    # already the second channel and a band under it muddies both.
+    band = curve.n_series > 1 and style != "gradient"
     stretches = _stretches(curve, plan)
+    hor_f = (pd.Series(curve.horizons).ffill().bfill().to_numpy(dtype=float)
+             if curve.horizons is not None else np.full(x.size, np.nan))
+    c_max = None                      # colour range = the longest horizon drawn
     with plt.rc_context(ROLLOUT_RC):
         fig, ax = plt.subplots(figsize=tuple(figsize))
+        sc = _scale(fig)
         resets = []
         for k, (lo, hi, is_long) in enumerate(stretches):
             if not is_long and k + 1 < len(stretches) and stretches[k + 1][2] \
@@ -661,7 +694,7 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
             if xi.size < 2:
                 continue
             if not is_long:
-                ax.plot(xi, yi, color=GRAY, lw=1.2)
+                ax.plot(xi, yi, color=GRAY, lw=LW_SHORT * sc)
                 if band:
                     ax.fill_between(xi, yi - si, yi + si, color=GRAY,
                                     alpha=0.15, lw=0)
@@ -669,47 +702,69 @@ def render_group_panel(curve: GroupCurve, color, out_path: Path, *,
             if plan and k > 0 and stretches[k - 1][2]:
                 # A reset between two pieces of the same regime.
                 resets.append(0.5 * (x[lo - 1] + x[lo]))
-            if style == "gradient":
-                t = (xi - xi[0]) / max(xi[-1] - xi[0], 1e-12)
+            if style == "gradient" and plan:
+                # Colour = env steps since the reset: a piece spans one
+                # episode, so its fraction times the horizon.
+                h = hor_f[lo] if np.isfinite(hor_f[lo]) else 1.0
+                t = (xi - xi[0]) / max(xi[-1] - xi[0], 1e-12) * h
+                c_max = h if c_max is None else max(c_max, h)
                 pts = np.array([xi, yi]).T.reshape(-1, 1, 2)
                 lc = LineCollection(np.concatenate([pts[:-1], pts[1:]], 1),
-                                    cmap="coolwarm", lw=1.6)
+                                    cmap=GRADIENT_CMAP, lw=LW_CURVE * sc,
+                                    capstyle="round")
                 lc.set_array(t[:-1])
-                lc.set_clim(0, 1)
+                lc.set_clim(0, h)
                 ax.add_collection(lc)
             else:
-                ax.plot(xi, yi, color=BLUE, lw=1.2)
+                # Also a gradient-style run with no reset split (T80, T320):
+                # there is no "steps since reset" to colour, so one plain line.
+                ax.plot(xi, yi, color=BLUE, lw=LW_CURVE * sc)
                 if style == "fill" and np.isfinite(yi).any():
                     ax.fill_between(xi, np.nanmin(yi), yi, color=RED,
                                     alpha=0.15, lw=0)
-            if band and style != "gradient":
+            if curve.n_series > 1 and (style != "gradient" or not plan):
                 ax.fill_between(xi, yi - si, yi + si, color=BLUE, alpha=0.12, lw=0)
 
         x_max = float(np.nanmax(x)) if x.size else 0.0
         _, top = _finish_rollout_axes(ax, x_max, y_range, metric, axis_style)
 
         # Scene resets, then the curriculum switch and each regime's T.
+        tick_pt = getattr(ax, "_rollout_tick_pt", None)
         for r in resets:
-            ax.axvline(r, color="k", ls=":", lw=0.6)
-            ax.plot(r, top, marker="v", color="k", ms=4, clip_on=False)
+            ax.axvline(r, color="k", ls=":", lw=LW_RESET * sc)
+            ax.plot(r, top, marker="v", color="k", ms=MS_RESET * sc, clip_on=False)
+        if resets:
+            # Named once, over the first marker.
+            ax.annotate("Reset", xy=(resets[0], top), xytext=(0, 5),
+                        textcoords="offset points", ha="center", va="bottom",
+                        fontsize=tick_pt, annotation_clip=False)
         changes = horizon_changes(curve.x, curve.horizons)
         for xc, _, _ in changes:
-            ax.axvline(xc / X_SCALE, color="k", lw=1.2)
+            ax.axvline(xc / X_SCALE, color="k", lw=LW_SWITCH * sc)
         bounds = [0.0] + [xc / X_SCALE for xc, _, _ in changes] + [x_max]
-        hor = curve.horizons
-        if hor is not None:
-            hor = pd.Series(hor).ffill().bfill().to_numpy(dtype=float)
+        if curve.horizons is not None:
             for a, b in zip(bounds[:-1], bounds[1:]):
-                h = hor[np.searchsorted(x, 0.5 * (a + b)).clip(0, x.size - 1)]
+                h = hor_f[np.searchsorted(x, 0.5 * (a + b)).clip(0, x.size - 1)]
                 if np.isfinite(h):
-                    # Above the box, not inside it: a label box in the panel
-                    # cut through the reset rule (and any curve) behind it.
-                    # Raised past the reset markers that sit on the top edge.
-                    ax.annotate(f"$T={h:g}$", xy=(0.5 * (a + b), 1.0),
-                                xycoords=ax.get_xaxis_transform(),
-                                xytext=(0, 6), textcoords="offset points",
-                                ha="center", va="bottom",
-                                fontsize=getattr(ax, "_rollout_tick_pt", None))
+                    # Same row as the "Reset" label, just above the top edge:
+                    # clear of the curve and of the rules.
+                    ax.annotate(f"$T={h:g}$", xy=(0.5 * (a + b), top),
+                                xytext=(0, 5), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=tick_pt,
+                                annotation_clip=False)
+        if style == "gradient" and c_max:
+            sm = plt.cm.ScalarMappable(cmap=GRADIENT_CMAP,
+                                       norm=plt.Normalize(0, c_max))
+            # A narrow strip pinned beside the box, full height at any
+            # figsize, so the key takes little of the width.
+            cax = ax.inset_axes([1.012, 0.0, 0.012, 1.0])
+            cb = fig.colorbar(sm, cax=cax)
+            cb.locator = matplotlib.ticker.MaxNLocator(3)
+            cb.update_ticks()
+            # Same size as the axis titles it sits beside.
+            cb.set_label("Steps since reset",
+                         fontsize=getattr(ax, "_rollout_label_pt", None))
+            cb.ax.tick_params(labelsize=tick_pt)
 
         if plan:
             n_short = sum(not lg for _, _, lg in stretches)
@@ -855,10 +910,11 @@ def main():
         yl = cfg.option("rollout_ylim", None, None) or {}
         if set(yl) - {"lower", "upper"}:
             raise SystemExit("rollout_ylim: expected only lower / upper")
-        # `axis` is plot_eval_success.py's key; read here too so both tools'
-        # axis labels come out the same size.
+        # `rollout_axis` sizes this tool's labels; without it every run uses
+        # the tool's own ROLLOUT_*_PT, so all rollout figures match.
         import json
-        axis_style = json.loads(Path(args.config).read_text()).get("axis") or {}
+        raw_cfg = json.loads(Path(args.config).read_text())
+        axis_style = raw_cfg.get("rollout_axis") or {}
         out = Path(args.out) if args.out else cfg.out_dir / f"{cfg.name}_rollout_success.png"
         for path in render_groups(cfg, out, direction=args.direction,
                                   x_key="total_steps", smooth=args.smooth,
