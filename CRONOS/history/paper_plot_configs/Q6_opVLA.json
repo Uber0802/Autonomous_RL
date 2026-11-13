@@ -42,7 +42,7 @@
       }
     }
   },
-  "rollout_style": "plain",
+  "rollout_style": "gradient",
   "rollout_figsize": [
     8.0,
     5.0

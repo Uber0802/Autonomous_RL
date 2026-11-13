@@ -13,7 +13,7 @@
 # python plotting/plot_eval_success.py --config history/paper_plot_configs/Q3.json
 # python plotting/plot_eval_success.py --config history/paper_plot_configs/Q3_few.json
 
-# python plotting/plot_eval_success.py --config history/paper_plot_configs/Q4.json
+python plotting/plot_eval_success.py --config history/paper_plot_configs/Q4.json
 # python plotting/plot_eval_success.py --config history/paper_plot_configs/Q4_few.json
 # # python plotting/plot_rollout_success.py --config history/paper_plot_configs/Q4.json
 # # python plotting/plot_segment_positions.py --config history/paper_plot_configs/Q4.json --phase start
@@ -26,7 +26,7 @@
 # # python plotting/plot_rollout_success.py --config history/paper_plot_configs/Q6_opVLA.json
 # # python plotting/plot_segment_positions.py --config history/paper_plot_configs/Q6_opVLA.json --phase start
 # python plotting/plot_eval_success.py --config history/paper_plot_configs/Q6_SpVLA.json
-python plotting/plot_rollout_success.py --config history/paper_plot_configs/Q6_SpVLA.json
+# python plotting/plot_rollout_success.py --config history/paper_plot_configs/Q6_SpVLA.json
 # # python plotting/plot_segment_positions.py --config history/paper_plot_configs/Q6_SpVLA.json --phase start
 
 # python plotting/plot_sequence_eval.py --config history/paper_plot_configs/Q6_seq_opVLA.json
