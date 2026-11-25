@@ -1232,6 +1232,240 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
         )
 
+    # ------------------------------------------------------------------
+    # V0.5 eval start-scene perturbations (used by `eval_only.py --start-scene`).
+    #
+    # Both entry points re-pose actors AFTER a normal `reset()` and BEFORE the
+    # first rollout step of a sequence. They mirror `_initialize_episode`:
+    # robot parked at `safe_robot_pos` while objects settle, then snapped back
+    # to `initial_robot_pos`/`initial_qpos`, GPU state synced, world-frame
+    # bboxes recomputed for the currently selected task pair.
+    # ------------------------------------------------------------------
+    def _ids_from_names(self, names, db, all_ids, db_names):
+        """Per-env actor ids for `names[env]`, searched across the env's loaded
+        slots (same lookup as `set_current_task`). Returns LongTensor [b]."""
+        out = []
+        for env_idx in range(self.num_envs):
+            found = None
+            for slot_ids in all_ids:
+                cid = int(slot_ids[env_idx].item())
+                if cid < 0:
+                    continue
+                if names[env_idx] == db[db_names[cid]]["name"]:
+                    found = cid
+                    break
+            if found is None:
+                raise ValueError(f"{names[env_idx]} not loaded in env {env_idx}")
+            out.append(found)
+        return torch.tensor(out, dtype=torch.long, device=self.device)
+
+    def _actor_pos_by_ids(self, ids, db_names, objs):
+        p = torch.zeros((self.num_envs, 3), device=self.device)
+        for db_idx, name in enumerate(db_names):
+            mask = ids == db_idx
+            if mask.any():
+                p[mask] = objs[name].pose.p[mask]
+        return p
+
+    def _active_slot_velocity(self):
+        lin = torch.tensor(0.0, device=self.device)
+        ang = torch.tensor(0.0, device=self.device)
+        for slot_ids_list, db in [(self._all_carrot_ids, self.objs_carrot),
+                                   (self._all_plate_ids, self.objs_plate)]:
+            db_names = list(db.keys())
+            for slot_ids in slot_ids_list:
+                for env_i in range(self.num_envs):
+                    cid = int(slot_ids[env_i].item())
+                    if cid < 0:
+                        continue
+                    a = db[db_names[cid]]
+                    lin = lin + torch.linalg.norm(a.linear_velocity[env_i])
+                    ang = ang + torch.linalg.norm(a.angular_velocity[env_i])
+        return lin, ang
+
+    def _recompute_bbox_world(self):
+        """Recompute `carrot_bbox_world` / `plate_bbox_world` from the CURRENT
+        orientation of the currently selected task pair (tail of
+        `_initialize_episode`, but keyed on `select_*_ids`, not slot 0)."""
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])
+        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])
+        corner_signs = torch.tensor([
+            [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+        ], device=self.device)
+        carrot_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])
+        c_corners = (carrot_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        c_rot = torch.matmul(c_corners, rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle).transpose(1, 2))
+        self.carrot_bbox_world = c_rot.max(dim=1).values - c_rot.min(dim=1).values
+        plate_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_plate])
+        p_corners = (plate_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        p_rot = torch.matmul(p_corners, rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle).transpose(1, 2))
+        self.plate_bbox_world = p_rot.max(dim=1).values - p_rot.min(dim=1).values
+
+    def _finish_perturbation(self, settle_t, max_extra_settles=3):
+        """Settle, wait for rest, restore the robot, sync GPU, refresh bboxes/stats."""
+        self._settle(settle_t)
+        for _ in range(max_extra_settles):
+            lin, ang = self._active_slot_velocity()
+            if lin <= 1e-3 and ang <= 1e-2:
+                break
+            self._settle(6)
+        self.agent.robot.set_pose(self.initial_robot_pos)
+        self.agent.reset(init_qpos=self.initial_qpos)
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+        self._recompute_bbox_world()
+        self.reset_grasp_stats()
+
+    def _world_z_extent(self, ids, db_names, objs):
+        """Per-env world-frame z extent of the actors `ids` at their CURRENT
+        orientation (bbox corners rotated by the actor quaternion)."""
+        b = self.num_envs
+        corner_signs = torch.tensor([
+            [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+        ], device=self.device, dtype=torch.float32)
+        bbox = torch.stack([self.model_bbox_sizes[db_names[int(i)]] for i in ids])  # [b, 3]
+        q = torch.zeros((b, 4), device=self.device)
+        for db_idx, name in enumerate(db_names):
+            mask = ids == db_idx
+            if mask.any():
+                q[mask] = objs[name].pose.q[mask]
+        corners = (bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        rot = torch.matmul(corners, rotation_conversions.quaternion_to_matrix(q).transpose(1, 2))
+        return rot[:, :, 2].max(dim=1).values - rot[:, :, 2].min(dim=1).values  # [b]
+
+    def overlap_start(self, object_names, receptacle_names, dz=0.01, settle_t=5):
+        """Start-scene perturbation: drop `object_names[env]` onto
+        `receptacle_names[env]`. The object keeps its settled orientation and is
+        placed so that its bounding-box bottom sits `dz` above the receptacle's
+        bounding-box top (both at their current orientation), then the scene is
+        settled. Other actors are untouched."""
+        obj_ids = self._ids_from_names(object_names, self.model_db_carrot,
+                                       self._all_carrot_ids, self.carrot_names)
+        rec_ids = self._ids_from_names(receptacle_names, self.model_db_plate,
+                                       self._all_plate_ids, self.plate_names)
+        rec_p = self._actor_pos_by_ids(rec_ids, self.plate_names, self.objs_plate)
+        rec_h = self._world_z_extent(rec_ids, self.plate_names, self.objs_plate)
+        obj_h = self._world_z_extent(obj_ids, self.carrot_names, self.objs_carrot)
+        lift = rec_h / 2 + obj_h / 2 + dz  # [b]
+        target_p = rec_p.clone()
+        target_p[:, 2] = rec_p[:, 2] + lift
+
+        self.agent.robot.set_pose(self.safe_robot_pos)
+        for db_idx, name in enumerate(self.carrot_names):
+            mask = obj_ids == db_idx
+            if not mask.any():
+                continue
+            actor = self.objs_carrot[name]
+            p = actor.pose.p.clone()
+            q = actor.pose.q.clone()
+            p[mask] = target_p[mask]
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+        self._finish_perturbation(settle_t)
+
+    def _sample_chaos_poses(self, gen, half_edge, center, base_height, drop_height,
+                            layer_gap, height_jitter, tilt_max_deg):
+        """One full-batch draw of chaos spawn poses. Returns (xyz [b,S,3], quat [b,S,4])
+        on device; slots are carrots first, then plates."""
+        b = self.num_envs
+        N, M = self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        S = N + M
+        u = torch.rand((b, S, 2), generator=gen)
+        xy = torch.tensor(center).reshape(1, 1, 2) + (2 * u - 1) * torch.tensor(half_edge).reshape(1, 1, 2)
+        # Spawn layers: receptacles take the lower layers (random order among
+        # themselves), objects the upper ones, so an object can land ON a
+        # receptacle but never gets buried UNDER one.
+        obj_layer = torch.argsort(torch.rand((b, N), generator=gen), dim=1).float() + M
+        rec_layer = torch.argsort(torch.rand((b, M), generator=gen), dim=1).float()
+        layer = torch.cat([obj_layer, rec_layer], dim=1)
+        z = base_height + drop_height + layer * layer_gap + torch.rand((b, S), generator=gen) * height_jitter
+        xyz = torch.cat([xy, z.unsqueeze(-1)], dim=-1)
+
+        yaw = torch.rand((b, S), generator=gen) * 2 * np.pi
+        tilt = torch.rand((b, S), generator=gen) * np.deg2rad(tilt_max_deg)
+        tilt_dir = torch.rand((b, S), generator=gen) * 2 * np.pi
+        roll = (tilt * torch.cos(tilt_dir)).numpy()
+        pitch = (tilt * torch.sin(tilt_dir)).numpy()
+        yaw = yaw.numpy()
+        quat = np.zeros((b, S, 4), dtype=np.float32)
+        for i in range(b):
+            for k in range(S):
+                quat[i, k] = euler2quat(roll[i, k], pitch[i, k], yaw[i, k])  # wxyz
+        return xyz.to(self.device), torch.tensor(quat, device=self.device)
+
+    def _set_slot_poses(self, xyz, quat, env_mask):
+        """Write spawn poses for every loaded slot actor of the envs in `env_mask`."""
+        N, M = self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        for db_idx, name in enumerate(self.carrot_names):
+            actor = self.objs_carrot[name]
+            p, q, touched = actor.pose.p.clone(), actor.pose.q.clone(), False
+            for slot in range(N):
+                mask = (self._all_carrot_ids[slot] == db_idx) & env_mask
+                if mask.any():
+                    p[mask] = xyz[mask, slot]
+                    q[mask] = quat[mask, slot]
+                    touched = True
+            if touched:
+                actor.set_pose(Pose.create_from_pq(p=p, q=q))
+        for db_idx, name in enumerate(self.plate_names):
+            actor = self.objs_plate[name]
+            p, q, touched = actor.pose.p.clone(), actor.pose.q.clone(), False
+            for slot in range(M):
+                mask = (self._all_plate_ids[slot] == db_idx) & env_mask
+                if mask.any():
+                    p[mask] = xyz[mask, N + slot]
+                    q[mask] = quat[mask, N + slot]
+                    touched = True
+            if touched:
+                actor.set_pose(Pose.create_from_pq(p=p, q=q))
+
+    def _fallen_mask(self, z_min=0.80):
+        """Envs where any loaded actor's centre is below `z_min` (fell off the table)."""
+        fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for slot_ids_list, db, db_names in [(self._all_carrot_ids, self.objs_carrot, self.carrot_names),
+                                            (self._all_plate_ids, self.objs_plate, self.plate_names)]:
+            for slot_ids in slot_ids_list:
+                for db_idx, name in enumerate(db_names):
+                    mask = slot_ids == db_idx
+                    if mask.any():
+                        fallen |= mask & (db[name].pose.p[:, 2] < z_min)
+        return fallen
+
+    def chaos_drop(self, seed, half_edge=(0.09, 0.09), center=(-0.16, 0.0),
+                   base_height=1.0, drop_height=0.10, layer_gap=0.10,
+                   height_jitter=0.05, tilt_max_deg=10.0, settle_t=10, max_retries=5):
+        """Start-scene perturbation: every loaded object AND receptacle is
+        dropped from above the table at a uniformly random xy inside
+        `center +- half_edge` (overlap allowed - no spacing constraint), a
+        random yaw, a random tilt in [0, tilt_max_deg], and a per-env random
+        stacking order so that actor k spawns at
+        `base_height + drop_height + k*layer_gap + U(0, height_jitter)`
+        (receptacles in the lower layers, objects above them).
+        Envs where an actor bounces off the table are re-dropped with fresh
+        draws, up to `max_retries` times. All randomness comes from a CPU
+        `torch.Generator` seeded with `seed`, so the same seed yields the same
+        scene for any checkpoint."""
+        b = self.num_envs
+        gen = torch.Generator().manual_seed(int(seed))
+        todo = torch.ones(b, dtype=torch.bool, device=self.device)
+        history = []
+        for attempt in range(max_retries + 1):
+            xyz, quat = self._sample_chaos_poses(gen, half_edge, center, base_height, drop_height,
+                                                 layer_gap, height_jitter, tilt_max_deg)
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            self._set_slot_poses(xyz, quat, todo)
+            self._finish_perturbation(settle_t)
+            fallen = self._fallen_mask()
+            history.append(int(fallen.sum().item()))
+            if history[-1] == 0:
+                break
+            todo = fallen
+        print(f"  [chaos_drop] seed={seed}: envs with an actor off the table per attempt = {history}"
+              f"{'' if history[-1] == 0 else '  (still fallen after retries)'}")
 
 
 # --- M2 Phase B: PickPlaceNxM-v1 -------------------------------------

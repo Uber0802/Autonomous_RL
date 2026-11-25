@@ -482,6 +482,32 @@ class CronosWrapper:
         self.env.unwrapped.set_current_task(objects, receptacles)
         self.reward_shaper.reward_old.zero_()
 
+    def reset_elapsed_steps(self):
+        """V0.5: zero ManiSkill's per-env step counter without an env.reset().
+
+        Used by eval_only.py at a task switch inside a sequence: without this,
+        `_elapsed_steps` keeps counting past `max_episode_steps` and the env
+        reports `truncated=True` on EVERY step of the 2nd+ task, so the
+        wrapper's end-of-task `info["episode"]` fires 80 times and the eval
+        averages success over time instead of reading it once at the end."""
+        self.env.unwrapped._elapsed_steps.zero_()
+
+    # --- V0.5 eval start-scene perturbations (eval_only.py --start-scene) ---
+    def overlap_start(self, objects, receptacles, dz=0.08):
+        """Drop `objects[i]` onto `receptacles[i]` in every env, settle, and
+        return the fresh observation image. Call AFTER reset()+set_task()."""
+        self.env.unwrapped.overlap_start(objects, receptacles, dz=dz)
+        self.reward_shaper.reward_old.zero_()
+        return self.get_obs_image()
+
+    def chaos_drop(self, seed, **chaos_kwargs):
+        """Re-drop every loaded object and receptacle from above the table at
+        seeded random poses (overlap allowed), settle, and return the fresh
+        observation image. Call AFTER reset()+set_task()."""
+        self.env.unwrapped.chaos_drop(seed, **chaos_kwargs)
+        self.reward_shaper.reward_old.zero_()
+        return self.get_obs_image()
+
     def get_env_state(self):
         """snapshot the SAPIEN scene state (object/receptacle poses,
         robot qpos/qvel, articulation kinematics) as a per-env tensor.

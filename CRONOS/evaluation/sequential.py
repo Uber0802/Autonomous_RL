@@ -48,13 +48,18 @@ class SequentialEvaluator:
                  prep_rollout: Optional[Callable] = None,
                  obj_set: str = "rand", episode: int = 0, total_steps: int = 0,
                  video_workers: int = 4, report_name: str = "eval_report.txt", resume: bool = False,
-                 oom_context: Optional[dict] = None):
+                 oom_context: Optional[dict] = None, start_scene_fn: Optional[Callable] = None,
+                 init_scene_dir: Optional[Path] = None):
         """
         act_fn(obs, instructions) -> action ids [num_envs, A]
         oom_context: caller's dict, updated in place with the unit being run so an
             OOM report (`oom_report.py`) can say where it happened
         chunk_fn(obs, instructions, K) -> action ids [num_envs, K, A]   (action_chunk > 1 only)
         episode / total_steps: checkpoint progress, written to every CSV row
+        start_scene_fn(obs, *, eval_kind, p, seq, objs, receps) -> obs
+            perturbs the start scene of every unit after its reset
+            (`evaluation/start_scenes.py`); None = no perturbation
+        init_scene_dir: save a tiled PNG of every unit's start observation there
         """
         self.plan = plan
         self.oom_context = oom_context if oom_context is not None else {}
@@ -75,6 +80,8 @@ class SequentialEvaluator:
         self.video_workers = video_workers
         self.report_name = report_name
         self.resume = resume
+        self.start_scene_fn = start_scene_fn
+        self.init_scene_dir = Path(init_scene_dir) if init_scene_dir else None
         self.pose_writer = (R.SegmentPoseWriter(self.glob_dir / R.POSES, R.EVAL_POSE_EXTRA)
                             if self.settings.record_pose else None)
 
@@ -227,6 +234,39 @@ class SequentialEvaluator:
             torch.cuda.manual_seed_all(seed)
 
     # ---------------------------------------------------------------------- run
+    def _reset_unit(self, eval_kind, obj_set, p, seq, objs, receps):
+        """Reset to the pose set's layout, set the first tasks, apply the start
+        scene. Returns (obs, layout ids)."""
+        ids = p.layout_ids(eval_kind, seq.pose_set, self.num_envs, self.plan.layout_seed, self.settings.layout_slots)
+        obs, _, _ = self.env.reset(obj_set_override=obj_set, group_idx_override=p.group_idx_override,
+                                   skip_scheduler=True, layout_ids=ids)
+        self.env.set_task(objs, receps)
+        if self.start_scene_fn is not None:
+            obs = self.start_scene_fn(obs, eval_kind=eval_kind, p=p, seq=seq, objs=objs, receps=receps)
+            # settling ran the env's evaluate(): clear its counters before step 0
+            self.env.begin_segment()
+        if self.init_scene_dir is not None:
+            from evaluation.start_scenes import save_tiled
+            save_tiled(obs, self.init_scene_dir / f"{eval_kind}_{p.label}_round{seq.seq_idx}.png")
+        return obs, ids
+
+    def render_starts(self) -> None:
+        """Reset + start scene for the first round of every pose set; save the
+        PNGs to `init_scene_dir`. No rollout, no records."""
+        if self.init_scene_dir is None:
+            raise ValueError("render_starts needs init_scene_dir")
+        for eval_kind in self.settings.domains:
+            obj_set = self.obj_set if eval_kind == "in_domain" else OOD_OBJ_SET
+            for p in self.plan.passes:
+                seen = set()
+                for seq in p.sequences:
+                    if seq.pose_set in seen:
+                        continue
+                    seen.add(seq.pose_set)
+                    objs, receps, *_ = p.env_assignment(seq, 0, self.num_envs)
+                    self._reset_unit(eval_kind, obj_set, p, seq, objs, receps)
+        print(f"[eval] start scenes saved under {self.init_scene_dir}")
+
     def _run_unit(self, eval_kind, obj_set, p, seq, submit_video):
         n = self.num_envs
         video_envs = self._video_envs(p, seq) if self.settings.record_video else []
@@ -235,10 +275,7 @@ class SequentialEvaluator:
             objs, receps, tasks, groups, orders = p.env_assignment(seq, task_idx, n)
             if task_idx == 0:
                 self.prep_rollout()
-                ids = p.layout_ids(eval_kind, seq.pose_set, n, self.plan.layout_seed, self.settings.layout_slots)
-                obs, _, _ = self.env.reset(obj_set_override=obj_set, group_idx_override=p.group_idx_override,
-                                           skip_scheduler=True, layout_ids=ids)
-                self.env.set_task(objs, receps)
+                obs, ids = self._reset_unit(eval_kind, obj_set, p, seq, objs, receps)
                 layout_rows = self._layout_rows(p, seq, eval_kind, ids, orders)
                 self._reseed_policy(rng_streams.policy_seed(self.plan.policy_seed, eval_kind, seq.seq_idx, p.label))
                 unit_trials = []

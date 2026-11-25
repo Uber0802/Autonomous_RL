@@ -42,6 +42,7 @@ from evaluation.plan import build_plan, build_scenes, checkpoint_progress, plan_
 from evaluation.provenance import (check_against_training, resolve_config_path, resolve_policy_args,
                                    scene_definition)
 from evaluation.sequential import SequentialEvaluator
+from evaluation.start_scenes import StartScene
 
 
 @dataclass
@@ -104,6 +105,18 @@ class EvalArgs:
     vla_temperature_eval: float = 0.6
     action_chunk: int = 1                   # SpatialVLA chunk(K) open-loop deployment; K=1 = single-step
     eval_ood: bool = True                   # legacy alias: --no-eval-ood == --eval-domains in_domain
+
+    # --- Start-scene perturbation (applied after the reset of every round; evaluation/start_scenes.py) ---
+    start_scene: str = "default"            # one of evaluation.start_scenes.START_SCENES
+    overlap_dz: float = 0.01                # overlap_*: clearance between object bbox bottom and receptacle bbox top
+    chaos_half_x: float = 0.09              # chaos: x half-size of the drop area around x=-0.16
+    chaos_half_y: float = 0.09              # chaos: y half-size of the drop area around y=0.0
+    chaos_drop_height: float = 0.10         # chaos: lowest actor spawns this far above the nominal table slot height
+    chaos_layer_gap: float = 0.10           # chaos: vertical gap between stacked spawn layers
+    chaos_tilt_deg: float = 10.0            # chaos: max random tilt of a dropped actor
+    save_init_scenes: bool = True           # tile every round's start observation into a PNG
+    init_scene_dir: str = ""                # where to save them (default: <glob>/init_scenes)
+    render_init_only: bool = False          # only reset + perturb + save PNGs; no policy, no rollout
 
     # --- Logging ---
     wandb: bool = False
@@ -213,11 +226,16 @@ class EvalRunner:
             from simpler_env.policies.spatialvla.spatialvla_train import SpatialVLAPolicy as _PolicyCls
         else:
             raise ValueError(f"Unknown --policy {args.policy!r}; expected one of 'openvla', 'spatialvla'.")
-        self.policy = _PolicyCls(self._policy_args(), device_id=device_id_other)
+        self.policy = None
+        if not args.render_init_only:
+            self.policy = _PolicyCls(self._policy_args(), device_id=device_id_other)
 
 
         # Environment (created after config so env_n/env_m are correct)
-        unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
+        if self.policy is None:
+            unnorm_state = {"q01": np.zeros(7), "q99": np.ones(7)}
+        else:
+            unnorm_state = self.policy.vla.get_action_stats(args.vla_unnorm_key)
         self.suite = TaskSuite()
         # forward YAML `unsuitable_detector` block for parametric AABB detector.
         det_cfg = getattr(yaml_config, "unsuitable_detector", None) if yaml_config else None
@@ -226,7 +244,7 @@ class EvalRunner:
         # before the shared q01/q99 unnorm. OpenVLA leaves it `None` and the
         # wrapper uses the legacy `bin_centers` path.
         action_tokenizer = (self.policy.processor.action_tokenizer
-                            if args.policy == "spatialvla" else None)
+                            if args.policy == "spatialvla" and self.policy is not None else None)
         self.env = CronosWrapper(self._wrapper_args(), unnorm_state, self.suite,
                                  device=self.device, unsuitable_detector_cfg=det_cfg,
                                  action_tokenizer=action_tokenizer)
@@ -375,26 +393,36 @@ class EvalRunner:
         plan = build_plan(self._build_scenes(), settings, num_envs=a.num_envs,
                           segment_len=a.segment_len, seed=a.seed)
         plan.provenance = self.provenance
+        start_scene = StartScene(a, self.env, plan.layout_seed)
         plan.fingerprint = plan_fingerprint(plan, dict(
             checkpoint=str(Path(a.vla_load_path).resolve()) if a.vla_load_path else "",
             policy=a.policy, vla_path=a.vla_path, vla_unnorm_key=a.vla_unnorm_key, vla_lora_rank=a.vla_lora_rank,
             vla_temperature_eval=a.vla_temperature_eval, action_chunk=a.action_chunk,
             buffer_inferbatch=a.buffer_inferbatch, env_id=a.env_id, obj_set=a.obj_set,
             scene_definition=scene_definition(self.yaml_config),
+            start_scene=start_scene.params(),
         ))
         episode, total_steps, progress_src = checkpoint_progress(a.vla_load_path)
         print(f"[eval] checkpoint progress: episode={episode} total_steps={total_steps} ({progress_src})")
 
+        init_scene_dir = None
+        if a.save_init_scenes or a.render_init_only:
+            init_scene_dir = Path(a.init_scene_dir) if a.init_scene_dir else self.glob_dir / "init_scenes"
         evaluator = SequentialEvaluator(
             plan=plan, env=self.env, glob_dir=self.glob_dir,
             act_fn=lambda obs, instr: self._get_action(obs, instr)[1],
             chunk_fn=self._get_action_chunk if a.action_chunk > 1 else None,
             action_chunk=a.action_chunk,
-            prep_rollout=self.policy.prep_rollout, obj_set=a.obj_set,
+            prep_rollout=self.policy.prep_rollout if self.policy is not None else None, obj_set=a.obj_set,
             episode=episode, total_steps=total_steps, report_name=a.eval_report,
             resume=bool(a.eval_resume),
             oom_context=self.oom_context,
+            start_scene_fn=start_scene if a.start_scene != "default" else None,
+            init_scene_dir=init_scene_dir,
         )
+        if a.render_init_only:
+            evaluator.render_starts()
+            return
         self.oom_context["phase"] = "standalone_eval"
         result = evaluator.run()
         if result["wandb"]:
