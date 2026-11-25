@@ -15,6 +15,8 @@ CRONOS is a refactored robotic manipulation training benchmark designed for **no
 - **Modular Environment** — decoupled `reset_strategy`, `reward_shaping`, `task_suite`, and `task_scheduler`.
 - **Efficient Rollouts** — multi-task execution with GPU-parallelized ManiSkill environments, memory-mapped replay buffers.
 - **Analysis-ready outputs** — per-segment CSVs recording both sides of every segment boundary (see [Training-time outputs](#training-time-outputs)).
+- **Diverse training start scenes** — `train_layout: wide` spreads objects and receptacles over the whole visible table with no spacing constraint, stacking actors that overlap (see [Diverse start scenes](#diverse-start-scenes-wide-layout)).
+- **Cluttered and overlapped eval scenes** — start-scene perturbations (objects resting on receptacles, receptacles on each other, random drops) and clutter layouts as extra eval domains (see [Start-scene eval](#start-scene-eval-cluttered-and-overlapped-scenes)).
 
 ## Installation
 
@@ -248,6 +250,38 @@ term. `off` is numerically identical to not having the option.
 `eer=off` appends `-noEER` to `RUN_TAG` so it lands in its own output directory;
 `eer=on` adds no flag and no tag.
 
+#### Diverse start scenes (wide layout)
+
+By default every episode starts from the AutoRL grid: positions on a 15 cm square
+with at least 12 cm between actors and four yaws. `train_layout: wide` (or
+`--train-layout wide`) instead draws a continuous position and yaw for every object
+and receptacle over the camera-visible tabletop, with no minimum spacing.
+Receptacles are placed first, then objects, each resting on the table or, when its
+footprint overlaps an actor already placed, on top of that actor. Envs whose task
+already counts as solved, or that have an actor off the table, are re-sampled
+before the episode starts. Each env's layout is drawn from its own scene id (see
+*Random streams*), so a seed reproduces the same starts.
+
+```bash
+# Four-group SpatialVLA run on the wide layout; in-domain eval on the same layout,
+# no OOD pass, one video per (group, task) every 8 training episodes
+EXTRA_ARGS="--eval-interval 32 --num-eval-episode 1 --no-eval-ood --video-subset per_task --train-video-interval 8" \
+  bash scripts/train.sh t80a 0 0 normal configs/four_group_sequential_2x2_wide.yaml spatialvla
+
+# Preview the training and in-domain eval start scenes without a policy
+python tools/render_train_layout.py --config configs/four_group_sequential_2x2_wide.yaml \
+  --out figures/train_layout_wide --n-resets 3
+```
+
+The layout bounds are set in the config (`wide_center_x/y`, `wide_half_x/y`);
+`eval_in_domain_layout: train` makes training-time in-domain eval use the wide
+layout too, so its numbers are not comparable with default-layout runs.
+Out-of-domain eval and standalone eval keep their own layouts.
+
+`train.sh` also reads two environment variables: `PY` (the interpreter, for
+`nohup` jobs without an active conda env) and `EXTRA_ARGS` (appended to the
+`main.py` command; a repeated flag overrides the mode's value).
+
 Key training flags:
 | Flag | Default | Description |
 |---|---|---|
@@ -386,13 +420,49 @@ training round 64 trials (16 per task), random rounds 320 trials (80 per task),
 |---|---|
 | `eval_plan.json` | resolved settings and their sources, fingerprint, config provenance, every round's orders per block, units, RNG keys and ids, planned coverage, resume history |
 | `eval_status.json` | complete?, done / partial / missing units |
-| `eval_per_trial.csv` | source: one row per (domain, round, task slot, env) — `success`, `success_chained`, grasp, `seq_kind`, `group`, `order`, `pose_set` |
+| `eval_per_trial.csv` | source: one row per (domain, round, task slot, env) — `success`, `success_chained`, grasp, `seq_kind`, `group`, `order`, `pose_set`, `success_at_start` |
 | `eval_layouts.csv` | source: per reset and env, layout slot, stream key, id, applied pose/quat/overlay ids |
 | `eval_segment_pose.csv` | source: poses at every task start/end, training `segment_pose.csv` columns + eval keys |
 | `eval_sequence_summary.csv` / `eval_coverage.csv` / `eval_report.txt` | derived, rebuilt whole; always split by `seq_kind` |
 | `eval_success.csv` | derived, `eval_kind` = `in_domain_training`, `in_domain_random`, …; **complete evals only** |
 | `eval_videos/<domain>/<seq_kind>/round<N>/task<M>/…` | videos |
+| `init_scenes/<domain>_<pass>_round<N>.png` | tiled start observation of every round (`--no-save-init-scenes` disables) |
 | `experiment_config.yaml`, `run_config.json` | config and args used |
+
+#### Start-scene eval (cluttered and overlapped scenes)
+
+`--start-scene` perturbs the start of every round, after the reset and before the
+first action. Perturbations are seeded per pose set, so every checkpoint sees the
+same perturbed scenes.
+
+| `--start-scene` | Start state |
+|---|---|
+| `default` | unperturbed |
+| `overlap_obj_nontarget` | task object on the scene's other receptacle |
+| `overlap_nonobj_target` | the other object on the task receptacle |
+| `overlap_nonobj_nontarget` | the other object on the other receptacle |
+| `chaos` | every object and receptacle dropped from above the table at random poses |
+| `overlapped` | every object resting on a random receptacle, never the task object on its target |
+| `cluttered` | one receptacle resting partly on the other |
+
+`overlapped` and `cluttered` are defined on the out-of-domain layout and run there
+unless `--eval-domains` says otherwise. Two clutter layouts are also available as
+eval domains: `overlap` (grid spawns closer than the training spacing allows) and
+`drop` (objects air-dropped at random positions). `eval_per_trial.csv` records
+`success_at_start`, which flags tasks already solved before the policy acted.
+
+```bash
+# One eval folder per scene under eval_runs/<tag>/<scene>/ (training round only)
+bash scripts/eval_start_scenes.sh /path/to/glob/episode_0128 T80_ep128 0 0 \
+  "overlapped cluttered domain=overlap domain=drop"
+
+# Bar plot per scene, checkpoints side by side
+bash scripts/plot_start_scenes.sh "T80 ep128=T80_ep128" "T320 ep32=T320_ep32"
+
+# Only render the perturbed start scenes (no policy)
+python eval_only.py --vla-load-path /path/to/glob/episode_0128 \
+  --start-scene cluttered --eval-rounds 0 --render-init-only
+```
 
 Eval flags (the bracketed name is the `eval:` key):
 | Flag | Default | Description |
@@ -499,6 +569,9 @@ Configs live in `configs/`. A single YAML file fully describes an experiment.
 | `cronos_version` | string | — | Human annotation only. The loader accepts the key but never reads or validates it, so it is not a compatibility gate. The *code* version is stamped into each run's `run_config.json` from [`version.py`](CRONOS/version.py). |
 | `task_order` | string | `sequential` | `sequential`, `pure_random`, or `sequence_random` |
 | `fan_out` | bool | `true` | All tasks run simultaneously within each group (AutoRL default) |
+| `train_layout` | string | `default` | Training start layout: `default` grid or `wide` |
+| `wide_center_x`, `wide_center_y`, `wide_half_x`, `wide_half_y` | float | -0.165, -0.025, 0.12, 0.20 | Area of the wide layout (m): center ± half |
+| `eval_in_domain_layout` | string | `default` | Training-time in-domain eval layout: `default` or `train` (= `train_layout`) |
 
 ### Per-group fields
 
@@ -559,6 +632,8 @@ The config loader validates:
 
 | Config | Description |
 |---|---|
+| `four_group_sequential_2x2.yaml` | 4 groups × 16 envs, different obj/recep/background, sequential; carries a full `eval:` block |
+| `four_group_sequential_2x2_wide.yaml` | the same, trained (and eval'd in-domain during training) on the wide start layout |
 | `two_group_sequential_2x2.yaml` | 2 groups, different obj/recep/background, sequential |
 | `one_group_sequential_3x3.yaml` | 1 group, 3x3 (9 tasks), sequential |
 | `one_group_half_train_2x2.yaml` | 1 group, 2 train tasks, 4 eval tasks (generalization test) |
@@ -666,6 +741,8 @@ coincide at `task_idx == 0`.
 | `tools/rebuild_eval_outputs.py` | Rebuild standalone-eval derived files from per-trial rows; merge round shards of one eval |
 | `tools/check_ckpt_compat.py` | Preflight: can a checkpoint tree be loaded by the target LM stack (`tf440` / `tf447`)? No GPU or model load needed |
 | `tools/bench_rollout.py` | Rollout throughput + GPU peak memory per package stack, with a phase breakdown (inference / env.step / buffer / PPO update) |
+| `tools/render_train_layout.py` | Render training and in-domain eval start scenes of a config (e.g. the wide layout) without a policy; reports re-sampled, off-table and already-solved envs |
+| `tools/plot_start_scene_eval.py` | Start-scene eval bar plot (per group and per task position), checkpoints side by side; driven by `scripts/plot_start_scenes.sh` |
 
 `bench_rollout.py` exists to make the four-env split answerable rather than
 permanent: it attributes the OpenVLA memory regression (~40 GB → ~55 GB after the
@@ -688,15 +765,15 @@ python tools/bench_rollout.py \
 - `training/` — PPO and GRPO algorithms, replay buffer, metrics/CSV recorders
 - `main.py` — Training entry point (train + eval)
 - `eval_only.py` — Standalone eval script (no training)
-- `evaluation/` — Standalone eval: plan (settings, scenes, rounds, coverage, fingerprint), records (CSV schemas, readers/writers), outputs (derived files, status, resume/merge), provenance (training config), sequential (rollout loop)
+- `evaluation/` — Standalone eval: plan (settings, scenes, rounds, coverage, fingerprint), records (CSV schemas, readers/writers), outputs (derived files, status, resume/merge), provenance (training config), sequential (rollout loop), start_scenes (start-scene perturbations)
 - `tests/` — CPU-only tests for eval planning, RNG streams, records, the eval loop and peft checkpoint compatibility (`python -m pytest tests/ -q`)
 - `run_paths.py` — Run output directory resolution, shared by both entry points
 - `oom_report.py` — CUDA out-of-memory report (`glob/oom_report.txt`), written by both entry points
 - `version.py` — Single source for the version stamped into every `run_config.json`
 - `configs/` — Sample YAML training configs
 - `configs/eval/` — Legacy reduced-env eval configs (need `--allow-config-mismatch`)
-- `scripts/` — `train.sh`, `eval.sh`, and the plotting requirements `setup.sh` installs
-- `tools/` — Eval-shard merging, checkpoint compatibility, benchmarking, live dashboard
+- `scripts/` — `train.sh`, `eval.sh`, `eval_start_scenes.sh` / `plot_start_scenes.sh` (start-scene eval and its plots), and the plotting requirements `setup.sh` installs
+- `tools/` — Eval-shard merging, checkpoint compatibility, benchmarking, live dashboard, start-layout rendering, start-scene plots
 - `plotting/` — Plotting and statistics tools; not included in V0.99 (planned for a later release)
 
 ## Version
