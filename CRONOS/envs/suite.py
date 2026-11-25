@@ -80,6 +80,77 @@ def generate_pose_configs(slot_heights, half_edge_length, spacing_matrix,
     return np.stack(xyz_configs)
 
 
+# Eval-only base layouts: obj_set rand_overlap / rand_drop (eval domains overlap / drop).
+_OVERLAP_CACHE = {}
+
+
+def generate_overlap_pose_configs(slot_heights, half_edge_length, spacing_matrix,
+                                  xy_center=(-0.16, 0.00), grid=None):
+    """Complement of `generate_pose_configs`: the grid combos it PRUNES.
+
+    Keeps exactly the configs where at least one constrained pair sits at or
+    inside its `spacing_matrix` distance — overlapping / touching spawns,
+    including identical cells. Used by the `rand_overlap` eval obj_set as a
+    clutter OOD: same workspace, objects and orientations as training, only
+    the spacing guarantee is dropped. Vectorized and memoized because the
+    complement is most of the 36^N product and `_initialize_episode_pre`
+    rebuilds the pose table on every reset.
+    """
+    key = (tuple(slot_heights), tuple(half_edge_length),
+           tuple(map(tuple, spacing_matrix)), tuple(xy_center),
+           None if grid is None else np.asarray(grid).tobytes())
+    if key in _OVERLAP_CACHE:
+        return _OVERLAP_CACHE[key]
+
+    center = np.array(xy_center).reshape(1, 2)
+    half = np.array(half_edge_length).reshape(1, 2)
+    base_grid = grid if grid is not None else GRID_POS_UNIT
+    grid_pos = base_grid * half + center                     # [G, 2]
+    num_slots = len(slot_heights)
+    spacing = np.array(spacing_matrix)
+
+    # Same enumeration order as itertools.product(grid_pos, repeat=num_slots).
+    idx = np.indices((len(grid_pos),) * num_slots).reshape(num_slots, -1).T  # [C, S]
+    xy = grid_pos[idx]                                       # [C, S, 2]
+    violated = np.zeros(len(idx), dtype=bool)
+    for i in range(num_slots):
+        for j in range(i + 1, num_slots):
+            if spacing[i][j] > 0:
+                d = np.linalg.norm(xy[:, i] - xy[:, j], axis=-1)
+                violated |= d <= spacing[i][j]
+    xy = xy[violated]
+    z = np.broadcast_to(np.array(slot_heights, dtype=xy.dtype), xy.shape[:2])[..., None]
+    out = np.concatenate([xy, z], axis=-1)
+    _OVERLAP_CACHE[key] = out
+    return out
+
+
+def generate_drop_pose_configs(slot_heights, half_edge_length, spacing_matrix=None,
+                               xy_center=(-0.16, 0.00), grid=None,
+                               drop_height=0.15, n_configs=100_000, seed=0):
+    """Air-drop spawns: continuous uniform xy inside the workspace, z raised.
+
+    Every slot gets an independent uniform (x, y) in the same workspace box as
+    the preset (no grid, no spacing check — slots may collide on the way down)
+    and z = its preset slot height + `drop_height`, so the objects free-fall
+    onto the table during the reset's `_settle`. `spacing_matrix` / `grid` are
+    accepted only so a POSE_PRESETS entry can be splatted in unchanged.
+    """
+    key = ("drop", tuple(slot_heights), tuple(half_edge_length), tuple(xy_center),
+           float(drop_height), int(n_configs), int(seed))
+    if key in _OVERLAP_CACHE:
+        return _OVERLAP_CACHE[key]
+    rng = np.random.default_rng(seed)
+    n = len(slot_heights)
+    center = np.array(xy_center).reshape(1, 1, 2)
+    half = np.array(half_edge_length).reshape(1, 1, 2)
+    xy = center + rng.uniform(-1.0, 1.0, size=(n_configs, n, 2)) * half
+    z = np.broadcast_to(np.array(slot_heights) + drop_height, (n_configs, n))[..., None]
+    out = np.concatenate([xy, z], axis=-1)
+    _OVERLAP_CACHE[key] = out
+    return out
+
+
 def _uniform_spacing(n, d):
     """Creates an NxN spacing matrix where all pairs have distance d."""
     return [[d if i != j else 0.0 for j in range(n)] for i in range(n)]

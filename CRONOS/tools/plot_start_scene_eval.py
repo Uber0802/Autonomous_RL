@@ -31,22 +31,30 @@ INK_MUTED = "#6b6b6b"
 GRID = "#e6e6e6"
 
 
-def load_trials(path_glob):
+def load_trials(path_glob, domain=""):
+    """Rows of one eval domain (`eval_kind`). domain="" = the only domain in the files."""
     paths = sorted(glob.glob(path_glob))
     if not paths:
         raise FileNotFoundError(f"no file matches {path_glob!r}")
-    rows = []
+    all_rows = []
     for p in paths:
         with open(p) as f:
-            for row in csv.DictReader(f):
-                if not row["prefix"].startswith("in_domain"):
-                    continue
-                rows.append({
-                    "group": row.get("group", "default"),
-                    "task_idx": int(row["task_idx"]),
-                    "seq_idx": int(row["seq_idx"]),
-                    "success": float(row["success"]),
-                })
+            all_rows.extend(csv.DictReader(f))
+    kinds = sorted({r["eval_kind"] for r in all_rows})
+    if not domain:
+        if len(kinds) != 1:
+            raise ValueError(f"{path_glob}: several eval domains {kinds}; pick one with --domain")
+        domain = kinds[0]
+    rows = []
+    for row in all_rows:
+        if row["eval_kind"] != domain:
+            continue
+        rows.append({
+            "group": row.get("group", "default"),
+            "task_idx": int(row["task_idx"]),
+            "seq_idx": int(row["seq_idx"]),
+            "success": float(row["success"]),
+        })
     return rows
 
 
@@ -105,6 +113,7 @@ def main():
     ap.add_argument("--run", action="append", required=True,
                     help="LABEL=GLOB_TO_eval_per_trial.csv (repeat once per checkpoint)")
     ap.add_argument("--title", default="Sequential eval")
+    ap.add_argument("--domain", default="", help="eval domain to plot (default: the only one in each file)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -112,7 +121,7 @@ def main():
     group_cats = pos_cats = None
     for spec in args.run:
         label, path_glob = spec.split("=", 1)
-        rows = load_trials(path_glob)
+        rows = load_trials(path_glob, args.domain)
         cats_g, stats_g = summarize(rows, "group")
         cats_p, stats_p = summarize(rows, "task_idx")
         group_cats = sorted((set(group_cats or []) | set(cats_g)) - {"overall"}) + ["overall"]

@@ -264,6 +264,10 @@ Key training flags:
 | `--eval-interval` | 4 | Eval every N episodes |
 | `--num-eval-episode` | 4 | Episodes per eval round |
 | `--eval-at-start` | false | Run eval before first training episode |
+| `--no-eval-ood` | off | Skip the out-of-domain pass of training-time eval |
+| `--train-layout` | `default` | Start layout of training resets: `default` (AutoRL grid, >=12 cm spacing) \| `wide` (continuous xy/yaw over the visible table, no spacing, overlapping actors stacked; starts already solved or with an actor off the table are re-sampled). Bounds: `--wide-center-x/-y`, `--wide-half-x/-y`. Example config: `configs/four_group_sequential_2x2_wide.yaml` |
+| `--eval-in-domain-layout` | `default` | Training-time in-domain eval layout: `default` grid \| `train` (= `--train-layout`) |
+| `--video-subset` / `--train-video-interval` | `all` / 1 | `per_task` records one env per (group, task); training videos every N-th episode |
 | `--enable-backward` / `--backward-interval N` | off | LSR — backward policy alternating with forward at step interval N |
 | `--reset-unsuitable` | off | HSR — respawn fallen/out-of-workspace actors at task boundary |
 | `--hsr-reset-scope` | `per_env` | `per_env` (full-env reset of flagged envs) \| `per_actor` (single-actor) \| `all` |
@@ -403,7 +407,9 @@ Eval flags (the bracketed name is the `eval:` key):
 | `--eval-sequence-seed` / `--eval-layout-seed` / `--eval-policy-seed` | -1 | streams; -1 = `--seed` |
 | `--eval-layout-slots` [layout_slots] | -1 | start poses per block |
 | `--eval-scene-schedule` [scene_schedule] | `parallel` | `parallel` or `serial` |
-| `--eval-domains` [domains] | `in_domain,out_of_domain` | comma-separated; `--no-eval-ood` = `in_domain` |
+| `--eval-domains` [domains] | `in_domain,out_of_domain` | comma-separated; `--no-eval-ood` = `in_domain`. Also `overlap` (`rand_overlap`: grid spawns closer than the training spacing) and `drop` (`rand_drop`: air drop at random xy) |
+| `--start-scene` | `default` | perturb every round's start (`evaluation/start_scenes.py`): `overlap_obj_nontarget` / `overlap_nonobj_target` / `overlap_nonobj_nontarget`, `chaos`, `overlapped` (every object on a receptacle, never the task object on its target), `cluttered` (one receptacle partly on the other). `overlapped` / `cluttered` default to `out_of_domain`. Driver: `scripts/eval_start_scenes.sh` |
+| `--render-init-only` | false | only reset + start scene, save `init_scenes/*.png`; no policy |
 | `--record-video` / `--video-envs-per-block` | true / -1 | videos, first K envs of each block |
 | `--record-eval-pose` / `--eval-pose-phase` | true / `both` | pose CSV |
 | `--segment-len` | 80 | Steps per task rollout |

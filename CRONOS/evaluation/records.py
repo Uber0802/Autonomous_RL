@@ -45,7 +45,7 @@ PER_TRIAL_FIELDS: Tuple[str, ...] = (
     "seq_idx", "task_idx", "obj_set", "task", "env_idx",
     "success", "success_chained", "grasp", "obj_grasped", "prefix",
     "eval_kind", "seq_kind", "group", "obj", "recep", "order",
-    "pose_set", "cycle_idx", "pass_label", "episode", "total_steps",
+    "pose_set", "cycle_idx", "pass_label", "episode", "total_steps", "success_at_start",
 )
 
 SUMMARY_FIELDS: Tuple[str, ...] = (

@@ -7,7 +7,7 @@ The unit of work is (domain, pass, round). Per unit:
                                                                round of the set)
   2. torch reseeded from `policy|seed|domain|round|pass`       (sampling independent of
                                                                what ran before)
-  3. for each task slot: set_task (+ begin_segment after the first), `segment_len`
+  3. for each task slot: set_task, success_at_start, begin_segment, `segment_len`
      steps, terminal success/grasp per env                     (AutoRL render_seq
                                                                semantics)
   4. rows appended to eval_per_trial / eval_layouts / eval_segment_pose, then
@@ -37,7 +37,7 @@ from tqdm import tqdm
 from envs import rng_streams
 from evaluation import outputs as O
 from evaluation import records as R
-from evaluation.plan import OOD_OBJ_SET, EvalPlan, fingerprint_differences, unit_key
+from evaluation.plan import EvalPlan, domain_obj_set, fingerprint_differences, unit_key
 
 TERMINAL_KEYS = ("success", "consecutive_grasp", "is_src_obj_grasped")
 
@@ -243,8 +243,6 @@ class SequentialEvaluator:
         self.env.set_task(objs, receps)
         if self.start_scene_fn is not None:
             obs = self.start_scene_fn(obs, eval_kind=eval_kind, p=p, seq=seq, objs=objs, receps=receps)
-            # settling ran the env's evaluate(): clear its counters before step 0
-            self.env.begin_segment()
         if self.init_scene_dir is not None:
             from evaluation.start_scenes import save_tiled
             save_tiled(obs, self.init_scene_dir / f"{eval_kind}_{p.label}_round{seq.seq_idx}.png")
@@ -256,7 +254,7 @@ class SequentialEvaluator:
         if self.init_scene_dir is None:
             raise ValueError("render_starts needs init_scene_dir")
         for eval_kind in self.settings.domains:
-            obj_set = self.obj_set if eval_kind == "in_domain" else OOD_OBJ_SET
+            obj_set = domain_obj_set(eval_kind, self.obj_set)
             for p in self.plan.passes:
                 seen = set()
                 for seq in p.sequences:
@@ -281,8 +279,12 @@ class SequentialEvaluator:
                 unit_trials = []
             else:
                 self.env.set_task(objs, receps)
-                self.env.begin_segment()
                 obs = self.env.get_obs_image()
+            # Solved before the policy acted (e.g. a start scene or the previous
+            # task left the object on its target)? Read it before begin_segment:
+            # get_info() runs evaluate(), which latches the grasp flags.
+            at_start = self.env.env.unwrapped.get_info()["success"].float().cpu().tolist()
+            self.env.begin_segment()
             instructions = self.env.get_language_instructions()
             pose_kw = dict(eval_kind=eval_kind, p=p, seq=seq, task_idx=task_idx, groups=groups, obj_set=obj_set)
             self._record_pose("start", instructions, **pose_kw)
@@ -296,7 +298,7 @@ class SequentialEvaluator:
                 chain[e] *= s
                 rows.append(dict(
                     seq_idx=seq.seq_idx, task_idx=task_idx, obj_set=obj_set, task=tasks[e], env_idx=e,
-                    success=s, success_chained=chain[e],
+                    success=s, success_chained=chain[e], success_at_start=int(at_start[e]),
                     grasp=float(terminal["consecutive_grasp"][e]),
                     obj_grasped=float(terminal["is_src_obj_grasped"][e]),
                     prefix=prefix, eval_kind=eval_kind, seq_kind=seq.seq_kind, group=groups[e],
@@ -342,7 +344,7 @@ class SequentialEvaluator:
 
         try:
             for eval_kind in self.settings.domains:
-                obj_set = self.obj_set if eval_kind == "in_domain" else OOD_OBJ_SET
+                obj_set = domain_obj_set(eval_kind, self.obj_set)
                 print(f"\n[eval] {eval_kind} (obj_set={obj_set})")
                 for p in plan.passes:
                     for seq in p.sequences:

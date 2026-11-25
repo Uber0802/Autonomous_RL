@@ -11,8 +11,13 @@ declare -A TITLES=(
   [overlap_nonobj_target]="Overlap: non-task object starts on the target receptacle"
   [overlap_nonobj_nontarget]="Overlap: non-task object starts on the non-target receptacle"
   [chaos]="Chaos: objects and receptacles dropped at random (overlap allowed)"
+  [overlapped]="Overlapped: every object starts on a receptacle (out-of-domain layout)"
+  [cluttered]="Cluttered: one receptacle rests partly on the other (out-of-domain layout)"
+  [overlap]="Overlap layout: spawns closer than the training spacing"
+  [drop]="Drop layout: objects air-dropped at random positions"
 )
-for SCENE in default overlap_obj_nontarget overlap_nonobj_target overlap_nonobj_nontarget chaos; do
+for SCENE in default overlap_obj_nontarget overlap_nonobj_target overlap_nonobj_nontarget chaos \
+             overlapped cluttered overlap drop; do
   RUNS=()
   for spec in "$@"; do
     LABEL=${spec%%=*}; TAG=${spec#*=}

@@ -38,6 +38,9 @@ class FakeUnwrapped:
         self.select_overlay_ids = torch.zeros(n, dtype=torch.long)
         self.last_layout_rand_ids = None
 
+    def get_info(self):
+        return {"success": torch.zeros(self.num_envs)}
+
     def get_all_slot_poses(self):
         n = self.num_envs
         p = self.select_pos_ids.float().reshape(n, 1).repeat(1, 3)

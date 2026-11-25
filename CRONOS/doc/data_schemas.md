@@ -240,7 +240,7 @@ last task slot.
 | `success_chained` | **A, chained** — cumulative AND along `task_idx` within (domain, round, env) |
 | `grasp`, `obj_grasped` | latched within this segment |
 | `prefix` | `{eval_kind}_seq{round}_task{slot}` |
-| `eval_kind` | `in_domain` / `out_of_domain` |
+| `eval_kind` | `in_domain` / `out_of_domain` (also `overlap` / `drop`) |
 | `seq_kind` | `training` / `random` / `single` — filter on this to keep training rounds apart |
 | `group` | scene (YAML group) |
 | `obj`, `recep` | the task's object and receptacle |
@@ -249,6 +249,7 @@ last task slot.
 | `cycle_idx` | 0 = training cycle, 1.. = random cycles; 0 in single mode |
 | `pass_label` | `all_scenes` (parallel) or the scene name (serial) |
 | `episode`, `total_steps` | checkpoint progress, 0 if unknown |
+| `success_at_start` | 1 if the task already counted as success before the policy acted (e.g. a start scene left the object on its target) |
 
 The first ten columns keep their old names and order. Row count per unit is
 exactly `num_envs × task slots`; the eval refuses to continue otherwise.

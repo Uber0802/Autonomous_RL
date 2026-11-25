@@ -511,6 +511,20 @@ class CronosWrapper:
         self.reward_shaper.reward_old.zero_()
         return self.get_obs_image()
 
+    def overlapped_start(self, seed):
+        """Every object rests on a receptacle, never the task object on its
+        target. Call AFTER reset()+set_task(); returns the fresh obs image."""
+        self.env.unwrapped.overlapped_start(seed)
+        self.reward_shaper.reward_old.zero_()
+        return self.get_obs_image()
+
+    def cluttered_start(self, seed):
+        """One receptacle rests partly on the other. Call AFTER
+        reset()+set_task(); returns the fresh obs image."""
+        self.env.unwrapped.cluttered_start(seed)
+        self.reward_shaper.reward_old.zero_()
+        return self.get_obs_image()
+
     def chaos_drop(self, seed, **chaos_kwargs):
         """Re-drop every loaded object and receptacle from above the table at
         seeded random poses (overlap allowed), settle, and return the fresh

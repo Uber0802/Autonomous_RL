@@ -860,6 +860,20 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         self.xyz_configs = generate_pose_configs(**params)
         self.quat_configs = QUAT_CONFIGS.copy()
 
+    def _generate_drop_init_pose(self, drop_height=0.15):
+        """Eval-only air drop: continuous in-workspace xy, spawned `drop_height` above the table."""
+        from .suite import generate_drop_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_drop_pose_configs(**params, drop_height=float(drop_height))
+        self.quat_configs = QUAT_CONFIGS.copy()
+
+    def _generate_overlap_init_pose(self):
+        """Eval-only clutter OOD: the in-domain grid combos that spacing prunes."""
+        from .suite import generate_overlap_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_overlap_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+
     def get_carrot_actors(self):
         select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
         return [self.objs_carrot[n] for n in select_carrot]
@@ -972,6 +986,10 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
         obj_set = options.get("obj_set", "rand")
         if obj_set == "rand_ood":
             self._generate_OOD_init_pose()
+        elif obj_set == "rand_overlap":
+            self._generate_overlap_init_pose()
+        elif obj_set == "rand_drop":
+            self._generate_drop_init_pose(options.get("drop_height", 0.15))
         else:
             self._generate_init_pose()
 
@@ -1477,6 +1495,173 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             p[mask] = target_p[mask]
             actor.set_pose(Pose.create_from_pq(p=p, q=q))
         self._finish_perturbation(settle_t)
+
+    def _move_actors_onto(self, mover_ids, mover_names, mover_objs, base_ids, base_names, base_objs,
+                          env_mask, xy_offset, dz):
+        """For envs in `env_mask`, move actor `mover_ids[env]` so it rests on
+        actor `base_ids[env]`: xy = base xy + `xy_offset[env]`, bbox bottom `dz`
+        above the base's bbox top (both at their current orientation). The mover
+        keeps its orientation. Does not settle."""
+        base_p = self._actor_pos_by_ids(base_ids, base_names, base_objs)
+        base_h = self._world_z_extent(base_ids, base_names, base_objs)
+        mov_h = self._world_z_extent(mover_ids, mover_names, mover_objs)
+        target = base_p.clone()
+        target[:, :2] += xy_offset
+        target[:, 2] = base_p[:, 2] + base_h / 2 + mov_h / 2 + dz
+        for db_idx, name in enumerate(mover_names):
+            mask = (mover_ids == db_idx) & env_mask
+            if not mask.any():
+                continue
+            actor = mover_objs[name]
+            p, q = actor.pose.p.clone(), actor.pose.q.clone()
+            p[mask] = target[mask]
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+
+    def _pos_by_ids(self, ids, names, objs):
+        return self._actor_pos_by_ids(ids.clamp(min=0), names, objs)
+
+    def _rests_on(self, top_ids, top_names, top_objs, base_ids, base_names, base_objs,
+                  frac=1.0, min_force=1e-3):
+        """Per env: is actor `top_ids` resting on actor `base_ids`? Requires a
+        contact force between the two (as `evaluate` does for success) AND the
+        top actor's centre within `frac` x the base's bbox xy half-diagonal of
+        the base centre AND the top centre higher than the base centre."""
+        b = self.num_envs
+        tp = self._pos_by_ids(top_ids, top_names, top_objs)
+        bp = self._pos_by_ids(base_ids, base_names, base_objs)
+        half = torch.stack([0.5 * torch.hypot(*self.model_bbox_sizes[base_names[int(i)]][:2])
+                            for i in base_ids.clamp(min=0)])
+        xy_ok = torch.linalg.norm(tp[:, :2] - bp[:, :2], dim=1) <= frac * half
+        above = tp[:, 2] > bp[:, 2]
+        force = torch.zeros(b, device=self.device)
+        pairs = {}
+        for e in range(b):
+            t, bb = int(top_ids[e]), int(base_ids[e])
+            if t >= 0 and bb >= 0:
+                pairs.setdefault((t, bb), []).append(e)
+        for (t, bb), envs in pairs.items():
+            f = self.scene.get_pairwise_contact_forces(top_objs[top_names[t]], base_objs[base_names[bb]])
+            for e in envs:
+                force[e] = torch.linalg.norm(f[e])
+        return xy_ok & above & (force > min_force)
+
+    def overlapped_start(self, seed, dz=0.01, same_recep_offset=0.3, settle_t=5, max_tries=8):
+        """Start scene "overlapped": EVERY loaded object starts resting on a
+        receptacle. Each object picks a receptacle uniformly at random (seeded
+        CPU generator), except that the CURRENT task object never picks the
+        CURRENT target receptacle (`select_carrot_ids` / `select_plate_ids`, so
+        call after set_task). Other objects may pick any receptacle, including
+        the target. Objects sharing a receptacle are spread along a random
+        direction by +-`same_recep_offset` x the receptacle's bbox
+        half-diagonal. Receptacles are not moved.
+
+        After settling, envs where an object is not resting on its receptacle,
+        an actor fell off the table, or the task already counts as success are
+        re-placed (same assignment, new spread direction) up to `max_tries`
+        times. `self.start_scene_history` records the bad-env count per round."""
+        b = self.num_envs
+        gen = torch.Generator().manual_seed(int(seed))
+        N = self.NUM_OBJECTS
+        obj_slots = torch.stack(self._all_carrot_ids, 1).cpu()
+        rec_slots = torch.stack(self._all_plate_ids, 1).cpu()
+        task_obj, task_rec = self.select_carrot_ids.cpu(), self.select_plate_ids.cpu()
+        choice = torch.full((b, N), -1, dtype=torch.long)
+        for e in range(b):
+            recs = [int(r) for r in rec_slots[e] if r >= 0]
+            for i in range(N):
+                o = int(obj_slots[e, i])
+                if o < 0:
+                    continue
+                allowed = [r for r in recs if not (o == int(task_obj[e]) and r == int(task_rec[e]))]
+                choice[e, i] = allowed[int(torch.randint(len(allowed), (1,), generator=gen))]
+        todo = torch.ones(b, dtype=torch.bool)
+        history = []
+        for attempt in range(max_tries + 1):
+            ang = torch.rand((b,), generator=gen) * 2 * np.pi
+            direction = torch.stack([torch.cos(ang), torch.sin(ang)], 1)
+            offsets = torch.zeros((b, N, 2))
+            for e in range(b):
+                for r in set(int(c) for c in choice[e] if c >= 0):
+                    members = [i for i in range(N) if int(choice[e, i]) == r]
+                    if len(members) < 2:
+                        continue
+                    size = self.model_bbox_sizes[self.plate_names[r]].cpu()
+                    half_diag = 0.5 * float(torch.hypot(size[0], size[1]))
+                    for k, i in zip(torch.linspace(-1, 1, len(members)), members):
+                        offsets[e, i] = direction[e] * float(k) * same_recep_offset * half_diag
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            for i in range(N):
+                valid = (obj_slots[:, i] >= 0) & (choice[:, i] >= 0) & todo
+                if valid.any():
+                    self._move_actors_onto(
+                        obj_slots[:, i].clamp(min=0).to(self.device), self.carrot_names, self.objs_carrot,
+                        choice[:, i].clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                        valid.to(self.device), offsets[:, i].to(self.device), dz)
+            self._finish_perturbation(settle_t)
+            bad = self._fallen_mask() | self.get_info()["success"].bool()
+            for i in range(N):
+                valid = ((obj_slots[:, i] >= 0) & (choice[:, i] >= 0)).to(self.device)
+                on = self._rests_on(obj_slots[:, i].to(self.device), self.carrot_names, self.objs_carrot,
+                                    choice[:, i].to(self.device), self.plate_names, self.objs_plate)
+                bad |= valid & ~on
+            history.append(int(bad.sum()))
+            todo = bad.cpu()
+            if history[-1] == 0:
+                break
+        self.start_scene_assignment = choice
+        self.start_scene_history = history
+        self.reset_grasp_stats()
+        print(f"  [overlapped] seed={seed}: bad envs per round = {history}"
+              f"{'' if history[-1] == 0 else '  (still bad after retries)'}")
+
+    def cluttered_start(self, seed, overlap_frac=(0.3, 0.6), dz=0.005, settle_t=5, max_tries=8):
+        """Start scene "cluttered": the receptacles overlap. Per env (seeded CPU
+        generator) one of the first two loaded receptacles is picked as the
+        upper one and moved so it rests partly on the other: its centre is put
+        at the lower receptacle's centre + a random direction x U(overlap_frac)
+        x the lower receptacle's bbox half-diagonal, its bbox bottom `dz` above
+        the lower's bbox top. Objects are not moved.
+
+        After settling, envs where the upper receptacle is not resting on the
+        lower one, an actor fell off the table, or the task already counts as
+        success get a new direction/overlap (same upper/lower choice) up to
+        `max_tries` times."""
+        b = self.num_envs
+        if self.NUM_RECEPTACLES < 2:
+            raise ValueError("cluttered start scene needs at least two receptacles")
+        gen = torch.Generator().manual_seed(int(seed))
+        r0, r1 = self._all_plate_ids[0].cpu(), self._all_plate_ids[1].cpu()
+        upper_is_0 = torch.rand((b,), generator=gen) < 0.5
+        upper = torch.where(upper_is_0, r0, r1)
+        lower = torch.where(upper_is_0, r1, r0)
+        valid = (r0 >= 0) & (r1 >= 0)
+        half_diag = torch.tensor([0.5 * float(torch.hypot(*self.model_bbox_sizes[self.plate_names[int(l)]].cpu()[:2]))
+                                  for l in lower.clamp(min=0)])
+        lo, hi = overlap_frac
+        todo = valid.clone()
+        history = []
+        for attempt in range(max_tries + 1):
+            ang = torch.rand((b,), generator=gen) * 2 * np.pi
+            frac = lo + (hi - lo) * torch.rand((b,), generator=gen)
+            offset = torch.stack([torch.cos(ang), torch.sin(ang)], 1) * (frac * half_diag).unsqueeze(1)
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            self._move_actors_onto(
+                upper.clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                lower.clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                todo.to(self.device), offset.to(self.device), dz)
+            self._finish_perturbation(settle_t)
+            on = self._rests_on(upper.to(self.device), self.plate_names, self.objs_plate,
+                                lower.to(self.device), self.plate_names, self.objs_plate)
+            bad = (self._fallen_mask() | self.get_info()["success"].bool() | ~on) & valid.to(self.device)
+            history.append(int(bad.sum()))
+            todo = bad.cpu()
+            if history[-1] == 0:
+                break
+        self.start_scene_upper = upper
+        self.start_scene_history = history
+        self.reset_grasp_stats()
+        print(f"  [cluttered] seed={seed}: bad envs per round = {history}"
+              f"{'' if history[-1] == 0 else '  (still bad after retries)'}")
 
     def _sample_chaos_poses(self, gen, half_edge, center, base_height, drop_height,
                             layer_gap, height_jitter, tilt_max_deg):

@@ -17,6 +17,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import logging; logging.getLogger("mani_skill").setLevel(logging.ERROR)
+from envs import rng_streams
 from envs.wrapper import CronosWrapper
 from envs.suite import TaskSuite
 from envs.config import load_cronos_config, resolve_symbolic_task, has_symbolic_refs, build_obj_recep_name_maps
@@ -45,6 +46,8 @@ def main():
     ap.add_argument("--n-resets", type=int, default=3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--layout", default=None, help="override YAML train_layout")
+    ap.add_argument("--legacy-rng", action="store_true",
+                    help="global-generator draws instead of main.py's per-episode scene ids")
     cli = ap.parse_args()
     import cv2
 
@@ -90,10 +93,15 @@ def main():
     print(f"in-domain eval layout={eval_layout or 'default'}")
     for r in range(cli.n_resets):
         for kind in ("train", "eval_in_domain"):
+            # same scene ids as main.py: training episode r, eval point r round 0
+            ids = None
+            if not cli.legacy_rng:
+                ids = (rng_streams.scene_ids(a.seed, a.num_envs, "episode", episode=r) if kind == "train" else
+                       rng_streams.scene_ids(a.seed, a.num_envs, "eval", point=r, domain="rand", round=0))
             if kind == "train":
-                obs, instr, _ = env.reset(layout=layout)
+                obs, instr, _ = env.reset(layout=layout, layout_ids=ids)
             else:
-                env.reset(skip_scheduler=True, layout=eval_layout)
+                env.reset(skip_scheduler=True, layout=eval_layout, layout_ids=ids)
                 env.set_task(ev_obj, ev_rec)
             obs, hist = env.fix_wide_starts()
             instr = env.get_language_instructions()

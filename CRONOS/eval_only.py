@@ -42,7 +42,7 @@ from evaluation.plan import build_plan, build_scenes, checkpoint_progress, plan_
 from evaluation.provenance import (check_against_training, resolve_config_path, resolve_policy_args,
                                    scene_definition)
 from evaluation.sequential import SequentialEvaluator
-from evaluation.start_scenes import StartScene
+from evaluation.start_scenes import OOD_BASE_SCENES, StartScene
 
 
 @dataclass
@@ -390,6 +390,9 @@ class EvalRunner:
         """Standalone eval: resolve settings → build plan → execute → write records."""
         a = self.args
         settings = resolve_eval_settings(a, self.yaml_config.eval if self.yaml_config else None, sys.argv[1:])
+        if a.start_scene in OOD_BASE_SCENES and not settings.sources["domains"].startswith("cli"):
+            settings.domains = ["out_of_domain"]
+            settings.sources["domains"] = f"start_scene={a.start_scene}"
         plan = build_plan(self._build_scenes(), settings, num_envs=a.num_envs,
                           segment_len=a.segment_len, seed=a.seed)
         plan.provenance = self.provenance

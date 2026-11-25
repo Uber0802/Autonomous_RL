@@ -9,6 +9,12 @@ before the first rollout step (`SequentialEvaluator(start_scene_fn=...)`):
   overlap_nonobj_nontarget  the other object placed on the other receptacle
   chaos                     every object / receptacle re-dropped from above the
                             table at random poses, overlap allowed
+  overlapped                every object rests on a random receptacle, never the
+                            task object on its target receptacle
+  cluttered                 one receptacle rests partly on the other
+
+overlapped / cluttered are defined on the out-of-domain base layout: unless
+`--eval-domains` is given, eval_only.py runs them on out_of_domain only.
 
 "Other" = the first object / receptacle of the env's scene that is not the one
 of its current task. Random perturbations are seeded from
@@ -26,7 +32,9 @@ import numpy as np
 from envs import rng_streams
 
 START_SCENES = ("default", "overlap_obj_nontarget", "overlap_nonobj_target",
-                "overlap_nonobj_nontarget", "chaos")
+                "overlap_nonobj_nontarget", "chaos", "overlapped", "cluttered")
+# Start scenes whose default eval domain is out_of_domain (rand_ood base layout).
+OOD_BASE_SCENES = ("overlapped", "cluttered")
 
 
 def start_scene_seed(layout_seed: int, domain: str, pose_set: int, start_scene: str) -> int:
@@ -92,6 +100,10 @@ class StartScene:
         if name == "default":
             return obs
         seed = start_scene_seed(self.layout_seed, eval_kind, seq.pose_set, name)
+        if name == "overlapped":
+            return self.env.overlapped_start(seed)
+        if name == "cluttered":
+            return self.env.cluttered_start(seed)
         if name == "chaos":
             return self.env.chaos_drop(seed, half_edge=(a.chaos_half_x, a.chaos_half_y),
                                        drop_height=a.chaos_drop_height, layer_gap=a.chaos_layer_gap,

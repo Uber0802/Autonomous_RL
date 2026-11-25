@@ -23,7 +23,10 @@ pose set   R consecutive rounds that share one set of start poses. R = (n-1)! in
 pass       one batch of envs stepped together. `parallel` runs every scene in
            one pass on its own env range; `serial` runs one pass per scene with
            every env loaded with that scene.
-domain     "in_domain" (the run's `obj_set`) or "out_of_domain" (`rand_ood`).
+domain     "in_domain" (the run's `obj_set`), "out_of_domain" (`rand_ood`), or
+           the clutter layouts "overlap" (`rand_overlap`: the grid combos the
+           spacing check prunes) and "drop" (`rand_drop`: air drop). Default:
+           in_domain and out_of_domain.
 unit       (domain, pass, round) — what runs, completes, resumes and merges.
 
 Round r (4 tasks, sequential, R = 6):
@@ -65,9 +68,16 @@ from envs import rng_streams
 
 VALID_MODES = ("sequential", "single")
 VALID_SCHEDULES = ("parallel", "serial")
-VALID_DOMAINS = ("in_domain", "out_of_domain")
+VALID_DOMAINS = ("in_domain", "out_of_domain", "overlap", "drop")
+DEFAULT_DOMAINS = ("in_domain", "out_of_domain")
 VALID_POSE_PHASES = ("start", "end", "both")
 OOD_OBJ_SET = "rand_ood"
+DOMAIN_OBJ_SETS = {"out_of_domain": OOD_OBJ_SET, "overlap": "rand_overlap", "drop": "rand_drop"}
+
+
+def domain_obj_set(domain: str, in_domain_obj_set: str) -> str:
+    """The env `obj_set` an eval domain resets with."""
+    return in_domain_obj_set if domain == "in_domain" else DOMAIN_OBJ_SETS[domain]
 MAX_ROUNDS_PER_SET_FOR_ALL = 24   # rounds: all refuses when a pose set is longer than this
 
 # Keys that existed in earlier drafts of the `eval:` block. Rejected with a pointer
@@ -131,7 +141,7 @@ class EvalSettings:
     policy_seed: int = -1
     layout_slots: int = -1                 # start poses per block; -1 = one per env of the block
     scene_schedule: str = "parallel"
-    domains: List[str] = field(default_factory=lambda: list(VALID_DOMAINS))
+    domains: List[str] = field(default_factory=lambda: list(DEFAULT_DOMAINS))
     record_video: bool = True
     video_envs_per_block: int = -1         # first k envs of each block; -1 = all envs
     record_pose: bool = True
