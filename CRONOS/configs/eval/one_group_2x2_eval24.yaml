@@ -1,0 +1,55 @@
+# Eval config: paired-baseline-eligible eval of the **2×2 single-group
+# scene** that `configs/spatialvla_2x2_train.yaml` trains on.
+#
+# Why this YAML matches that training config *except* num_envs:
+#   - same `obj: [7, 2]` (ketchup_bottle, kitchen_shovel)
+#   - same `recep: [1, 2]` (yellow_plate, cloth)
+#   - same `name: "default"` and `task_order: "sequential"` so the scheduler
+#     is constructed byte-identically to the training scene's scheduler
+#   - num_envs intentionally overridden to **24** (eval), not training's 64
+#     — eval_only.py runs each task with full num_envs (one (obj, recep) pair
+#     is broadcast to all num_envs envs), so 24 gives 24 trials/task = 96
+#     trials across the 4 tasks and keeps the scheduler's `% 4 == 0`
+#     constraint. 24 trials put the 95% CI at ≈ ±17pp on a 25% rate.
+#
+# **Paired McNemar baseline.** A zero-shot eval run under this YAML at
+# `--seed 0` is the per-trial-paired baseline for post-RL McNemar tests,
+# provided the training runs use the SAME seed. CronosWrapper's
+# `rand_episode_id` depends only on `args.seed`, and `eval_mode=single`
+# bypasses the scheduler (`skip_scheduler=True`), so trial inits across
+# paired runs are byte-identical at the same seed regardless of what the
+# *training* scheduler did.
+#
+# Canonical baseline command:
+#   python eval_only.py \
+#     --config-path configs/eval/one_group_2x2_eval24.yaml \
+#     --eval-mode single --action-chunk 1 \
+#     --seed 0 \
+#     --policy spatialvla \
+#     --vla-path IPEC-COMMUNITY/spatialvla-4b-224-sft-bridge \
+#     --vla-unnorm-key bridge_orig/1.0.0 \
+#     --record-video
+#
+# `--eval-ood` is left at its default (True) — the 2x2 config has a
+# meaningful rand_ood pool. The McNemar comparison reads the `in_domain`
+# numbers; OOD is reported for context only.
+
+cronos_version: V0.99
+task_order: sequential               # matches the training config; inert in eval_mode=single
+fan_out: true
+
+groups:
+  - name: "default"                  # matches the training config
+    num_envs: 24                     # 24 % 4 == 0; eval floor (paired McNemar baseline)
+    obj: [7, 2]                      # ketchup_bottle, kitchen_shovel
+    recep: [1, 2]                    # yellow_plate, cloth
+    task_sequence:                   # explicit form of the auto-generated 4 N×M combinations
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"
+    eval_tasks:
+      - "put obj1 on recep1"
+      - "put obj1 on recep2"
+      - "put obj2 on recep1"
+      - "put obj2 on recep2"

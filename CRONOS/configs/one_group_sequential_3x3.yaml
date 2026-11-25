@@ -1,0 +1,17 @@
+# One group, 3 objects x 3 receptacles, sequential task order.
+# 9 tasks total, fan-out enabled (default).
+#
+# Objects: toy_bear (10), plastic_bottle (4), fast_food_cup (11)
+# Receptacles: sheet_metal (5), drawing_tablet (6), flat_bowl (9)
+
+cronos_version: V0.99
+task_order: sequential
+fan_out: true
+
+groups:
+  - name: "scene_3x3"
+    num_envs: 72             # 72 envs / 9 tasks = 8 envs per task
+    obj: [10, 4, 11]         # toy_bear, plastic_bottle, fast_food_cup
+    recep: [5, 6, 9]         # sheet_metal, drawing_tablet, flat_bowl
+    # task_sequence auto-generated: all 9 NxM combinations
+    # eval_tasks auto-generated: same as task_sequence

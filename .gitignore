@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+venv/
+env/
+.venv/
+# `env/` above would also hide this tracked source directory.
+!SimplerEnv/simpler_env/env/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# CRONOS runtime artifacts
+CRONOS/cronos_mmap_*/
+CRONOS/wandb/
+CRONOS/*/wandb/
+CRONOS/*.bak
+CRONOS/*_ldd.txt
+CRONOS/bridge_multi.py.bak
+CRONOS/test_checkpoints/
+CRONOS/test_alignment.py
+CRONOS/test_vla_limits.py
+
+# Logs (all runtime outputs)
+*.log
+*.out
+*.tmp
+*_stdout.log
+*_stderr.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights (too large for git)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Datasets / large assets
+*.hdf5
+*.h5
+*.npz
+
+# Videos
+*.mp4
+*.avi
+
+# Submodule artifacts
+openvla/wandb/
+SimplerEnv/wandb/
+ManiSkill/data/
+
+# Internal documentation: changelog, experiment results, bug reports, design
+# notes. Local only; the release documents itself through README.md.
+CRONOS/doc/
+# Plotting / statistics tools. Will be released later; ignored until then.
+CRONOS/plotting/
+# Debug scripts, backups, launch queues, per-experiment plot configs with
+# machine-specific paths. Local only, never released.
+CRONOS/history/
+reports/

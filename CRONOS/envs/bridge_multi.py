@@ -1,0 +1,1879 @@
+import os
+import itertools
+from pathlib import Path
+import cv2
+import numpy as np
+import sapien
+import torch
+import torch.nn.functional as F
+from sapien.physx import PhysxMaterial
+from transforms3d.euler import euler2quat
+
+from mani_skill.envs.sapien_env import BaseEnv
+from .base_env import BRIDGE_DATASET_ASSET_PATH, \
+    WidowX250SBridgeDatasetFlatTable
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils import common, io_utils, sapien_utils
+from mani_skill.utils.geometry import rotation_conversions
+from mani_skill.utils.structs.actor import Actor
+from mani_skill.utils.structs.pose import Pose
+from mani_skill.utils.structs.types import SimConfig
+from mani_skill.utils.registration import register_env
+
+CARROT_DATASET_DIR = Path(__file__).resolve().parents[2] / "ManiSkill" / "mani_skill" / "assets" / "carrot"
+
+
+def masks_to_boxes_pytorch(masks):
+    b, H, W = masks.shape
+    boxes = []
+    for i in range(b):
+        pos = masks[i].nonzero(as_tuple=False)  # [N, 2]
+        if pos.shape[0] == 0:
+            boxes.append(torch.tensor([0, 0, 0, 0], dtype=torch.long, device=masks.device))
+        else:
+            ymin, xmin = pos.min(dim=0)[0]
+            ymax, xmax = pos.max(dim=0)[0]
+            boxes.append(torch.stack([xmin, ymin, xmax, ymax]))
+    return torch.stack(boxes, dim=0)  # [b, 4]
+
+
+class BasePickPlace(BaseEnv):
+    """Base Digital Twin environment for digital twins of the BridgeData v2"""
+
+    SUPPORTED_OBS_MODES = ["rgb+segmentation"]
+    SUPPORTED_REWARD_MODES = ["none"]
+
+    obj_static_friction = 1.0
+    obj_dynamic_friction = 1.0
+
+    rgb_camera_name: str = "3rd_view_camera"
+    rgb_overlay_mode: str = "background"  # 'background' or 'object' or 'debug' or combinations of them
+
+    overlay_images_numpy: list[np.ndarray]
+    overlay_textures_numpy: list[np.ndarray]
+    overlay_mix_numpy: list[float]
+    overlay_images: torch.Tensor
+    overlay_textures: torch.Tensor
+    overlay_mix: torch.Tensor
+    model_db_carrot: dict[str, dict]
+    model_db_plate: dict[str, dict]
+    carrot_names: list[str]
+    plate_names: list[str]
+    select_carrot_ids: torch.Tensor
+    select_plate_ids: torch.Tensor
+    select_overlay_ids: torch.Tensor
+    select_pos_ids: torch.Tensor
+    select_quat_ids: torch.Tensor
+
+    initial_qpos: np.ndarray
+    initial_robot_pos: sapien.Pose
+    safe_robot_pos: sapien.Pose
+
+    def __init__(self, **kwargs):
+        # random pose
+        self._generate_init_pose()
+
+        # widowx
+        self.initial_qpos = np.array([
+            -0.01840777, 0.0398835, 0.22242722,
+            -0.00460194, 1.36524296, 0.00153398,
+            0.037, 0.037,
+        ])
+        self.initial_robot_pos = sapien.Pose([0.147, 0.028, 0.870], q=[0, 0, 0, 1])
+        self.safe_robot_pos = sapien.Pose([0.147, 0.028, 1.870], q=[0, 0, 0, 1])
+
+        # stats
+        self.extra_stats = dict()
+
+        super().__init__(
+            robot_uids=WidowX250SBridgeDatasetFlatTable,
+            **kwargs
+        )
+
+    def _generate_init_pose(self):
+        raise NotImplementedError
+
+    @property
+    def _default_sim_config(self):
+        return SimConfig(sim_freq=500, control_freq=5, spacing=20)
+
+    def _build_actor_helper(self, name: str, path: Path, density: float, scale: float, pose: Pose):
+        """helper function to build actors by ID directly and auto configure physical materials"""
+        physical_material = PhysxMaterial(
+            static_friction=self.obj_static_friction,
+            dynamic_friction=self.obj_dynamic_friction,
+            restitution=0.0,
+        )
+        builder = self.scene.create_actor_builder()
+
+        collision_file = str(path / "collision.obj")
+        builder.add_multiple_convex_collisions_from_file(
+            filename=collision_file,
+            scale=[scale] * 3,
+            material=physical_material,
+            density=density,
+        )
+
+        visual_file = str(path / "textured.obj")
+        if not os.path.exists(visual_file):
+            visual_file = str(path / "textured.dae")
+            if not os.path.exists(visual_file):
+                visual_file = str(path / "textured.glb")
+        builder.add_visual_from_file(filename=visual_file, scale=[scale] * 3)
+
+        builder.initial_pose = pose
+        actor = builder.build(name=name)
+        return actor
+
+    def _load_agent(self, options: dict):
+        super()._load_agent(
+            options, sapien.Pose(p=[0.127, 0.060, 0.85], q=[0, 0, 0, 1])
+        )
+
+    def _load_scene(self, options: dict):
+        # original SIMPLER envs always do this? except for open drawer task
+        for i in range(self.num_envs):
+            sapien_utils.set_articulation_render_material(
+                self.agent.robot._objs[i], specular=0.9, roughness=0.3
+            )
+
+        # load background
+        builder = self.scene.create_actor_builder()  # Warning should be dissmissed, for we set the initial pose below -> actor.set_pose
+        scene_pose = sapien.Pose(q=[0.707, 0.707, 0, 0])
+        scene_offset = np.array([-2.0634, -2.8313, 0.0])
+
+        scene_file = str(BRIDGE_DATASET_ASSET_PATH / "stages/bridge_table_1_v1.glb")
+
+        builder.add_nonconvex_collision_from_file(scene_file, pose=scene_pose)
+        builder.add_visual_from_file(scene_file, pose=scene_pose)
+        builder.initial_pose = sapien.Pose(-scene_offset)
+        builder.build_static(name="arena")
+
+        # models
+        self.model_bbox_sizes = {}
+        # Scaled bbox min-z per model: actor-origin height above the actor's
+        # bbox bottom is -model_bbox_min_z[name]. Used by the "wide" layout to
+        # place an actor so its bottom rests on the table or on another actor.
+        self.model_bbox_min_z = {}
+
+        # carrot
+        self.objs_carrot: dict[str, Actor] = {}
+
+        for idx, name in enumerate(self.model_db_carrot):
+            model_path = CARROT_DATASET_DIR / "more_carrot" / name
+            density = self.model_db_carrot[name].get("density", 1000)
+            scale_list = self.model_db_carrot[name].get("scale", [1.0])
+            bbox = self.model_db_carrot[name]["bbox"]
+
+            scale = self.np_random.choice(scale_list)
+            pose = Pose.create_from_pq(torch.tensor([1.0, 0.3 * idx, 1.0]))
+            self.objs_carrot[name] = self._build_actor_helper(name, model_path, density, scale, pose)
+
+            bbox_size = np.array(bbox["max"]) - np.array(bbox["min"])  # [3]
+            self.model_bbox_sizes[name] = common.to_tensor(bbox_size * scale, device=self.device)  # [3]
+            self.model_bbox_min_z[name] = float(bbox["min"][2]) * float(scale)
+
+        # plate
+        self.objs_plate: dict[str, Actor] = {}
+
+        for idx, name in enumerate(self.model_db_plate):
+            model_path = CARROT_DATASET_DIR / "more_plate" / name
+            density = self.model_db_plate[name].get("density", 1000)
+            scale_list = self.model_db_plate[name].get("scale", [1.0])
+            bbox = self.model_db_plate[name]["bbox"]
+
+            scale = self.np_random.choice(scale_list)
+            pose = Pose.create_from_pq(torch.tensor([2.0, 0.3 * idx, 1.0]))
+            self.objs_plate[name] = self._build_actor_helper(name, model_path, density, scale, pose)
+
+            bbox_size = np.array(bbox["max"]) - np.array(bbox["min"])  # [3]
+            self.model_bbox_sizes[name] = common.to_tensor(bbox_size * scale, device=self.device)  # [3]
+            self.model_bbox_min_z[name] = float(bbox["min"][2]) * float(scale)
+
+    def _load_lighting(self, options: dict):
+        self.scene.set_ambient_light([0.3, 0.3, 0.3])
+        self.scene.add_directional_light(
+            [0, 0, -1],
+            [2.2, 2.2, 2.2],
+            shadow=False,
+            shadow_scale=5,
+            shadow_map_size=2048,
+        )
+        self.scene.add_directional_light([-1, -0.5, -1], [0.7, 0.7, 0.7])
+        self.scene.add_directional_light([1, 1, -1], [0.7, 0.7, 0.7])
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        self._initialize_episode_pre(env_idx, options)
+        raise NotImplementedError
+
+    def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
+        raise NotImplementedError
+
+    def _settle(self, t=0.5):
+        """run the simulation for some steps to help settle the objects"""
+        if self.gpu_sim_enabled:
+            self.scene._gpu_apply_all()
+
+        sim_steps = int(self.sim_freq * t / self.control_freq)
+        for _ in range(sim_steps):
+            self.scene.step()
+
+        if self.gpu_sim_enabled:
+            self.scene._gpu_fetch_all()
+
+    def reset_grasp_stats(self):
+        self.consecutive_grasp.zero_()
+        self.episode_stats["is_src_obj_grasped"].zero_()
+        self.episode_stats["consecutive_grasp"].zero_()
+
+    def evaluate(self, success_require_src_completely_on_target=True):
+        xy_flag_required_offset = 0.01
+        z_flag_required_offset = 0.05
+        netforce_flag_required_offset = 0.03
+
+        b = self.num_envs
+
+        # actor
+        if not hasattr(self, "select_carrot_ids"):
+            # Fallback during initial reset if not yet set by set_current_task or _initialize_episode
+            self.select_carrot_ids = getattr(self, "select_carrot1_ids", torch.zeros((b,), dtype=torch.long, device=self.device))
+        if not hasattr(self, "select_plate_ids"):
+            self.select_plate_ids = getattr(self, "select_plate1_ids", torch.zeros((b,), dtype=torch.long, device=self.device))
+
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+
+        carrot_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(carrot_actor)])  # [b, 3]
+        carrot_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])  # [b, 4]
+        plate_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(plate_actor)])  # [b, 3]
+        plate_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])  # [b, 4]
+
+        # optional second plate
+        src_on_target2 = torch.zeros((b,), dtype=torch.bool, device=self.device)
+        if hasattr(self, "select_extra2_ids"):
+            select_plate2 = [self.plate_names[idx] for idx in self.select_extra2_ids]
+            plate2_actor = [self.objs_plate[n] for n in select_plate2]
+            plate2_p = torch.stack([a.pose.p[idx] for idx, a in enumerate(plate2_actor)])  # [b, 3]
+            plate2_q = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate2_actor)])  # [b, 4]
+            
+            pos_tgt2 = plate2_p
+            offset2 = carrot_p - pos_tgt2
+            xy_flag2 = (
+                torch.linalg.norm(offset2[:, :2], dim=1)
+                <= self.plate_bbox_world.max(dim=1).values / 2 + xy_flag_required_offset
+            )
+            z_flag2 = (offset2[:, 2] > 0) & (
+                offset2[:, 2] - self.plate_bbox_world[:, 2] / 2 - self.carrot_bbox_world[:, 2] / 2
+                <= z_flag_required_offset
+            )
+            src_on_target2 = xy_flag2 & z_flag2
+
+        # whether moved the correct object
+        # source_obj_xy_move_dist = torch.linalg.norm(
+        #     self.episode_source_obj_xyz_after_settle[:, :2] - source_obj_pose.p[:, :2],
+        #     dim=1,
+        # )
+        # other_obj_xy_move_dist = []
+        # for obj_name in self.objs.keys():
+        #     obj = self.objs[obj_name]
+        #     obj_xyz_after_settle = self.episode_obj_xyzs_after_settle[obj_name]
+        #     if obj.name == self.source_obj_name:
+        #         continue
+        #     other_obj_xy_move_dist.append(
+        #         torch.linalg.norm(
+        #             obj_xyz_after_settle[:, :2] - obj.pose.p[:, :2], dim=1
+        #         )
+        #     )
+
+        # moved_correct_obj = (source_obj_xy_move_dist > 0.03) and (
+        #     all([x < source_obj_xy_move_dist for x in other_obj_xy_move_dist])
+        # )
+        # moved_wrong_obj = any([x > 0.03 for x in other_obj_xy_move_dist]) and any(
+        #     [x > source_obj_xy_move_dist for x in other_obj_xy_move_dist]
+        # )
+        # moved_correct_obj = False
+        # moved_wrong_obj = False
+
+        # whether the source object is grasped
+
+        is_src_obj_grasped = torch.zeros((b,), dtype=torch.bool, device=self.device)  # [b]
+
+        for idx, name in enumerate(self.model_db_carrot):
+            is_select = self.select_carrot_ids == idx  # [b]
+            grasped = self.agent.is_grasping(self.objs_carrot[name])  # [b]
+            is_src_obj_grasped = torch.where(is_select, grasped, is_src_obj_grasped)  # [b]
+
+        # if is_src_obj_grasped:
+        self.consecutive_grasp += is_src_obj_grasped
+        self.consecutive_grasp[is_src_obj_grasped == 0] = 0
+        consecutive_grasp = self.consecutive_grasp >= 5
+        #print(f"is_src_obj_grasped: {is_src_obj_grasped.squeeze().cpu().tolist()}")
+        #print(f"consecutive_grasp: {self.consecutive_grasp.squeeze().cpu().tolist()}")
+        #g = self.episode_stats["is_src_obj_grasped"]
+        #print(f"info is_src_obj_grasped: {g.squeeze().cpu().tolist()}")
+        #g = self.episode_stats["consecutive_grasp"]
+        #print(f"info consecutive_grasp: {g.squeeze().cpu().tolist()}")
+
+        # whether the source object is on the target object based on bounding box position
+        tgt_obj_half_length_bbox = getattr(self, "plate_bbox_world", torch.zeros((b, 3), device=self.device)) / 2
+        src_obj_half_length_bbox = getattr(self, "carrot_bbox_world", torch.zeros((b, 3), device=self.device)) / 2
+
+        pos_src = carrot_p
+        pos_tgt = plate_p
+        offset = pos_src - pos_tgt
+        xy_flag = (
+                torch.linalg.norm(offset[:, :2], dim=1)
+                <= tgt_obj_half_length_bbox.max(dim=1).values + xy_flag_required_offset
+        )
+        z_flag = (offset[:, 2] > 0) & (
+                offset[:, 2] - tgt_obj_half_length_bbox[:, 2] - src_obj_half_length_bbox[:, 2]
+                <= z_flag_required_offset
+        )
+        src_on_target = xy_flag & z_flag
+        # src_on_target = False
+
+        if success_require_src_completely_on_target:
+            # whether the source object is on the target object based on contact information
+            net_forces = torch.zeros((b,), dtype=torch.float32, device=self.device)  # [b]
+            for idx in range(self.num_envs):
+                force = self.scene.get_pairwise_contact_forces(
+                    self.objs_carrot[select_carrot[idx]],
+                    self.objs_plate[select_plate[idx]],
+                )[idx]
+                force = torch.linalg.norm(force)
+                net_forces[idx] = force
+
+            src_on_target = src_on_target & (net_forces > netforce_flag_required_offset)
+
+        success = src_on_target
+
+        # Track if object on other receptable (handled above)
+
+        # prepare dist
+        gripper_p = (self.agent.finger1_link.pose.p + self.agent.finger2_link.pose.p) / 2  # [b, 3]
+        gripper_q = (self.agent.finger1_link.pose.q + self.agent.finger2_link.pose.q) / 2  # [b, 4]
+        gripper_carrot_dist = torch.linalg.norm(gripper_p - carrot_p, dim=1)  # [b, 3]
+        gripper_plate_dist = torch.linalg.norm(gripper_p - plate_p, dim=1)  # [b, 3]
+        carrot_plate_dist = torch.linalg.norm(carrot_p - plate_p, dim=1)  # [b, 3]
+
+        # Track if object on table
+        src_not_on_any_plate = (~src_on_target) & (~src_on_target2)
+        src_not_grasped = ~is_src_obj_grasped
+        src_not_on_floor = carrot_p[:, 2] >= 0.7
+        src_on_table = src_not_on_any_plate & src_not_grasped & src_not_on_floor
+
+        # self.episode_stats["moved_correct_obj"] = moved_correct_obj
+        # self.episode_stats["moved_wrong_obj"] = moved_wrong_obj
+        self.episode_stats["src_on_target"] = src_on_target
+        self.episode_stats["src_on_target2"] = src_on_target2
+        self.episode_stats["src_on_table"] = src_on_table
+        self.episode_stats["is_src_obj_grasped"] = self.episode_stats["is_src_obj_grasped"] | is_src_obj_grasped
+        self.episode_stats["consecutive_grasp"] = self.episode_stats["consecutive_grasp"] | consecutive_grasp
+        self.episode_stats["gripper_carrot_dist"] = gripper_carrot_dist
+        self.episode_stats["gripper_plate_dist"] = gripper_plate_dist
+        self.episode_stats["carrot_plate_dist"] = carrot_plate_dist
+
+        self.extra_stats["extra_pos_carrot"] = carrot_p
+        self.extra_stats["extra_q_carrot"] = carrot_q
+        self.extra_stats["extra_pos_plate"] = plate_p
+        self.extra_stats["extra_q_plate"] = plate_q
+        self.extra_stats["extra_pos_gripper"] = gripper_p
+        self.extra_stats["extra_q_gripper"] = gripper_q
+
+        return dict(**self.episode_stats, success=success)
+
+    def is_final_subtask(self):
+        # whether the current subtask is the final one, only meaningful for long-horizon tasks
+        return True
+
+    def get_carrot_actors(self):
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        return [self.objs_carrot[n] for n in select_carrot]
+
+    def get_plate_actors(self):
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        return [self.objs_plate[n] for n in select_plate]
+
+    def get_extra_plate_actors(self):
+        if hasattr(self, "select_extra2_ids"):
+            select_plate2 = [self.plate_names[idx] for idx in self.select_extra2_ids]
+            return [self.objs_plate[n] for n in select_plate2]
+        return self.get_plate_actors() # Fallback
+
+    def get_obj_pos(self):
+        return self.extra_stats["extra_pos_carrot"]
+
+    def get_recep_pos(self):    
+        return self.extra_stats["extra_pos_plate"]
+
+    def reset_unsuitable_envs(self, env_idx=[], obj_mask=None, recep_mask=None,
+                              reasons=None, fully_reset_envs=None, respawn_ids=None):
+        """Respawns envs whose objects/receptacles have fallen.
+
+        M2 Phase B: when ``obj_mask`` and ``recep_mask`` are provided
+        (by ``ResetStrategy.reset_unsuitable_envs``), they come from the
+        registered ``UnsuitableDetector`` and are the source of truth for
+        which task-relevant actor (current carrot or current plate) to respawn
+        per env. When omitted, falls back to the inlined ``< 0.7``
+        thresholds for backward compatibility.
+
+        M3c: optional ``reasons`` is a list[dict[env_idx, str]] from the
+        detector explaining which axis violated the workspace AABB; printed
+        with the HSR log line so HSR fires are diagnostic-grade.
+
+        M3 (full-env fix): optional ``fully_reset_envs`` is a bool tensor
+        of shape ``(num_envs,)`` from the per_env / all scopes. For each env
+        with ``fully_reset_envs[i] == True``, every actor of that env (all N
+        carrots AND all M plates, not just the task-relevant pair) is
+        respawned to a fresh ``xyz_configs`` draw. Hidden slots (cid < 0) are
+        skipped. ``obj_mask``/``recep_mask`` are only consulted for envs that
+        are NOT in ``fully_reset_envs`` (so per_actor scope still hits the
+        task-relevant single-actor path).
+        """
+        xyz_min = torch.tensor([-0.235, -0.075, 0.92], device=self.device)
+        xyz_max = torch.tensor([-0.085,  0.075, 0.95], device=self.device)
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+
+        # Get unsuitable object/recep masks. Prefer masks injected by the
+        # registered detector; fall back to inlined thresholds if the
+        # caller didn't provide them (e.g. older test paths).
+        if obj_mask is None or recep_mask is None:
+            obj_z = self.get_obj_pos()[:, 2]
+            recep_z = self.get_recep_pos()[:, 2]
+            obj_mask = obj_z < 0.7
+            recep_mask = recep_z < 0.7
+
+        obj_low_z_indices = torch.nonzero(obj_mask, as_tuple=False).squeeze()
+        if obj_low_z_indices.ndim == 0:
+            obj_low_z_list = [obj_low_z_indices.item()] if obj_low_z_indices.numel() > 0 else []
+        else:
+            obj_low_z_list = obj_low_z_indices.tolist()
+
+        recep_low_z_indices = torch.nonzero(recep_mask, as_tuple=False).squeeze()
+        if recep_low_z_indices.ndim == 0:
+            recep_low_z_list = [recep_low_z_indices.item()] if recep_low_z_indices.numel() > 0 else []
+        else:
+            recep_low_z_list = recep_low_z_indices.tolist()
+
+        # Generate position & quant samples
+        lc = 16
+        lo = len(self.overlay_images_numpy)
+        l1 = len(self.xyz_configs)
+        l2 = len(self.quat_configs)
+        ltt = lc * 1 * 16 * lo * l1 * l2
+        if respawn_ids is not None:
+            # Per-env ids from a keyed scene stream (`envs/rng_streams.scene_ids`):
+            # same uniform distribution as the draw below, but independent of the
+            # global numpy generator (which the PPO minibatch shuffle also uses).
+            indices = np.asarray(respawn_ids, dtype=np.int64).reshape(self.num_envs) % ltt
+        else:
+            indices = np.random.choice(ltt, self.num_envs)
+        xyz_indices = (indices//l2) %l1
+        xyz_sample = torch.tensor(self.xyz_configs[xyz_indices], device=self.device)
+        quant_indices = indices % l2
+        quant_sample = torch.tensor(self.quat_configs[quant_indices], device=self.device)
+
+        # HSR: respawn the env's task carrot/plate at the position
+        # of the active slot it actually occupies. Use the per-env `_reset_mask`
+        # trick (proven correct for physics — only respawned envs are touched).
+        # Note: this means the post-respawn frame has a 1-step camera lag (the
+        # new positions appear at frame 1 of the next segment, not frame 0),
+        # because SAPIEN 3's GPU camera buffer is updated by `scene.step` and
+        # masked set_pose calls don't trigger a re-render. A full-batch set_pose
+        # alternative was tried but causes non-target envs' actors to "fly
+        # away" on the next `_settle` due to floating-point round-trip
+        # perturbations. The 1-frame visual lag is the lesser of the two evils.
+        #
+        # `xyz_configs` is shape (Nconfigs, NUM_OBJECTS+NUM_RECEPTACLES, 3) —
+        # slots [0..N-1] are carrot positions, [N..N+M-1] are plate positions.
+        # `quat_configs[...,0]` is the rotated carrot quat, `[...,1]` is the
+        # identity plate quat (matches `_initialize_episode`).
+        N = self.NUM_OBJECTS
+        M = self.NUM_RECEPTACLES
+        all_c = torch.stack(self._all_carrot_ids, dim=0)        # (N, num_envs)
+        all_p = torch.stack(self._all_plate_ids, dim=0)         # (M, num_envs)
+        active_c = (all_c == self.select_carrot_ids.unsqueeze(0)).int().argmax(dim=0)  # (num_envs,)
+        active_p = (all_p == self.select_plate_ids.unsqueeze(0)).int().argmax(dim=0)   # (num_envs,)
+
+        # build the set of envs that need every actor
+        # respawned. For those envs we iterate over ALL N carrot slots + ALL M
+        # plate slots (skipping hidden slots) instead of the single
+        # task-relevant pair. Other envs fall through to the per-actor path.
+        if fully_reset_envs is not None:
+            full_idx = torch.nonzero(fully_reset_envs, as_tuple=False).squeeze()
+            if full_idx.ndim == 0:
+                full_envs_list = [full_idx.item()] if full_idx.numel() > 0 else []
+            else:
+                full_envs_list = full_idx.tolist()
+        else:
+            full_envs_list = []
+        full_envs_set = set(full_envs_list)
+
+        def _masked_set_pose(actor, env_i, p, q):
+            prev = actor.scene._reset_mask.clone()
+            actor.scene._reset_mask[:] = False
+            actor.scene._reset_mask[env_i] = True
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+            actor.scene._reset_mask = prev
+
+        # Full-env reset path: every actor of every env in full_envs_list.
+        for env_i in full_envs_list:
+            pos = xyz_sample[env_i]
+            quant = quant_sample[env_i]
+            for slot in range(N):
+                cid = int(all_c[slot, env_i].item())
+                if cid < 0:
+                    continue  # hidden slot (M2 mixed-N/M)
+                name = self.carrot_names[cid]
+                actor = self.objs_carrot[name]
+                phys = self._slot(slot)
+                _masked_set_pose(actor, env_i, pos[phys], quant[0])
+            for slot in range(M):
+                pid = int(all_p[slot, env_i].item())
+                if pid < 0:
+                    continue
+                name = self.plate_names[pid]
+                actor = self.objs_plate[name]
+                phys = self._slot(N + slot)
+                _masked_set_pose(actor, env_i, pos[phys], quant[1])
+
+        # Per-actor path: only the task-relevant carrot/plate, ONLY for envs
+        # NOT covered by the full-env path (so per_actor scope still works).
+        for idx, a in enumerate(plate_actor):
+            if idx in recep_low_z_list and idx not in full_envs_set:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                s = self._slot(N + int(active_p[idx].item()))
+                _masked_set_pose(a, idx, pos[s], quant[1])
+
+        for idx, a in enumerate(carrot_actor):
+            if idx in obj_low_z_list and idx not in full_envs_set:
+                pos = xyz_sample[idx]
+                quant = quant_sample[idx]
+                s = self._slot(int(active_c[idx].item()))
+                _masked_set_pose(a, idx, pos[s], quant[0])
+
+        # snapshot the current robot qpos BEFORE _settle so we can
+        # restore it after. In the post-_settle snap forced the arm to
+        # `self.initial_qpos`, which broke HSR-only semantics by silently
+        # resetting the robot whenever HSR fired. The drift during _settle's
+        # 0.5s of physics is still a real problem (PD control can't hold pose
+        # perfectly), but the right fix is to restore the pre-settle pose, not
+        # the home pose. The train loop calls reset_robot() separately when LSR
+        # is requested; that path snaps to initial_qpos.
+        robot_qpos_pre_settle = self.agent.robot.get_qpos().clone()
+
+        self._settle(0.5)
+
+        self.agent.reset(init_qpos=robot_qpos_pre_settle)
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+
+        flagged = sorted(set(obj_low_z_list) | set(recep_low_z_list) | full_envs_set)
+        if reasons:
+            # flatten per-env reasons to a compact one-line summary.
+            # `reasons[i]` is {} for healthy envs and {i: "axis violation"} otherwise.
+            reason_str = ", ".join(
+                f"env{i}: {next(iter(reasons[i].values()))}"
+                for i in flagged if i < len(reasons) and reasons[i]
+            )
+        else:
+            reason_str = ""
+        # show envs that were actually respawned,
+        # broken down by which path handled them. The per-actor lists are
+        # empty under per_env / all scopes (ResetStrategy zeros them so the
+        # full-env path handles every actor of those envs — no double-set).
+        if full_envs_set:
+            full_list = sorted(full_envs_set)
+            print(f"Reset Unsuitable. envs: {flagged} (full-env: {full_list}) | reasons: [{reason_str}]")
+        else:
+            print(f"Reset Unsuitable. envs: {flagged} (obj-only: {obj_low_z_list}, recep-only: {recep_low_z_list}) | reasons: [{reason_str}]")
+        reset_env_count = len(flagged)
+        return reset_env_count
+
+    def get_language_instruction(self):
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+
+        instruct = []
+        for idx in range(self.num_envs):
+            carrot_name = self.model_db_carrot[select_carrot[idx]]["name"]
+            plate_name = self.model_db_plate[select_plate[idx]]["name"]
+            instruct.append(f"put {carrot_name} on {plate_name}")
+        return instruct
+
+    def _after_reconfigure(self, options: dict):
+        target_object_actor_ids = [
+            x._objs[0].per_scene_id
+            for x in self.scene.actors.values()
+            if x.name not in ["ground", "goal_site", "", "arena"]
+        ]
+        self.target_object_actor_ids = torch.tensor(
+            target_object_actor_ids, dtype=torch.int16, device=self.device
+        )
+        # get the robot link ids
+        robot_links = self.agent.robot.get_links()
+        self.robot_link_ids = torch.tensor(
+            [x._objs[0].entity.per_scene_id for x in robot_links],
+            dtype=torch.int16,
+            device=self.device,
+        )
+
+    def _green_sceen_rgb(self, rgb, segmentation, overlay_img, overlay_texture, overlay_mix):
+        """returns green screened RGB data given a batch of RGB and segmentation images and one overlay image"""
+        actor_seg = segmentation[..., 0]
+        # mask = torch.ones_like(actor_seg, device=actor_seg.device)
+        if actor_seg.device != self.robot_link_ids.device:
+            # if using CPU simulation, the device of the robot_link_ids and target_object_actor_ids will be CPU first
+            # but for most users who use the sapien_cuda render backend image data will be on the GPU.
+            self.robot_link_ids = self.robot_link_ids.to(actor_seg.device)
+            self.target_object_actor_ids = self.target_object_actor_ids.to(actor_seg.device)
+
+        mask = torch.isin(actor_seg, torch.concat([self.robot_link_ids, self.target_object_actor_ids]))
+        mask = (~mask).to(torch.float32)  # [b, H, W]
+        # m = torch.isin(actor_seg, self.robot_link_ids) # "object" mode
+
+        mask = mask.unsqueeze(-1)  # [b, H, W, 1]
+        # mix = overlay_mix.unsqueeze(1).unsqueeze(1).unsqueeze(1)  # [b, 1, 1, 1]
+
+        # perform overlay on the RGB observation image
+        assert rgb.shape == overlay_img.shape
+        assert rgb.shape == overlay_texture.shape
+
+        rgb = rgb.to(torch.float32)  # [b, H, W, 3]
+
+        rgb_ret = overlay_img * mask  # [b, H, W, 3]
+        rgb_ret += rgb * (1 - mask)  # [b, H, W, 3]
+
+        rgb_ret = torch.clamp(rgb_ret, 0, 255)  # [b, H, W, 3]
+        rgb_ret = rgb_ret.to(torch.uint8)  # [b, H, W, 3]
+
+        # rgb = rgb * (1 - mask) + overlay_img * mask
+        # rgb = rgb * 0.5 + overlay_img * 0.5 # "debug" mode
+
+        return rgb_ret
+
+    def get_obs(self, info: dict = None):
+        obs = super().get_obs(info)
+
+        # "greenscreen" process
+        if self.obs_mode_struct.visual.rgb and self.obs_mode_struct.visual.segmentation and self.overlay_images_numpy:
+            # get the actor ids of objects to manipulate; note that objects here are not articulated
+            camera_name = self.rgb_camera_name
+            assert "segmentation" in obs["sensor_data"][camera_name].keys()
+
+            overlay_img = self.overlay_images.to(obs["sensor_data"][camera_name]["rgb"].device)
+            overlay_texture = self.overlay_textures.to(obs["sensor_data"][camera_name]["rgb"].device)
+            overlay_mix = self.overlay_mix.to(obs["sensor_data"][camera_name]["rgb"].device)
+
+            green_screened_rgb = self._green_sceen_rgb(
+                obs["sensor_data"][camera_name]["rgb"],
+                obs["sensor_data"][camera_name]["segmentation"],
+                overlay_img,
+                overlay_texture,
+                overlay_mix
+            )
+            obs["sensor_data"][camera_name]["rgb"] = green_screened_rgb
+        return obs
+
+    # widowx
+    @property
+    def _default_human_render_camera_configs(self):
+        sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
+        return CameraConfig(
+            "render_camera",
+            pose=sapien.Pose(
+                [0.00, -0.16, 0.336], [0.909182, -0.0819809, 0.347277, 0.214629]
+            ),
+            width=512,
+            height=512,
+            intrinsic=np.array(
+                [[623.588, 0, 319.501], [0, 623.588, 239.545], [0, 0, 1]]
+            ),
+            near=0.01,
+            far=100,
+            mount=self.agent.robot.links_map["base_link"],
+        )   
+
+class BaseMultiPickPlace(BasePickPlace):
+    def __init__(self, **kwargs):
+        self._prep_init()
+
+        super().__init__(**kwargs)
+
+    def _prep_init(self):
+        # models
+        self.model_db_carrot: dict[str, dict] = io_utils.load_json(
+            CARROT_DATASET_DIR / "more_carrot" / "model_db.json"
+        )
+        assert len(self.model_db_carrot) == 25
+
+        self.model_db_plate: dict[str, dict] = io_utils.load_json(
+            CARROT_DATASET_DIR / "more_plate" / "model_db.json"
+        )
+        only_plate_name = list(self.model_db_plate.keys())[0]
+        self.model_db_plate = {k: v for k, v in self.model_db_plate.items() if k == only_plate_name}
+        assert len(self.model_db_plate) == 1
+
+        # random configs
+        self.carrot_names = list(self.model_db_carrot.keys())
+        self.plate_names = list(self.model_db_plate.keys())
+
+        # rgb overlay
+        model_db_table = io_utils.load_json(
+            CARROT_DATASET_DIR / "more_table" / "model_db.json"
+        )
+
+        img_fd = CARROT_DATASET_DIR / "more_table" / "imgs"
+        texture_fd = CARROT_DATASET_DIR / "more_table" / "textures"
+        self.overlay_images_numpy = [
+            cv2.resize(cv2.cvtColor(cv2.imread(str(img_fd / k)), cv2.COLOR_BGR2RGB), (640, 480))
+            for k in model_db_table  # [H, W, 3]
+        ]  # (B) [H, W, 3]
+        self.overlay_textures_numpy = [
+            cv2.resize(cv2.cvtColor(cv2.imread(str(texture_fd / v["texture"])), cv2.COLOR_BGR2RGB), (640, 480))
+            for v in model_db_table.values()  # [H, W, 3]
+        ]  # (B) [H, W, 3]
+        self.overlay_mix_numpy = [
+            v["mix"] for v in model_db_table.values()  # []
+        ]
+        assert len(self.overlay_images_numpy) == 21
+        assert len(self.overlay_textures_numpy) == 21
+        assert len(self.overlay_mix_numpy) == 21
+
+    def set_current_task(self, object: list[str], receptacle: list[str]):
+        raise NotImplementedError
+
+    def object_name(self):
+        """
+        Get all object names in all env.
+        return list[list[str]]
+        """
+        raise NotImplementedError
+
+    def receptacle_name(self):
+        """
+        Get all receptacle names in all env.
+        return list[list[str]]
+        """
+        raise NotImplementedError
+
+    def object_id(self):
+        """
+        Get all object ids in all env.
+        """
+        raise NotImplementedError
+
+    def receptacle_id(self):
+        """
+        Get all receptacle ids in all env.
+        """
+        raise NotImplementedError
+
+    def task_pool(self):
+        """
+        Get task pool in all env.
+        return list[list[str]]
+        """
+        objects = self.object_name()
+        receptacles = self.receptacle_name()
+
+        tasks_all_env = []
+        for idx in range(self.num_envs):
+            tasks_cur_env = []
+            
+            for pair in itertools.product(objects[idx], receptacles[idx]):
+                tasks_cur_env.append(f"put {pair[0]} on {pair[1]}")
+            
+            tasks_all_env.append(tasks_cur_env)
+        
+        return tasks_all_env
+
+
+
+# --- M2 Phase B: legacy TwoObjectOneReceptacle and OneObjectTwoReceptacle
+# classes were deleted here. Their behavior is preserved by PickPlaceNxM-v1(N=2, M=1)
+# and PickPlaceNxM-v1(N=1, M=2) below; see _NxM_PRESETS.
+
+
+class GenericNxMPickPlace(BaseMultiPickPlace):
+    """Generalized base for arbitrary N objects × M receptacles.
+
+    Subclasses only need to set class attributes:
+        POSE_PRESET, NUM_OBJECTS, NUM_RECEPTACLES,
+        DEFAULT_OBJ_INDICES, DEFAULT_PLATE_INDICES
+
+    Optional:
+        POSE_PRESET_OOD: str — OOD variant preset name
+        SLOT_ORDER: list[int] — maps generic slot index to physical preset slot.
+            Default: [0, 1, ..., N+M-1] (objects first, then receptacles).
+            Override for envs where the preset uses a different slot ordering.
+    """
+    POSE_PRESET: str
+    POSE_PRESET_OOD: str = ""
+    NUM_OBJECTS: int
+    NUM_RECEPTACLES: int
+    DEFAULT_OBJ_INDICES: list
+    DEFAULT_PLATE_INDICES: list
+    SLOT_ORDER: list = None  # None = identity mapping
+
+    def _prep_init(self):
+        """Override to keep all plates (not filtered to 1), matching TwoObjectTwoReceptacle."""
+        self.model_db_carrot = io_utils.load_json(CARROT_DATASET_DIR / "more_carrot" / "model_db.json")
+        assert len(self.model_db_carrot) == 25
+        self.model_db_plate = io_utils.load_json(CARROT_DATASET_DIR / "more_plate" / "model_db.json")
+        self.carrot_names = list(self.model_db_carrot.keys())
+        self.plate_names = list(self.model_db_plate.keys())
+
+        model_db_table = io_utils.load_json(CARROT_DATASET_DIR / "more_table" / "model_db.json")
+        img_fd = CARROT_DATASET_DIR / "more_table" / "imgs"
+        texture_fd = CARROT_DATASET_DIR / "more_table" / "textures"
+        self.overlay_images_numpy = [
+            cv2.resize(cv2.cvtColor(cv2.imread(str(img_fd / k)), cv2.COLOR_BGR2RGB), (640, 480))
+            for k in model_db_table
+        ]
+        self.overlay_textures_numpy = [
+            cv2.resize(cv2.cvtColor(cv2.imread(str(texture_fd / v["texture"])), cv2.COLOR_BGR2RGB), (640, 480))
+            for v in model_db_table.values()
+        ]
+        self.overlay_mix_numpy = [v["mix"] for v in model_db_table.values()]
+
+    def _generate_init_pose(self):
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+
+    def _generate_OOD_init_pose(self):
+        if not self.POSE_PRESET_OOD:
+            self._generate_init_pose()
+            return
+        from .suite import generate_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET_OOD]
+        self.xyz_configs = generate_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+
+    def _generate_drop_init_pose(self, drop_height=0.15):
+        """Eval-only air drop: continuous in-workspace xy, spawned `drop_height` above the table."""
+        from .suite import generate_drop_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_drop_pose_configs(**params, drop_height=float(drop_height))
+        self.quat_configs = QUAT_CONFIGS.copy()
+
+    def _generate_overlap_init_pose(self):
+        """Eval-only clutter OOD: the in-domain grid combos that spacing prunes."""
+        from .suite import generate_overlap_pose_configs, POSE_PRESETS, QUAT_CONFIGS
+        params = POSE_PRESETS[self.POSE_PRESET]
+        self.xyz_configs = generate_overlap_pose_configs(**params)
+        self.quat_configs = QUAT_CONFIGS.copy()
+
+    def get_carrot_actors(self):
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        return [self.objs_carrot[n] for n in select_carrot]
+
+    def get_plate_actors(self):
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        return [self.objs_plate[n] for n in select_plate]
+
+    def get_extra_plate_actors(self):
+        if self.NUM_RECEPTACLES > 1:
+            sel = [self.plate_names[idx] for idx in self._all_plate_ids[1]]
+            return [self.objs_plate[n] for n in sel]
+        return self.get_plate_actors()
+
+    def get_carrot_pose(self):
+        p = torch.zeros((self.num_envs, 3), device=self.device)
+        for name, actor in self.objs_carrot.items():
+            mask = (self.select_carrot_ids == self.carrot_names.index(name))
+            if mask.any(): p[mask] = actor.pose.p[mask]
+        return p
+
+    def get_plate_pose(self):
+        p = torch.zeros((self.num_envs, 3), device=self.device)
+        for name, actor in self.objs_plate.items():
+            mask = (self.select_plate_ids == self.plate_names.index(name))
+            if mask.any(): p[mask] = actor.pose.p[mask]
+        return p
+
+    def get_extra_plate_pose(self):
+        if self.NUM_RECEPTACLES > 1:
+            p = torch.zeros((self.num_envs, 3), device=self.device)
+            for name, actor in self.objs_plate.items():
+                mask = (self._all_plate_ids[1] == self.plate_names.index(name))
+                if mask.any(): p[mask] = actor.pose.p[mask]
+            return p
+        return self.get_plate_pose()
+
+    def _gather_slot_pose(self, slot_ids, actors, names):
+        """Pose of one logical slot for every env, as (p [b,3], q [b,4]).
+
+        A slot holds a different model in different envs (fan-out puts several
+        groups in one batch), so the pose has to be gathered per model with a
+        mask, the same way `get_carrot_pose` does. Envs whose slot is hidden
+        (`select` index -1, i.e. the group declared fewer objects than the env's
+        N) get NaN rather than a silent zero — a zero here is indistinguishable
+        from an actor that genuinely sits at the origin, and would quietly
+        become a real data point downstream.
+        """
+        p = torch.full((self.num_envs, 3), float("nan"), device=self.device)
+        q = torch.full((self.num_envs, 4), float("nan"), device=self.device)
+        for name, actor in actors.items():
+            mask = (slot_ids == names.index(name))
+            if mask.any():
+                p[mask] = actor.pose.p[mask]
+                q[mask] = actor.pose.q[mask]
+        return p, q
+
+    def get_all_slot_poses(self):
+        """Full per-env pose state of the manipulable scene.
+
+        Unlike `get_obj_pos()` / `get_recep_pos()` — which read `extra_stats` and
+        so only cover the pair the *current task* selected — this returns every
+        object slot and every receptacle slot, plus the gripper, with
+        orientation as well as position.
+
+        Returns::
+
+            {
+              "obj":     [(p, q), ...]   # NUM_OBJECTS entries, each [b,3] / [b,4]
+              "recep":   [(p, q), ...]   # NUM_RECEPTACLES entries
+              "gripper": (p, q)
+              "obj_names":   [[str] * b, ...]   # per-slot, per-env model name
+              "recep_names": [[str] * b, ...]
+            }
+
+        Model names are returned per env because the same slot index maps to
+        different models across groups; without them a row of coordinates cannot
+        be attributed to an actual object.
+        """
+        out = {"obj": [], "recep": [], "obj_names": [], "recep_names": []}
+        for slot_ids in self._all_carrot_ids:
+            out["obj"].append(self._gather_slot_pose(slot_ids, self.objs_carrot, self.carrot_names))
+            out["obj_names"].append(
+                [self.carrot_names[i] if i >= 0 else "" for i in slot_ids.tolist()]
+            )
+        for slot_ids in self._all_plate_ids:
+            out["recep"].append(self._gather_slot_pose(slot_ids, self.objs_plate, self.plate_names))
+            out["recep_names"].append(
+                [self.plate_names[i] if i >= 0 else "" for i in slot_ids.tolist()]
+            )
+        # Gripper midpoint, matching how `evaluate()` derives `extra_pos_gripper`.
+        g_p = (self.agent.finger1_link.pose.p + self.agent.finger2_link.pose.p) / 2
+        g_q = (self.agent.finger1_link.pose.q + self.agent.finger2_link.pose.q) / 2
+        out["gripper"] = (g_p, g_q)
+        return out
+
+    def _initialize_episode_pre(self, env_idx, options):
+        """AutoRL-aligned episode initialization.
+
+        Matches AutoRL's ``TwoObjectTwoReceptacle._initialize_episode_pre``:
+        - Objects and plates are FIXED from ``DEFAULT_OBJ_INDICES`` /
+          ``DEFAULT_PLATE_INDICES`` (1-based, converted to 0-based here).
+        - Overlay is derived from ``episode_id``.
+        - Position and quaternion: from ``episode_id`` when obj_set=="fixed",
+          per-env random otherwise (matching AutoRL's ``rand_id`` path).
+        """
+        b = len(env_idx)
+        assert b == self.num_envs
+
+        obj_set = options.get("obj_set", "rand")
+        if obj_set == "rand_ood":
+            self._generate_OOD_init_pose()
+        elif obj_set == "rand_overlap":
+            self._generate_overlap_init_pose()
+        elif obj_set == "rand_drop":
+            self._generate_drop_init_pose(options.get("drop_height", 0.15))
+        else:
+            self._generate_init_pose()
+
+        # --- Factor sizes (AutoRL: lc=16, lp=1, le=16) ---
+        lc = 16
+        lp = 1
+        le = 16
+        lo = len(self.overlay_images_numpy)
+        l1 = len(self.xyz_configs)
+        l2 = len(self.quat_configs)
+        ltt = lc * lp * le * lo * l1 * l2
+
+        # --- Episode ID ---
+        if "episode_id" in options:
+            episode_id = options["episode_id"]
+        else:
+            single_id = torch.randint(low=0, high=ltt, size=(1,), device=self.device).item()
+            episode_id = torch.full((b,), single_id, device=self.device)
+        episode_id = episode_id.reshape(b) % ltt
+
+        # --- Object selection: per-env tensor or scalar, falling back to preset defaults ---
+        self._all_carrot_ids = []
+        for i in range(self.NUM_OBJECTS):
+            key = f"obj{i+1}_index"
+            val = options.get(key, self.DEFAULT_OBJ_INDICES[i])
+            if isinstance(val, torch.Tensor):
+                ids = (val.reshape(b) - 1).long().to(self.device)
+            else:
+                ids = torch.full((b,), val - 1, dtype=torch.long, device=self.device)
+            setattr(self, f"select_carrot{i+1}_ids", ids)
+            self._all_carrot_ids.append(ids)
+
+        # --- Plate selection: per-env tensor or scalar, falling back to preset defaults ---
+        self._all_plate_ids = []
+        for i in range(self.NUM_RECEPTACLES):
+            key = f"plate{i+1}_index"
+            val = options.get(key, self.DEFAULT_PLATE_INDICES[i])
+            if isinstance(val, torch.Tensor):
+                ids = (val.reshape(b) - 1).long().to(self.device)
+            else:
+                ids = torch.full((b,), val - 1, dtype=torch.long, device=self.device)
+            setattr(self, f"select_plate{i+1}_ids", ids)
+            self._all_plate_ids.append(ids)
+
+        # --- Overlay: from options override or episode_id ---
+        if "select_overlay_ids" in options:
+            self.select_overlay_ids = options["select_overlay_ids"].reshape(b).to(self.device) % lo
+        else:
+            self.select_overlay_ids = (episode_id // (l1 * l2)) % lo
+
+        # --- Position & quaternion ---
+        self.select_pos_ids = (episode_id // l2) % l1
+        self.select_quat_ids = episode_id % l2
+
+        # Per-env random pose for non-fixed obj_set (matching AutoRL exactly)
+        self.last_layout_rand_ids = None
+        if obj_set != "fixed" and "layout_ids" in options:
+            # Explicit per-env layout draw (envs/rng_streams.py). Replaces the
+            # torch.randint below, which consumes the global CUDA generator that
+            # the policy's action sampling also advances — so the layout an env
+            # got depended on how many actions had been sampled before it. An
+            # id is a uniform 62-bit integer; `% ltt` maps it onto the same
+            # uniform-over-configs distribution the randint drew from.
+            ids = torch.as_tensor(options["layout_ids"], dtype=torch.long, device=self.device).reshape(b)
+            rand_id = ids % ltt
+            self.last_layout_rand_ids = rand_id
+            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_quat_ids = rand_id % l2
+        elif obj_set != "fixed":
+            if obj_set != "rand_8":
+                rand_id = torch.randint(low=0, high=ltt, size=(b,), device=self.device)
+            else:
+                rand_id = torch.randint(low=0, high=ltt, size=(b // 8,), device=self.device)
+                rand_id = rand_id.repeat(8)
+            rand_id = rand_id.reshape(b)
+            self.select_pos_ids = (rand_id // l2) % l1
+            self.select_quat_ids = rand_id % l2
+
+        # "wide" layout (train_layout / eval_in_domain_layout): replaces the
+        # grid/spacing poses above with continuous random poses over the whole
+        # table (see `_sample_wide_layout`). Any other value keeps the default.
+        self._wide_xyz = self._wide_quat = None
+        if options.get("layout", "default") == "wide":
+            self._wide_xyz, self._wide_quat = self._sample_wide_layout(options)
+
+    def _sample_wide_layout(self, options, attempt=0):
+        """Random start poses with NO clutter avoidance over a wide table area.
+
+        Every loaded object and receptacle gets a uniform xy inside
+        `wide_center +- wide_half_edge` and a uniform yaw. There is no minimum
+        spacing, so actors may overlap. Overlapping actors are stacked instead
+        of interpenetrating: receptacles are placed first and objects after,
+        each in a random order, and an actor whose footprint (circle of radius
+        half its bbox xy-diagonal) overlaps an already placed actor is put with
+        its bbox bottom just above that actor's bbox top. Otherwise its bottom
+        sits just above `wide_table_z`.
+
+        Randomness: with `options["layout_ids"]` (envs/rng_streams.py) each env
+        draws from its own CPU generator keyed by `wide|id=<layout id>|try=
+        <attempt>`, so an env's start depends only on its id; `attempt` gives
+        `resample_wide_envs` fresh draws. Without ids (`--legacy-rng`) it uses
+        torch's global RNG.
+
+        Returns (xyz [b, N+M, 3], quat wxyz [b, N+M, 4]) on device, logical
+        slot order: objects first, then receptacles.
+        """
+        b, N, M = self.num_envs, self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        S = N + M
+        cx, cy = options.get("wide_center", (-0.16, 0.0))
+        hx, hy = options.get("wide_half_edge", (0.15, 0.15))
+        table_z = float(options.get("wide_table_z", 0.87))
+        gap = float(options.get("wide_gap", 0.004))
+
+        layout_ids = options.get("layout_ids")
+        if layout_ids is None:
+            gens = [None] * b
+            u = torch.rand((b, S, 2))
+            yaw = torch.rand((b, S)) * 2 * np.pi
+        else:
+            from .rng_streams import stream_key, stream_seed
+            gens = [torch.Generator().manual_seed(
+                        stream_seed(stream_key("wide", id=int(i), attempt=attempt)) % (2 ** 63 - 1))
+                    for i in torch.as_tensor(layout_ids).reshape(b).tolist()]
+            u = torch.stack([torch.rand((S, 2), generator=g) for g in gens])
+            yaw = torch.stack([torch.rand((S,), generator=g) for g in gens]) * 2 * np.pi
+        x = cx + (2 * u[..., 0] - 1) * hx
+        y = cy + (2 * u[..., 1] - 1) * hy
+        quat = torch.zeros((b, S, 4))
+        quat[..., 0] = torch.cos(yaw / 2)
+        quat[..., 3] = torch.sin(yaw / 2)
+        z = torch.full((b, S), table_z)
+
+        slot_names = []
+        for e in range(b):
+            names = []
+            for i in range(N):
+                cid = int(self._all_carrot_ids[i][e])
+                names.append(self.carrot_names[cid] if cid >= 0 else None)
+            for i in range(M):
+                pid = int(self._all_plate_ids[i][e])
+                names.append(self.plate_names[pid] if pid >= 0 else None)
+            slot_names.append(names)
+
+        for e in range(b):
+            g = gens[e]
+            order = ([N + int(k) for k in torch.randperm(M, generator=g)]
+                     + [int(k) for k in torch.randperm(N, generator=g)])
+            placed = []  # (x, y, radius, top_z)
+            for k in order:
+                name = slot_names[e][k]
+                if name is None:
+                    continue
+                size = self.model_bbox_sizes[name].cpu()
+                r = 0.5 * float(torch.hypot(size[0], size[1]))
+                xk, yk = float(x[e, k]), float(y[e, k])
+                bottom = table_z
+                for (xj, yj, rj, topj) in placed:
+                    if (xk - xj) ** 2 + (yk - yj) ** 2 < (r + rj) ** 2:
+                        bottom = max(bottom, topj)
+                bottom += gap
+                z[e, k] = bottom - self.model_bbox_min_z[name]
+                placed.append((xk, yk, r, bottom + float(size[2])))
+
+        xyz = torch.stack([x, y, z], dim=-1)
+        return xyz.to(self.device), quat.to(self.device)
+
+    def resample_wide_envs(self, env_mask, options, attempt, settle_t=2):
+        """Re-draw the wide layout (`_sample_wide_layout`, draw `attempt`) for
+        the envs in `env_mask` only, write their actor poses, settle, restore the
+        robot and refresh the selected task's world bboxes / grasp stats. Other
+        envs keep their poses."""
+        xyz, quat = self._sample_wide_layout(options, attempt=attempt)
+        self.agent.robot.set_pose(self.safe_robot_pos)
+        self._set_slot_poses(xyz, quat, env_mask)
+        self._finish_perturbation(settle_t)
+
+    def _slot(self, logical_idx):
+        """Maps a generic logical slot index to the physical preset slot index."""
+        if self.SLOT_ORDER is not None:
+            return self.SLOT_ORDER[logical_idx]
+        return logical_idx
+
+    def set_current_task(self, object, receptacle):
+        new_carrot_ids = []
+        for env_idx in range(self.num_envs):
+            found = False
+            for i in range(self.NUM_OBJECTS):
+                cid = self._all_carrot_ids[i][env_idx]
+                if cid < 0:
+                    continue  # hidden slot
+                if object[env_idx] == self.model_db_carrot[self.carrot_names[cid]]["name"]:
+                    new_carrot_ids.append(cid)
+                    found = True
+                    break
+            if not found:
+                raise ValueError(f"{object[env_idx]} not in available objects")
+
+        new_plate_ids = []
+        for env_idx in range(self.num_envs):
+            found = False
+            for i in range(self.NUM_RECEPTACLES):
+                pid = self._all_plate_ids[i][env_idx]
+                if pid < 0:
+                    continue  # hidden slot
+                if receptacle[env_idx] == self.model_db_plate[self.plate_names[pid]]["name"]:
+                    new_plate_ids.append(pid)
+                    found = True
+                    break
+            if not found:
+                raise ValueError(f"{receptacle[env_idx]} not in available receptacles")
+
+        self.select_carrot_ids = torch.stack(new_carrot_ids)
+        self.select_plate_ids = torch.stack(new_plate_ids)
+
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
+        self.objs = {
+            self.source_obj_name[0]: self.objs_carrot[select_carrot[0]],
+            self.target_obj_name[0]: self.objs_plate[select_plate[0]]
+        }
+
+    def object_name(self):
+        result = []
+        for env_idx in range(self.num_envs):
+            names = []
+            for i in range(self.NUM_OBJECTS):
+                cid = self._all_carrot_ids[i][env_idx]
+                if cid < 0:
+                    continue  # hidden slot
+                names.append(self.model_db_carrot[self.carrot_names[cid]]["name"])
+            result.append(names)
+        return result
+
+    def receptacle_name(self):
+        result = []
+        for env_idx in range(self.num_envs):
+            names = []
+            for i in range(self.NUM_RECEPTACLES):
+                pid = self._all_plate_ids[i][env_idx]
+                if pid < 0:
+                    continue  # hidden slot
+                names.append(self.model_db_plate[self.plate_names[pid]]["name"])
+            result.append(names)
+        return result
+
+    def _initialize_episode(self, env_idx, options):
+        self._initialize_episode_pre(env_idx, options)
+
+        self.select_carrot_ids = self._all_carrot_ids[0]
+        self.select_plate_ids = self._all_plate_ids[0]
+
+        b = self.num_envs
+
+        # RGB overlay
+        sensor = self._sensor_configs[self.rgb_camera_name]
+        assert sensor.width == 640 and sensor.height == 480
+        self.overlay_images = torch.tensor(
+            np.stack([self.overlay_images_numpy[idx] for idx in self.select_overlay_ids]), device=self.device)
+        self.overlay_textures = torch.tensor(
+            np.stack([self.overlay_textures_numpy[idx] for idx in self.select_overlay_ids]), device=self.device)
+        self.overlay_mix = torch.tensor(
+            np.array([self.overlay_mix_numpy[idx] for idx in self.select_overlay_ids]), device=self.device)
+
+        xyz_configs = torch.tensor(self.xyz_configs, device=self.device)
+        quat_configs = torch.tensor(self.quat_configs, device=self.device)
+
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+
+        self.source_obj_name = select_carrot
+        self.target_obj_name = select_plate
+        self.objs = {select_carrot[0]: carrot_actor[0], select_plate[0]: plate_actor[0]}
+
+        self.agent.robot.set_pose(self.safe_robot_pos)
+
+        # Place all carrots (logical slots 0..NUM_OBJECTS-1)
+        for db_idx, name in enumerate(self.model_db_carrot):
+            p_reset = torch.tensor([1.0, 0.3 * db_idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)
+            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1).float()
+            p, q = p_reset, q_reset
+            for slot in range(self.NUM_OBJECTS):
+                is_this = self._all_carrot_ids[slot] == db_idx
+                if self._wide_xyz is not None:
+                    p_slot, q_slot = self._wide_xyz[:, slot], self._wide_quat[:, slot]
+                else:
+                    p_slot = xyz_configs[self.select_pos_ids, self._slot(slot)].reshape(b, 3)
+                    q_slot = quat_configs[self.select_quat_ids, 0].reshape(b, 4)
+                p = torch.where(is_this.unsqueeze(1).expand_as(p), p_slot, p)
+                q = torch.where(is_this.unsqueeze(1).expand_as(q), q_slot, q)
+            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
+
+        # Place all plates (logical slots NUM_OBJECTS..NUM_OBJECTS+NUM_RECEPTACLES-1)
+        for db_idx, name in enumerate(self.model_db_plate):
+            p_reset = torch.tensor([2.0, 0.3 * db_idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)
+            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1).float()
+            p, q = p_reset, q_reset
+            for slot in range(self.NUM_RECEPTACLES):
+                is_this = self._all_plate_ids[slot] == db_idx
+                if self._wide_xyz is not None:
+                    p_slot = self._wide_xyz[:, self.NUM_OBJECTS + slot]
+                    q_slot = self._wide_quat[:, self.NUM_OBJECTS + slot]
+                else:
+                    p_slot = xyz_configs[self.select_pos_ids, self._slot(self.NUM_OBJECTS + slot)].reshape(b, 3)
+                    q_slot = quat_configs[self.select_quat_ids, 1].reshape(b, 4)
+                p = torch.where(is_this.unsqueeze(1).expand_as(p), p_slot, p)
+                q = torch.where(is_this.unsqueeze(1).expand_as(q), q_slot, q)
+            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
+
+        self._settle(0.5)
+
+        # Settle check
+        lin_vel = torch.tensor(0.0, device=self.device)
+        ang_vel = torch.tensor(0.0, device=self.device)
+        for slot_ids_list, db in [(self._all_carrot_ids, self.objs_carrot),
+                                   (self._all_plate_ids, self.objs_plate)]:
+            db_names = list(db.keys())
+            for slot_ids in slot_ids_list:
+                names = [db_names[idx] for idx in slot_ids]
+                actors = [db[n] for n in names]
+                lin_vel = lin_vel + torch.linalg.norm(torch.stack([a.linear_velocity[i] for i, a in enumerate(actors)]))
+                ang_vel = ang_vel + torch.linalg.norm(torch.stack([a.angular_velocity[i] for i, a in enumerate(actors)]))
+        if lin_vel > 1e-3 or ang_vel > 1e-2:
+            self._settle(6)
+
+        self.agent.robot.set_pose(self.initial_robot_pos)
+        self.agent.reset(init_qpos=self.initial_qpos)
+
+        # Fix: push the just-set CPU state (robot at initial pose +
+        # initial qpos) to the GPU so the camera renders the robot at its
+        # initial pose. Without this, BaseEnv.reset()'s post-init render reads
+        # the stale GPU state from the prior _settle (when the robot was at
+        # safe_robot_pos ~1m above the table) and the rollout's first frame
+        # shows the robot floating in the air. Mirrors the GPU-sync block in
+        # ResetStrategy.reset_robot which is correctly placed after qpos snap.
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+
+        # Bounding boxes
+        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])
+        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])
+        corner_signs = torch.tensor([
+            [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+        ], device=self.device)
+
+        carrot_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])
+        c_corners = (carrot_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        c_rot = torch.matmul(c_corners, rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle).transpose(1, 2))
+        self.carrot_bbox_world = c_rot.max(dim=1).values - c_rot.min(dim=1).values
+
+        plate_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_plate])
+        p_corners = (plate_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        p_rot = torch.matmul(p_corners, rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle).transpose(1, 2))
+        self.plate_bbox_world = p_rot.max(dim=1).values - p_rot.min(dim=1).values
+
+        self.consecutive_grasp = torch.zeros((b,), dtype=torch.int32, device=self.device)
+        self.episode_stats = dict(
+            is_src_obj_grasped=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_target2=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_table=torch.ones((b,), dtype=torch.bool, device=self.device),
+            gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+            gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+            carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+        )
+
+    # ------------------------------------------------------------------
+    # V0.5 eval start-scene perturbations (used by `eval_only.py --start-scene`).
+    #
+    # Both entry points re-pose actors AFTER a normal `reset()` and BEFORE the
+    # first rollout step of a sequence. They mirror `_initialize_episode`:
+    # robot parked at `safe_robot_pos` while objects settle, then snapped back
+    # to `initial_robot_pos`/`initial_qpos`, GPU state synced, world-frame
+    # bboxes recomputed for the currently selected task pair.
+    # ------------------------------------------------------------------
+    def _ids_from_names(self, names, db, all_ids, db_names):
+        """Per-env actor ids for `names[env]`, searched across the env's loaded
+        slots (same lookup as `set_current_task`). Returns LongTensor [b]."""
+        out = []
+        for env_idx in range(self.num_envs):
+            found = None
+            for slot_ids in all_ids:
+                cid = int(slot_ids[env_idx].item())
+                if cid < 0:
+                    continue
+                if names[env_idx] == db[db_names[cid]]["name"]:
+                    found = cid
+                    break
+            if found is None:
+                raise ValueError(f"{names[env_idx]} not loaded in env {env_idx}")
+            out.append(found)
+        return torch.tensor(out, dtype=torch.long, device=self.device)
+
+    def _actor_pos_by_ids(self, ids, db_names, objs):
+        p = torch.zeros((self.num_envs, 3), device=self.device)
+        for db_idx, name in enumerate(db_names):
+            mask = ids == db_idx
+            if mask.any():
+                p[mask] = objs[name].pose.p[mask]
+        return p
+
+    def _active_slot_velocity(self):
+        lin = torch.tensor(0.0, device=self.device)
+        ang = torch.tensor(0.0, device=self.device)
+        for slot_ids_list, db in [(self._all_carrot_ids, self.objs_carrot),
+                                   (self._all_plate_ids, self.objs_plate)]:
+            db_names = list(db.keys())
+            for slot_ids in slot_ids_list:
+                for env_i in range(self.num_envs):
+                    cid = int(slot_ids[env_i].item())
+                    if cid < 0:
+                        continue
+                    a = db[db_names[cid]]
+                    lin = lin + torch.linalg.norm(a.linear_velocity[env_i])
+                    ang = ang + torch.linalg.norm(a.angular_velocity[env_i])
+        return lin, ang
+
+    def _recompute_bbox_world(self):
+        """Recompute `carrot_bbox_world` / `plate_bbox_world` from the CURRENT
+        orientation of the currently selected task pair (tail of
+        `_initialize_episode`, but keyed on `select_*_ids`, not slot 0)."""
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])
+        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])
+        corner_signs = torch.tensor([
+            [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+        ], device=self.device)
+        carrot_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])
+        c_corners = (carrot_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        c_rot = torch.matmul(c_corners, rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle).transpose(1, 2))
+        self.carrot_bbox_world = c_rot.max(dim=1).values - c_rot.min(dim=1).values
+        plate_bbox = torch.stack([self.model_bbox_sizes[n] for n in select_plate])
+        p_corners = (plate_bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        p_rot = torch.matmul(p_corners, rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle).transpose(1, 2))
+        self.plate_bbox_world = p_rot.max(dim=1).values - p_rot.min(dim=1).values
+
+    def _finish_perturbation(self, settle_t, max_extra_settles=3):
+        """Settle, wait for rest, restore the robot, sync GPU, refresh bboxes/stats."""
+        self._settle(settle_t)
+        for _ in range(max_extra_settles):
+            lin, ang = self._active_slot_velocity()
+            if lin <= 1e-3 and ang <= 1e-2:
+                break
+            self._settle(6)
+        self.agent.robot.set_pose(self.initial_robot_pos)
+        self.agent.reset(init_qpos=self.initial_qpos)
+        self.scene._gpu_apply_all()
+        self.scene.px.gpu_update_articulation_kinematics()
+        self.scene._gpu_fetch_all()
+        self._recompute_bbox_world()
+        self.reset_grasp_stats()
+
+    def _world_z_extent(self, ids, db_names, objs):
+        """Per-env world-frame z extent of the actors `ids` at their CURRENT
+        orientation (bbox corners rotated by the actor quaternion)."""
+        b = self.num_envs
+        corner_signs = torch.tensor([
+            [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+        ], device=self.device, dtype=torch.float32)
+        bbox = torch.stack([self.model_bbox_sizes[db_names[int(i)]] for i in ids])  # [b, 3]
+        q = torch.zeros((b, 4), device=self.device)
+        for db_idx, name in enumerate(db_names):
+            mask = ids == db_idx
+            if mask.any():
+                q[mask] = objs[name].pose.q[mask]
+        corners = (bbox / 2)[:, None, :] * corner_signs[None, :, :]
+        rot = torch.matmul(corners, rotation_conversions.quaternion_to_matrix(q).transpose(1, 2))
+        return rot[:, :, 2].max(dim=1).values - rot[:, :, 2].min(dim=1).values  # [b]
+
+    def overlap_start(self, object_names, receptacle_names, dz=0.01, settle_t=5):
+        """Start-scene perturbation: drop `object_names[env]` onto
+        `receptacle_names[env]`. The object keeps its settled orientation and is
+        placed so that its bounding-box bottom sits `dz` above the receptacle's
+        bounding-box top (both at their current orientation), then the scene is
+        settled. Other actors are untouched."""
+        obj_ids = self._ids_from_names(object_names, self.model_db_carrot,
+                                       self._all_carrot_ids, self.carrot_names)
+        rec_ids = self._ids_from_names(receptacle_names, self.model_db_plate,
+                                       self._all_plate_ids, self.plate_names)
+        rec_p = self._actor_pos_by_ids(rec_ids, self.plate_names, self.objs_plate)
+        rec_h = self._world_z_extent(rec_ids, self.plate_names, self.objs_plate)
+        obj_h = self._world_z_extent(obj_ids, self.carrot_names, self.objs_carrot)
+        lift = rec_h / 2 + obj_h / 2 + dz  # [b]
+        target_p = rec_p.clone()
+        target_p[:, 2] = rec_p[:, 2] + lift
+
+        self.agent.robot.set_pose(self.safe_robot_pos)
+        for db_idx, name in enumerate(self.carrot_names):
+            mask = obj_ids == db_idx
+            if not mask.any():
+                continue
+            actor = self.objs_carrot[name]
+            p = actor.pose.p.clone()
+            q = actor.pose.q.clone()
+            p[mask] = target_p[mask]
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+        self._finish_perturbation(settle_t)
+
+    def _move_actors_onto(self, mover_ids, mover_names, mover_objs, base_ids, base_names, base_objs,
+                          env_mask, xy_offset, dz):
+        """For envs in `env_mask`, move actor `mover_ids[env]` so it rests on
+        actor `base_ids[env]`: xy = base xy + `xy_offset[env]`, bbox bottom `dz`
+        above the base's bbox top (both at their current orientation). The mover
+        keeps its orientation. Does not settle."""
+        base_p = self._actor_pos_by_ids(base_ids, base_names, base_objs)
+        base_h = self._world_z_extent(base_ids, base_names, base_objs)
+        mov_h = self._world_z_extent(mover_ids, mover_names, mover_objs)
+        target = base_p.clone()
+        target[:, :2] += xy_offset
+        target[:, 2] = base_p[:, 2] + base_h / 2 + mov_h / 2 + dz
+        for db_idx, name in enumerate(mover_names):
+            mask = (mover_ids == db_idx) & env_mask
+            if not mask.any():
+                continue
+            actor = mover_objs[name]
+            p, q = actor.pose.p.clone(), actor.pose.q.clone()
+            p[mask] = target[mask]
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+
+    def _pos_by_ids(self, ids, names, objs):
+        return self._actor_pos_by_ids(ids.clamp(min=0), names, objs)
+
+    def _rests_on(self, top_ids, top_names, top_objs, base_ids, base_names, base_objs,
+                  frac=1.0, min_force=1e-3):
+        """Per env: is actor `top_ids` resting on actor `base_ids`? Requires a
+        contact force between the two (as `evaluate` does for success) AND the
+        top actor's centre within `frac` x the base's bbox xy half-diagonal of
+        the base centre AND the top centre higher than the base centre."""
+        b = self.num_envs
+        tp = self._pos_by_ids(top_ids, top_names, top_objs)
+        bp = self._pos_by_ids(base_ids, base_names, base_objs)
+        half = torch.stack([0.5 * torch.hypot(*self.model_bbox_sizes[base_names[int(i)]][:2])
+                            for i in base_ids.clamp(min=0)])
+        xy_ok = torch.linalg.norm(tp[:, :2] - bp[:, :2], dim=1) <= frac * half
+        above = tp[:, 2] > bp[:, 2]
+        force = torch.zeros(b, device=self.device)
+        pairs = {}
+        for e in range(b):
+            t, bb = int(top_ids[e]), int(base_ids[e])
+            if t >= 0 and bb >= 0:
+                pairs.setdefault((t, bb), []).append(e)
+        for (t, bb), envs in pairs.items():
+            f = self.scene.get_pairwise_contact_forces(top_objs[top_names[t]], base_objs[base_names[bb]])
+            for e in envs:
+                force[e] = torch.linalg.norm(f[e])
+        return xy_ok & above & (force > min_force)
+
+    def overlapped_start(self, seed, dz=0.01, same_recep_offset=0.3, settle_t=5, max_tries=8):
+        """Start scene "overlapped": EVERY loaded object starts resting on a
+        receptacle. Each object picks a receptacle uniformly at random (seeded
+        CPU generator), except that the CURRENT task object never picks the
+        CURRENT target receptacle (`select_carrot_ids` / `select_plate_ids`, so
+        call after set_task). Other objects may pick any receptacle, including
+        the target. Objects sharing a receptacle are spread along a random
+        direction by +-`same_recep_offset` x the receptacle's bbox
+        half-diagonal. Receptacles are not moved.
+
+        After settling, envs where an object is not resting on its receptacle,
+        an actor fell off the table, or the task already counts as success are
+        re-placed (same assignment, new spread direction) up to `max_tries`
+        times. `self.start_scene_history` records the bad-env count per round."""
+        b = self.num_envs
+        gen = torch.Generator().manual_seed(int(seed))
+        N = self.NUM_OBJECTS
+        obj_slots = torch.stack(self._all_carrot_ids, 1).cpu()
+        rec_slots = torch.stack(self._all_plate_ids, 1).cpu()
+        task_obj, task_rec = self.select_carrot_ids.cpu(), self.select_plate_ids.cpu()
+        choice = torch.full((b, N), -1, dtype=torch.long)
+        for e in range(b):
+            recs = [int(r) for r in rec_slots[e] if r >= 0]
+            for i in range(N):
+                o = int(obj_slots[e, i])
+                if o < 0:
+                    continue
+                allowed = [r for r in recs if not (o == int(task_obj[e]) and r == int(task_rec[e]))]
+                choice[e, i] = allowed[int(torch.randint(len(allowed), (1,), generator=gen))]
+        todo = torch.ones(b, dtype=torch.bool)
+        history = []
+        for attempt in range(max_tries + 1):
+            ang = torch.rand((b,), generator=gen) * 2 * np.pi
+            direction = torch.stack([torch.cos(ang), torch.sin(ang)], 1)
+            offsets = torch.zeros((b, N, 2))
+            for e in range(b):
+                for r in set(int(c) for c in choice[e] if c >= 0):
+                    members = [i for i in range(N) if int(choice[e, i]) == r]
+                    if len(members) < 2:
+                        continue
+                    size = self.model_bbox_sizes[self.plate_names[r]].cpu()
+                    half_diag = 0.5 * float(torch.hypot(size[0], size[1]))
+                    for k, i in zip(torch.linspace(-1, 1, len(members)), members):
+                        offsets[e, i] = direction[e] * float(k) * same_recep_offset * half_diag
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            for i in range(N):
+                valid = (obj_slots[:, i] >= 0) & (choice[:, i] >= 0) & todo
+                if valid.any():
+                    self._move_actors_onto(
+                        obj_slots[:, i].clamp(min=0).to(self.device), self.carrot_names, self.objs_carrot,
+                        choice[:, i].clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                        valid.to(self.device), offsets[:, i].to(self.device), dz)
+            self._finish_perturbation(settle_t)
+            bad = self._fallen_mask() | self.get_info()["success"].bool()
+            for i in range(N):
+                valid = ((obj_slots[:, i] >= 0) & (choice[:, i] >= 0)).to(self.device)
+                on = self._rests_on(obj_slots[:, i].to(self.device), self.carrot_names, self.objs_carrot,
+                                    choice[:, i].to(self.device), self.plate_names, self.objs_plate)
+                bad |= valid & ~on
+            history.append(int(bad.sum()))
+            todo = bad.cpu()
+            if history[-1] == 0:
+                break
+        self.start_scene_assignment = choice
+        self.start_scene_history = history
+        self.reset_grasp_stats()
+        print(f"  [overlapped] seed={seed}: bad envs per round = {history}"
+              f"{'' if history[-1] == 0 else '  (still bad after retries)'}")
+
+    def cluttered_start(self, seed, overlap_frac=(0.3, 0.6), dz=0.005, settle_t=5, max_tries=8):
+        """Start scene "cluttered": the receptacles overlap. Per env (seeded CPU
+        generator) one of the first two loaded receptacles is picked as the
+        upper one and moved so it rests partly on the other: its centre is put
+        at the lower receptacle's centre + a random direction x U(overlap_frac)
+        x the lower receptacle's bbox half-diagonal, its bbox bottom `dz` above
+        the lower's bbox top. Objects are not moved.
+
+        After settling, envs where the upper receptacle is not resting on the
+        lower one, an actor fell off the table, or the task already counts as
+        success get a new direction/overlap (same upper/lower choice) up to
+        `max_tries` times."""
+        b = self.num_envs
+        if self.NUM_RECEPTACLES < 2:
+            raise ValueError("cluttered start scene needs at least two receptacles")
+        gen = torch.Generator().manual_seed(int(seed))
+        r0, r1 = self._all_plate_ids[0].cpu(), self._all_plate_ids[1].cpu()
+        upper_is_0 = torch.rand((b,), generator=gen) < 0.5
+        upper = torch.where(upper_is_0, r0, r1)
+        lower = torch.where(upper_is_0, r1, r0)
+        valid = (r0 >= 0) & (r1 >= 0)
+        half_diag = torch.tensor([0.5 * float(torch.hypot(*self.model_bbox_sizes[self.plate_names[int(l)]].cpu()[:2]))
+                                  for l in lower.clamp(min=0)])
+        lo, hi = overlap_frac
+        todo = valid.clone()
+        history = []
+        for attempt in range(max_tries + 1):
+            ang = torch.rand((b,), generator=gen) * 2 * np.pi
+            frac = lo + (hi - lo) * torch.rand((b,), generator=gen)
+            offset = torch.stack([torch.cos(ang), torch.sin(ang)], 1) * (frac * half_diag).unsqueeze(1)
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            self._move_actors_onto(
+                upper.clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                lower.clamp(min=0).to(self.device), self.plate_names, self.objs_plate,
+                todo.to(self.device), offset.to(self.device), dz)
+            self._finish_perturbation(settle_t)
+            on = self._rests_on(upper.to(self.device), self.plate_names, self.objs_plate,
+                                lower.to(self.device), self.plate_names, self.objs_plate)
+            bad = (self._fallen_mask() | self.get_info()["success"].bool() | ~on) & valid.to(self.device)
+            history.append(int(bad.sum()))
+            todo = bad.cpu()
+            if history[-1] == 0:
+                break
+        self.start_scene_upper = upper
+        self.start_scene_history = history
+        self.reset_grasp_stats()
+        print(f"  [cluttered] seed={seed}: bad envs per round = {history}"
+              f"{'' if history[-1] == 0 else '  (still bad after retries)'}")
+
+    def _sample_chaos_poses(self, gen, half_edge, center, base_height, drop_height,
+                            layer_gap, height_jitter, tilt_max_deg):
+        """One full-batch draw of chaos spawn poses. Returns (xyz [b,S,3], quat [b,S,4])
+        on device; slots are carrots first, then plates."""
+        b = self.num_envs
+        N, M = self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        S = N + M
+        u = torch.rand((b, S, 2), generator=gen)
+        xy = torch.tensor(center).reshape(1, 1, 2) + (2 * u - 1) * torch.tensor(half_edge).reshape(1, 1, 2)
+        # Spawn layers: receptacles take the lower layers (random order among
+        # themselves), objects the upper ones, so an object can land ON a
+        # receptacle but never gets buried UNDER one.
+        obj_layer = torch.argsort(torch.rand((b, N), generator=gen), dim=1).float() + M
+        rec_layer = torch.argsort(torch.rand((b, M), generator=gen), dim=1).float()
+        layer = torch.cat([obj_layer, rec_layer], dim=1)
+        z = base_height + drop_height + layer * layer_gap + torch.rand((b, S), generator=gen) * height_jitter
+        xyz = torch.cat([xy, z.unsqueeze(-1)], dim=-1)
+
+        yaw = torch.rand((b, S), generator=gen) * 2 * np.pi
+        tilt = torch.rand((b, S), generator=gen) * np.deg2rad(tilt_max_deg)
+        tilt_dir = torch.rand((b, S), generator=gen) * 2 * np.pi
+        roll = (tilt * torch.cos(tilt_dir)).numpy()
+        pitch = (tilt * torch.sin(tilt_dir)).numpy()
+        yaw = yaw.numpy()
+        quat = np.zeros((b, S, 4), dtype=np.float32)
+        for i in range(b):
+            for k in range(S):
+                quat[i, k] = euler2quat(roll[i, k], pitch[i, k], yaw[i, k])  # wxyz
+        return xyz.to(self.device), torch.tensor(quat, device=self.device)
+
+    def _set_slot_poses(self, xyz, quat, env_mask):
+        """Write spawn poses for every loaded slot actor of the envs in `env_mask`."""
+        N, M = self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        for db_idx, name in enumerate(self.carrot_names):
+            actor = self.objs_carrot[name]
+            p, q, touched = actor.pose.p.clone(), actor.pose.q.clone(), False
+            for slot in range(N):
+                mask = (self._all_carrot_ids[slot] == db_idx) & env_mask
+                if mask.any():
+                    p[mask] = xyz[mask, slot]
+                    q[mask] = quat[mask, slot]
+                    touched = True
+            if touched:
+                actor.set_pose(Pose.create_from_pq(p=p, q=q))
+        for db_idx, name in enumerate(self.plate_names):
+            actor = self.objs_plate[name]
+            p, q, touched = actor.pose.p.clone(), actor.pose.q.clone(), False
+            for slot in range(M):
+                mask = (self._all_plate_ids[slot] == db_idx) & env_mask
+                if mask.any():
+                    p[mask] = xyz[mask, N + slot]
+                    q[mask] = quat[mask, N + slot]
+                    touched = True
+            if touched:
+                actor.set_pose(Pose.create_from_pq(p=p, q=q))
+
+    def _fallen_mask(self, z_min=0.80):
+        """Envs where any loaded actor's centre is below `z_min` (fell off the table)."""
+        fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for slot_ids_list, db, db_names in [(self._all_carrot_ids, self.objs_carrot, self.carrot_names),
+                                            (self._all_plate_ids, self.objs_plate, self.plate_names)]:
+            for slot_ids in slot_ids_list:
+                for db_idx, name in enumerate(db_names):
+                    mask = slot_ids == db_idx
+                    if mask.any():
+                        fallen |= mask & (db[name].pose.p[:, 2] < z_min)
+        return fallen
+
+    def chaos_drop(self, seed, half_edge=(0.09, 0.09), center=(-0.16, 0.0),
+                   base_height=1.0, drop_height=0.10, layer_gap=0.10,
+                   height_jitter=0.05, tilt_max_deg=10.0, settle_t=10, max_retries=5):
+        """Start-scene perturbation: every loaded object AND receptacle is
+        dropped from above the table at a uniformly random xy inside
+        `center +- half_edge` (overlap allowed - no spacing constraint), a
+        random yaw, a random tilt in [0, tilt_max_deg], and a per-env random
+        stacking order so that actor k spawns at
+        `base_height + drop_height + k*layer_gap + U(0, height_jitter)`
+        (receptacles in the lower layers, objects above them).
+        Envs where an actor bounces off the table are re-dropped with fresh
+        draws, up to `max_retries` times. All randomness comes from a CPU
+        `torch.Generator` seeded with `seed`, so the same seed yields the same
+        scene for any checkpoint."""
+        b = self.num_envs
+        gen = torch.Generator().manual_seed(int(seed))
+        todo = torch.ones(b, dtype=torch.bool, device=self.device)
+        history = []
+        for attempt in range(max_retries + 1):
+            xyz, quat = self._sample_chaos_poses(gen, half_edge, center, base_height, drop_height,
+                                                 layer_gap, height_jitter, tilt_max_deg)
+            self.agent.robot.set_pose(self.safe_robot_pos)
+            self._set_slot_poses(xyz, quat, todo)
+            self._finish_perturbation(settle_t)
+            fallen = self._fallen_mask()
+            history.append(int(fallen.sum().item()))
+            if history[-1] == 0:
+                break
+            todo = fallen
+        print(f"  [chaos_drop] seed={seed}: envs with an actor off the table per attempt = {history}"
+              f"{'' if history[-1] == 0 else '  (still fallen after retries)'}")
+
+
+# --- M2 Phase B: PickPlaceNxM-v1 -------------------------------------
+#
+# Single parametric backbone for every (N, M) shape CRONOS supports. Replaces
+# the 8 legacy `@register_env` shims that lived above. Built on top of
+# `GenericNxMPickPlace`, which already has all the canonical machinery
+# (`_all_carrot_ids`, `_all_plate_ids`, `_slot()`, etc.) — `PickPlaceNxM`
+# just looks up the per-shape preset/slot-order/defaults from a table at
+# construction time and forwards everything else.
+#
+# The `_NxM_PRESETS` table is the single source of truth for shape metadata.
+# Each entry holds:
+#   POSE_PRESET, POSE_PRESET_OOD, SLOT_ORDER, DEFAULT_OBJ_INDICES, DEFAULT_PLATE_INDICES
+#
+# SLOT_ORDER maps logical slot index (carrots first, then plates) to the
+# physical preset slot index defined in `suite.POSE_PRESETS[...]`. For most
+# shapes this is the identity; for (N=2, M=1) the legacy preset has
+# slot_heights=[0.95, 0.92, 1.0] = [carrot, plate, extra_carrot], which
+# requires SLOT_ORDER=[0, 2, 1] to map [carrot, carrot, plate] correctly.
+
+_NxM_PRESETS: dict = {
+    # (N, M) -> dict of class attrs
+    # Object/plate selection: FIXED from DEFAULT_*_INDICES (1-based).
+    # Matches AutoRL's TwoObjectTwoReceptacle design for all shapes.
+    # Position/quaternion: per-env random when obj_set != "fixed".
+    (2, 1): dict(
+        POSE_PRESET="TwoObjectOneReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=[0, 2, 1],
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1],
+    ),
+    (1, 2): dict(
+        POSE_PRESET="OneObjectTwoReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7],
+        DEFAULT_PLATE_INDICES=[1, 2],
+    ),
+    (2, 2): dict(
+        POSE_PRESET="TwoObjectTwoReceptacle",
+        POSE_PRESET_OOD="TwoObjectTwoReceptacle_OOD",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1, 2],
+    ),
+    (3, 3): dict(
+        POSE_PRESET="ThreeObjectThreeReceptacle",
+        POSE_PRESET_OOD="ThreeObjectThreeReceptacle_OOD",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+    ),
+    (3, 1): dict(
+        POSE_PRESET="ThreeObjectOneReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1],
+    ),
+    (1, 3): dict(
+        POSE_PRESET="OneObjectThreeReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+    ),
+    (3, 2): dict(
+        POSE_PRESET="ThreeObjectTwoReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2, 10],
+        DEFAULT_PLATE_INDICES=[1, 2],
+    ),
+    (2, 3): dict(
+        POSE_PRESET="TwoObjectThreeReceptacle",
+        POSE_PRESET_OOD="",
+        SLOT_ORDER=None,
+        DEFAULT_OBJ_INDICES=[7, 2],
+        DEFAULT_PLATE_INDICES=[1, 2, 3],
+    ),
+}
+
+
+@register_env("PickPlaceNxM-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
+class PickPlaceNxM(GenericNxMPickPlace):
+    """Parametric pick-place env. `N` carrots and `M` receptacles per env.
+
+    Usage:
+        gym.make("PickPlaceNxM-v1", num_envs=64, N=2, M=1, ...)
+
+    Defaults to (N=2, M=1) for parity with the baseline run. The
+    accepted (N, M) pairs are exactly the 8 shapes in `_NxM_PRESETS`.
+    """
+
+    def __init__(self, *args, N: int = 2, M: int = 1, **kwargs):
+        if (N, M) not in _NxM_PRESETS:
+            raise ValueError(
+                f"PickPlaceNxM-v1 does not support (N={N}, M={M}). "
+                f"Supported shapes: {sorted(_NxM_PRESETS.keys())}"
+            )
+        spec = _NxM_PRESETS[(N, M)]
+        self.NUM_OBJECTS = N
+        self.NUM_RECEPTACLES = M
+        self.POSE_PRESET = spec["POSE_PRESET"]
+        self.POSE_PRESET_OOD = spec["POSE_PRESET_OOD"]
+        self.SLOT_ORDER = spec["SLOT_ORDER"]
+        self.DEFAULT_OBJ_INDICES = spec["DEFAULT_OBJ_INDICES"]
+        self.DEFAULT_PLATE_INDICES = spec["DEFAULT_PLATE_INDICES"]
+        # extract scene_spec before it hits ManiSkill's parent chain
+        # (which rejects unknown kwargs). Store on self so BaseEnv.__init__
+        # can read it via getattr(self, '_scene_spec', None).
+        self._scene_spec_arg = kwargs.pop("scene_spec", None)
+        super().__init__(*args, **kwargs)
