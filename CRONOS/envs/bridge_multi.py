@@ -151,6 +151,10 @@ class BasePickPlace(BaseEnv):
 
         # models
         self.model_bbox_sizes = {}
+        # Scaled bbox min-z per model: actor-origin height above the actor's
+        # bbox bottom is -model_bbox_min_z[name]. Used by the "wide" layout to
+        # place an actor so its bottom rests on the table or on another actor.
+        self.model_bbox_min_z = {}
 
         # carrot
         self.objs_carrot: dict[str, Actor] = {}
@@ -167,6 +171,7 @@ class BasePickPlace(BaseEnv):
 
             bbox_size = np.array(bbox["max"]) - np.array(bbox["min"])  # [3]
             self.model_bbox_sizes[name] = common.to_tensor(bbox_size * scale, device=self.device)  # [3]
+            self.model_bbox_min_z[name] = float(bbox["min"][2]) * float(scale)
 
         # plate
         self.objs_plate: dict[str, Actor] = {}
@@ -183,6 +188,7 @@ class BasePickPlace(BaseEnv):
 
             bbox_size = np.array(bbox["max"]) - np.array(bbox["min"])  # [3]
             self.model_bbox_sizes[name] = common.to_tensor(bbox_size * scale, device=self.device)  # [3]
+            self.model_bbox_min_z[name] = float(bbox["min"][2]) * float(scale)
 
     def _load_lighting(self, options: dict):
         self.scene.set_ambient_light([0.3, 0.3, 0.3])
@@ -1044,6 +1050,104 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             self.select_pos_ids = (rand_id // l2) % l1
             self.select_quat_ids = rand_id % l2
 
+        # "wide" layout (train_layout / eval_in_domain_layout): replaces the
+        # grid/spacing poses above with continuous random poses over the whole
+        # table (see `_sample_wide_layout`). Any other value keeps the default.
+        self._wide_xyz = self._wide_quat = None
+        if options.get("layout", "default") == "wide":
+            self._wide_xyz, self._wide_quat = self._sample_wide_layout(options)
+
+    def _sample_wide_layout(self, options, attempt=0):
+        """Random start poses with NO clutter avoidance over a wide table area.
+
+        Every loaded object and receptacle gets a uniform xy inside
+        `wide_center +- wide_half_edge` and a uniform yaw. There is no minimum
+        spacing, so actors may overlap. Overlapping actors are stacked instead
+        of interpenetrating: receptacles are placed first and objects after,
+        each in a random order, and an actor whose footprint (circle of radius
+        half its bbox xy-diagonal) overlaps an already placed actor is put with
+        its bbox bottom just above that actor's bbox top. Otherwise its bottom
+        sits just above `wide_table_z`.
+
+        Randomness: with `options["layout_ids"]` (envs/rng_streams.py) each env
+        draws from its own CPU generator keyed by `wide|id=<layout id>|try=
+        <attempt>`, so an env's start depends only on its id; `attempt` gives
+        `resample_wide_envs` fresh draws. Without ids (`--legacy-rng`) it uses
+        torch's global RNG.
+
+        Returns (xyz [b, N+M, 3], quat wxyz [b, N+M, 4]) on device, logical
+        slot order: objects first, then receptacles.
+        """
+        b, N, M = self.num_envs, self.NUM_OBJECTS, self.NUM_RECEPTACLES
+        S = N + M
+        cx, cy = options.get("wide_center", (-0.16, 0.0))
+        hx, hy = options.get("wide_half_edge", (0.15, 0.15))
+        table_z = float(options.get("wide_table_z", 0.87))
+        gap = float(options.get("wide_gap", 0.004))
+
+        layout_ids = options.get("layout_ids")
+        if layout_ids is None:
+            gens = [None] * b
+            u = torch.rand((b, S, 2))
+            yaw = torch.rand((b, S)) * 2 * np.pi
+        else:
+            from .rng_streams import stream_key, stream_seed
+            gens = [torch.Generator().manual_seed(
+                        stream_seed(stream_key("wide", id=int(i), attempt=attempt)) % (2 ** 63 - 1))
+                    for i in torch.as_tensor(layout_ids).reshape(b).tolist()]
+            u = torch.stack([torch.rand((S, 2), generator=g) for g in gens])
+            yaw = torch.stack([torch.rand((S,), generator=g) for g in gens]) * 2 * np.pi
+        x = cx + (2 * u[..., 0] - 1) * hx
+        y = cy + (2 * u[..., 1] - 1) * hy
+        quat = torch.zeros((b, S, 4))
+        quat[..., 0] = torch.cos(yaw / 2)
+        quat[..., 3] = torch.sin(yaw / 2)
+        z = torch.full((b, S), table_z)
+
+        slot_names = []
+        for e in range(b):
+            names = []
+            for i in range(N):
+                cid = int(self._all_carrot_ids[i][e])
+                names.append(self.carrot_names[cid] if cid >= 0 else None)
+            for i in range(M):
+                pid = int(self._all_plate_ids[i][e])
+                names.append(self.plate_names[pid] if pid >= 0 else None)
+            slot_names.append(names)
+
+        for e in range(b):
+            g = gens[e]
+            order = ([N + int(k) for k in torch.randperm(M, generator=g)]
+                     + [int(k) for k in torch.randperm(N, generator=g)])
+            placed = []  # (x, y, radius, top_z)
+            for k in order:
+                name = slot_names[e][k]
+                if name is None:
+                    continue
+                size = self.model_bbox_sizes[name].cpu()
+                r = 0.5 * float(torch.hypot(size[0], size[1]))
+                xk, yk = float(x[e, k]), float(y[e, k])
+                bottom = table_z
+                for (xj, yj, rj, topj) in placed:
+                    if (xk - xj) ** 2 + (yk - yj) ** 2 < (r + rj) ** 2:
+                        bottom = max(bottom, topj)
+                bottom += gap
+                z[e, k] = bottom - self.model_bbox_min_z[name]
+                placed.append((xk, yk, r, bottom + float(size[2])))
+
+        xyz = torch.stack([x, y, z], dim=-1)
+        return xyz.to(self.device), quat.to(self.device)
+
+    def resample_wide_envs(self, env_mask, options, attempt, settle_t=2):
+        """Re-draw the wide layout (`_sample_wide_layout`, draw `attempt`) for
+        the envs in `env_mask` only, write their actor poses, settle, restore the
+        robot and refresh the selected task's world bboxes / grasp stats. Other
+        envs keep their poses."""
+        xyz, quat = self._sample_wide_layout(options, attempt=attempt)
+        self.agent.robot.set_pose(self.safe_robot_pos)
+        self._set_slot_poses(xyz, quat, env_mask)
+        self._finish_perturbation(settle_t)
+
     def _slot(self, logical_idx):
         """Maps a generic logical slot index to the physical preset slot index."""
         if self.SLOT_ORDER is not None:
@@ -1154,8 +1258,11 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             p, q = p_reset, q_reset
             for slot in range(self.NUM_OBJECTS):
                 is_this = self._all_carrot_ids[slot] == db_idx
-                p_slot = xyz_configs[self.select_pos_ids, self._slot(slot)].reshape(b, 3)
-                q_slot = quat_configs[self.select_quat_ids, 0].reshape(b, 4)
+                if self._wide_xyz is not None:
+                    p_slot, q_slot = self._wide_xyz[:, slot], self._wide_quat[:, slot]
+                else:
+                    p_slot = xyz_configs[self.select_pos_ids, self._slot(slot)].reshape(b, 3)
+                    q_slot = quat_configs[self.select_quat_ids, 0].reshape(b, 4)
                 p = torch.where(is_this.unsqueeze(1).expand_as(p), p_slot, p)
                 q = torch.where(is_this.unsqueeze(1).expand_as(q), q_slot, q)
             self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
@@ -1167,8 +1274,12 @@ class GenericNxMPickPlace(BaseMultiPickPlace):
             p, q = p_reset, q_reset
             for slot in range(self.NUM_RECEPTACLES):
                 is_this = self._all_plate_ids[slot] == db_idx
-                p_slot = xyz_configs[self.select_pos_ids, self._slot(self.NUM_OBJECTS + slot)].reshape(b, 3)
-                q_slot = quat_configs[self.select_quat_ids, 1].reshape(b, 4)
+                if self._wide_xyz is not None:
+                    p_slot = self._wide_xyz[:, self.NUM_OBJECTS + slot]
+                    q_slot = self._wide_quat[:, self.NUM_OBJECTS + slot]
+                else:
+                    p_slot = xyz_configs[self.select_pos_ids, self._slot(self.NUM_OBJECTS + slot)].reshape(b, 3)
+                    q_slot = quat_configs[self.select_quat_ids, 1].reshape(b, 4)
                 p = torch.where(is_this.unsqueeze(1).expand_as(p), p_slot, p)
                 q = torch.where(is_this.unsqueeze(1).expand_as(q), q_slot, q)
             self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))

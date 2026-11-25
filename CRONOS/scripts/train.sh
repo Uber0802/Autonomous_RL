@@ -122,6 +122,12 @@ VLA=${6:-openvla}
 EER=${7:-on}
 ALGO=${8:-ppo}
 PERTURB=${9:-off}
+# PY: interpreter (nohup'd jobs have no conda env active).
+# EXTRA_ARGS: appended to the main.py command; a repeated flag overrides the
+# mode's value (argparse: last one wins), e.g.
+#   EXTRA_ARGS="--eval-interval 16 --num-eval-episode 1 --no-eval-ood"
+PY=${PY:-python}
+EXTRA_ARGS=${EXTRA_ARGS:-}
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA}
@@ -407,7 +413,7 @@ echo "[train.sh] run output dir: $RUN_OUT_DIR"
 # correct for T80 (1 segment / ep) but ~3× too small for T1280 (16 segments /
 # ep), causing premature "max_reset exceeded" stops mid-training.
 # Extract total num_envs from config (sum of per-group num_envs).
-_num_envs=$(python3 -c "
+_num_envs=$("$PY" -c "
 import yaml, sys
 cfg = yaml.safe_load(open('$CONFIG'))
 groups = cfg.get('groups', [])
@@ -453,7 +459,7 @@ _require_ckpt() {
   fi
 }
 
-COMMON="python main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS $PTB_ARGS $RNG_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
+COMMON="$PY main.py --name \"$RUN_TAG\" --seed $SEED $ENV_ARGS --config-path \"$CONFIG\" --num-eval-episode 4 $RESET_ARGS $EER_ARGS $ALGO_ARGS $PTB_ARGS $RNG_ARGS --record-video --wandb-dir \"$RUN_OUT_DIR\""
 
 case $MODE in
   # ── T80 ───────────────────────────────────────────────────────────────
@@ -461,7 +467,7 @@ case $MODE in
     eval $COMMON \
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
         --max-episodes 128 --max-reset $MAX_RESET \
-        --eval-interval 4 --vla-checkpoint-interval 32
+        --eval-interval 4 --vla-checkpoint-interval 32 $EXTRA_ARGS
     ;;
   t80b)
     _require_ckpt
@@ -469,7 +475,7 @@ case $MODE in
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
         --max-episodes 128 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 32 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
   t80c)
     _require_ckpt
@@ -477,7 +483,7 @@ case $MODE in
         --segment-len 80 --episode-len 80 --task-len 80 --ppo-update-len 80 \
         --max-episodes 320 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 32 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
 
   # ── T320 ──────────────────────────────────────────────────────────────
@@ -485,7 +491,7 @@ case $MODE in
     eval $COMMON \
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
         --max-episodes 32 --max-reset $MAX_RESET \
-        --eval-interval 4 --vla-checkpoint-interval 8
+        --eval-interval 4 --vla-checkpoint-interval 8 $EXTRA_ARGS
     ;;
   t320b)
     _require_ckpt
@@ -493,7 +499,7 @@ case $MODE in
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
         --max-episodes 32 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 8 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
   t320c)
     _require_ckpt
@@ -501,7 +507,7 @@ case $MODE in
         --segment-len 80 --episode-len 320 --task-len 80 --ppo-update-len 160 \
         --max-episodes 80 --max-reset $MAX_RESET \
         --eval-interval 4 --vla-checkpoint-interval 8 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
 
   # ── T1280 ─────────────────────────────────────────────────────────────
@@ -509,7 +515,7 @@ case $MODE in
     eval $COMMON \
         --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
         --max-episodes 8 --max-reset $MAX_RESET \
-        --eval-interval 1 --vla-checkpoint-interval 2
+        --eval-interval 1 --vla-checkpoint-interval 2 $EXTRA_ARGS
     ;;
   t1280b)
     _require_ckpt
@@ -517,7 +523,7 @@ case $MODE in
         --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
         --max-episodes 8 --max-reset $MAX_RESET \
         --eval-interval 1 --vla-checkpoint-interval 2 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
   t1280c)
     _require_ckpt
@@ -525,7 +531,7 @@ case $MODE in
         --segment-len 80 --episode-len 1280 --task-len 80 --ppo-update-len 160 \
         --max-episodes 20 --max-reset $MAX_RESET \
         --eval-interval 1 --vla-checkpoint-interval 2 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
 
   # ── T2560 ─────────────────────────────────────────────────────────────
@@ -533,7 +539,7 @@ case $MODE in
     eval $COMMON \
         --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
         --max-episodes 4 --max-reset $MAX_RESET \
-        --eval-interval 1 --vla-checkpoint-interval 1
+        --eval-interval 1 --vla-checkpoint-interval 1 $EXTRA_ARGS
     ;;
   t2560b)
     _require_ckpt
@@ -541,7 +547,7 @@ case $MODE in
         --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
         --max-episodes 4 --max-reset $MAX_RESET \
         --eval-interval 1 --vla-checkpoint-interval 1 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
   t2560c)
     _require_ckpt
@@ -549,6 +555,6 @@ case $MODE in
         --segment-len 80 --episode-len 2560 --task-len 80 --ppo-update-len 160 \
         --max-episodes 10 --max-reset $MAX_RESET \
         --eval-interval 1 --vla-checkpoint-interval 1 \
-        --vla-load-path "$CKPT"
+        --vla-load-path "$CKPT" $EXTRA_ARGS
     ;;
 esac

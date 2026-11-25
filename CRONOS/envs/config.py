@@ -65,6 +65,10 @@ _KNOWN_TOP_KEYS = {
     "task_filter",
     # policy / VLA overrides (mirrored into Args by main.py's YAML→Args loop).
     "policy", "vla_path", "vla_unnorm_key", "vla_lr", "vla_vhlr",
+    # Training start layout (mirrored into Args): "default" grid or "wide"
+    # (no spacing constraint, continuous poses over a wide table area).
+    "train_layout", "wide_center_x", "wide_center_y", "wide_half_x", "wide_half_y",
+    "eval_in_domain_layout",
 }
 
 _KNOWN_GROUP_KEYS = {
@@ -128,6 +132,14 @@ class CronosConfig:
     vla_unnorm_key: Optional[str] = None
     vla_lr: Optional[float] = None            # LoRA AdamW lr (per-policy split)
     vla_vhlr: Optional[float] = None          # value-head AdamW lr
+
+    # Start layout of training resets and (eval_in_domain_layout: train) in-training in-domain eval.
+    train_layout: Optional[str] = None        # "default" | "wide"
+    wide_center_x: Optional[float] = None
+    wide_center_y: Optional[float] = None
+    wide_half_x: Optional[float] = None
+    wide_half_y: Optional[float] = None
+    eval_in_domain_layout: Optional[str] = None   # "default" | "train"
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +509,12 @@ def load_cronos_config(path: Union[str, Path]) -> CronosConfig:
         vla_unnorm_key=raw.get("vla_unnorm_key"),
         vla_lr=raw.get("vla_lr"),
         vla_vhlr=raw.get("vla_vhlr"),
+        train_layout=raw.get("train_layout"),
+        wide_center_x=raw.get("wide_center_x"),
+        wide_center_y=raw.get("wide_center_y"),
+        wide_half_x=raw.get("wide_half_x"),
+        wide_half_y=raw.get("wide_half_y"),
+        eval_in_domain_layout=raw.get("eval_in_domain_layout"),
     )
 
     # Run validation (total_segments not known at load time; caller validates V14 later)

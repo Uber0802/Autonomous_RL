@@ -261,12 +261,16 @@ class CronosWrapper:
         return obs_image, reward, truncated, info
 
     def reset(self, same_init=True, obj_set_override=None, group_idx_override=None,
-              skip_scheduler=False, layout_ids=None, **kwargs):
+              skip_scheduler=False, layout_ids=None, layout=None, **kwargs):
         """Unified reset matching AutoRL: env.reset → set_task → zero reward_old.
 
         layout_ids: optional per-env integers (`envs/rng_streams.py`) fixing each
             env's initial object/receptacle placement. `None` keeps the env's own
             `torch.randint` draw on the global CUDA generator (`--legacy-rng`).
+        layout: `"wide"` swaps the default grid start poses for the wide,
+            no-spacing layout (`GenericNxMPickPlace._sample_wide_layout`) using
+            the `wide_*` bounds on args; `None` / `"default"` keeps the grid.
+            Follow a wide reset with `set_task` and then `fix_wide_starts`.
         """
         options = self._build_options(obj_set_override=obj_set_override,
                                       group_idx_override=group_idx_override)
@@ -274,6 +278,13 @@ class CronosWrapper:
             if len(layout_ids) != self.num_envs:
                 raise ValueError(f"layout_ids has {len(layout_ids)} entries for {self.num_envs} envs")
             options["layout_ids"] = torch.tensor(list(layout_ids), dtype=torch.long, device=self.device)
+        if layout not in (None, "default"):
+            a = self.args
+            options["layout"] = layout
+            options["wide_center"] = (float(a.wide_center_x), float(a.wide_center_y))
+            options["wide_half_edge"] = (float(a.wide_half_x), float(a.wide_half_y))
+            options["wide_table_z"] = float(getattr(a, "wide_table_z", 0.869))
+        self._last_layout_options = options if layout not in (None, "default") else None
         if same_init:
             options["episode_id"] = torch.full((self.num_envs,), getattr(self, 'rand_episode_id', self.args.seed), dtype=torch.long, device=self.device)
 
@@ -507,6 +518,31 @@ class CronosWrapper:
         self.env.unwrapped.chaos_drop(seed, **chaos_kwargs)
         self.reward_shaper.reward_old.zero_()
         return self.get_obs_image()
+
+    def fix_wide_starts(self, max_tries=10):
+        """After a reset with `layout="wide"` AND after the tasks are set:
+        re-sample, per env, the start layout of every env whose current task
+        already counts as success, or that has an actor off the table, until
+        none is left (at most `max_tries` rounds). No-op after a default-layout
+        reset. Returns (obs_image, history) where history lists the number of
+        bad envs before each round."""
+        u = self.env.unwrapped
+        opts = getattr(self, "_last_layout_options", None)
+        if opts is None:
+            return self.get_obs_image(), []
+        u._recompute_bbox_world()   # bboxes of the CURRENT task pair
+        history = []
+        for attempt in range(1, max_tries + 2):
+            bad = u.get_info()["success"].bool() | u._fallen_mask()
+            history.append(int(bad.sum().item()))
+            if history[-1] == 0:
+                break
+            if len(history) > max_tries:
+                break
+            u.resample_wide_envs(bad, opts, attempt)
+        u.reset_grasp_stats()
+        self.reward_shaper.reward_old.zero_()
+        return self.get_obs_image(), history
 
     def get_env_state(self):
         """snapshot the SAPIEN scene state (object/receptacle poses,

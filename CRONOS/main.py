@@ -94,6 +94,23 @@ class Args:
     #                env trips. Visually uniform across the batch.
     # YAML can override via `unsuitable_detector.reset_scope`.
     hsr_reset_scope: str = "per_env"
+    # Training start layout. "default" = AutoRL grid (6x6 grid on a 15 cm
+    # square, >=12 cm between actors, 4 yaws). "wide" = no spacing constraint,
+    # continuous xy over `wide_center +- wide_half` and continuous yaw;
+    # overlapping actors are stacked (see bridge_multi._sample_wide_layout).
+    # Applies to training resets; in-domain eval follows `eval_in_domain_layout`.
+    # Default wide bounds = the camera-visible, supported tabletop measured in
+    # sim (x in [-0.30, -0.05], y in [-0.25, 0.20]) minus a small margin.
+    train_layout: str = "default"
+    wide_center_x: float = -0.165
+    wide_center_y: float = -0.025
+    wide_half_x: float = 0.12
+    wide_half_y: float = 0.20
+    wide_table_z: float = 0.869      # measured settled table-top height
+    # In-domain eval start layout: "default" = AutoRL grid (comparable with the
+    # earlier runs); "train" = the training layout above (`train_layout`).
+    # Out-of-domain eval always keeps its own rand_ood grid.
+    eval_in_domain_layout: str = "default"
     # Dump the full pose state (every object slot, every receptacle slot, and the
     # gripper — position + quaternion) at the END of every segment, before any
     # HSR/LSR reset, to glob/segment_pose.csv. On by default: the record is
@@ -219,6 +236,7 @@ class Args:
     # training eval, above the McNemar gate's 24-trial floor.
     num_eval_episode: int = 4
     eval_at_start: bool = False     # run eval before first training episode
+    eval_ood: bool = True           # False = skip the out_of_domain pass of in-training eval
     eval_single: bool = False
     eval_sequential: bool = False
     # Standalone eval (--eval-single / --eval-sequential) settings; same names and
@@ -244,6 +262,10 @@ class Args:
     wandb: bool = True
     wandb_dir: str = ""
     record_video: bool = True
+    # "all" = every env; "per_task" = one env per (group, task) only
+    # (16 of 64 envs with the four-group 2x2 config), for train and eval videos.
+    video_subset: str = "all"
+    train_video_interval: int = 1   # save training videos every N-th episode (1 = every episode)
     ppo_log: str = "ppo_log.txt"            # per-minibatch PPO progress (in glob_dir)
     eval_report: str = "eval_report.txt"    # per-eval success rate summary (in glob_dir)
     log_file: str = "run.log"               # tee of stdout for the whole run (in the wandb files/ dir, NOT glob/); empty string disables
@@ -367,7 +389,9 @@ class CronosRunner:
                                "plate1_index", "plate2_index", "plate3_index",
                                "scene", "task_order",
                                "policy", "vla_path", "vla_unnorm_key",
-                               "vla_lr", "vla_vhlr"):
+                               "vla_lr", "vla_vhlr",
+                               "train_layout", "wide_center_x", "wide_center_y",
+                               "wide_half_x", "wide_half_y", "eval_in_domain_layout"):
                 yaml_val = getattr(self.yaml_config, field_name, None)
                 if yaml_val is not None and not self._cli_provided(field_name):
                     setattr(args, field_name, yaml_val)
@@ -1081,19 +1105,27 @@ class CronosRunner:
                 envs_obj.append(envs_obj[-1])
                 envs_recep.append(envs_recep[-1])
 
-            # Reset env and assign tasks
+            # Reset env and assign tasks. In-domain eval may use the training
+            # layout (`--eval-in-domain-layout train`); OOD keeps its own grid.
+            layout = None
+            if obj_set != "rand_ood" and self.args.eval_in_domain_layout == "train":
+                layout = self.args.train_layout
             obs, _, _ = self.env.reset(
-                obj_set_override=obj_set, skip_scheduler=True,
+                obj_set_override=obj_set, skip_scheduler=True, layout=layout,
                 layout_ids=self._scene_ids(obj_set, "eval", point=eval_point,
                                            domain=obj_set, round=ep))
             self.env.set_task(envs_obj, envs_recep)
+            if layout not in (None, "default"):
+                obs, hist = self.env.fix_wide_starts()
+                print(f"  [eval {prefix}] layout={layout}, re-sampled bad envs per round: {hist}")
             instruct = self.env.get_language_instructions()
 
             # Record video for all envs across ALL eval episodes
             record_this_ep = self.args.record_video
             total_group_envs_count = sum(gs for _, gs, _ in group_eval_info)
             if record_this_ep:
-                video_frames = {i: [] for i in range(total_group_envs_count)}
+                video_frames = {i: [] for i in self._video_env_ids("eval")
+                                if i < total_group_envs_count}
 
             # Rollout one episode
             env_infos = defaultdict(list)
@@ -1102,7 +1134,7 @@ class CronosRunner:
                 with torch.no_grad():
                     val, action, logp = self._get_action(obs, instruct, deterministic=True)
                 if record_this_ep:
-                    for env_i in range(total_group_envs_count):
+                    for env_i in video_frames:
                         video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
                 obs, reward, truncated, env_info = self.env.step(action)
                 if "episode" in env_info:
@@ -1115,7 +1147,7 @@ class CronosRunner:
                 # T+1 frames (matches AutoRL `render` and the standalone-eval
                 # `runner.eval`). Otherwise the recorded video ends at the input
                 # to the last action and the natural end-state is missing.
-                for env_i in range(total_group_envs_count):
+                for env_i in video_frames:
                     video_frames[env_i].append(obs[env_i].cpu().numpy().copy())
                 eval_video_dir = (self.glob_dir / "eval_videos"
                                   / f"ep{iteration + 1}" / prefix / f"eval_ep{ep + 1}")
@@ -1230,7 +1262,12 @@ class CronosRunner:
             instruct = self.env.get_language_instructions()
         else:
             obs, instruct, _ = self.env.reset(
-                layout_ids=self._scene_ids(self.args.obj_set, "episode", episode=episode))
+                layout_ids=self._scene_ids(self.args.obj_set, "episode", episode=episode),
+                layout=self.args.train_layout)
+            # wide layout: re-sample envs whose task starts solved / actor off table
+            obs, hist = self.env.fix_wide_starts()
+            if hist and hist[0] > 0:
+                print(f"[wide layout] re-sampled start scenes, bad envs per round: {hist}")
         self.buffer.warmup(obs, instruct)
 
         # Start of segment 1 — recorded here because this is AFTER the episode's
@@ -1240,8 +1277,11 @@ class CronosRunner:
         if self._pose_recording_enabled():
             self._record_segment_pose(episode, 0, episode_base_steps, phase="start")
 
-        # Record video for all envs
-        self._video_envs = list(range(self.args.num_envs))
+        # Record video for the selected envs (all, or one per (group, task)),
+        # only on every `train_video_interval`-th episode.
+        self._record_train_video = (self.args.record_video and
+                                    (self.iteration + 1) % max(1, self.args.train_video_interval) == 0)
+        self._video_envs = self._video_env_ids("train")
         self.video_frames = {i: [] for i in self._video_envs}
 
         # with fan_out, each YAML group is internally split by the scheduler.
@@ -1326,7 +1366,7 @@ class CronosRunner:
             # set_pose. By using next_obs (post-env.step), every recorded frame
             # is at least one physics tick past any reset, so the camera buffer
             # is always refreshed. T frames per training segment.
-            if self.args.record_video:
+            if self._record_train_video:
                 for i in self._video_envs:
                     self.video_frames[i].append(next_obs[i].cpu().numpy().copy())
 
@@ -1431,7 +1471,7 @@ class CronosRunner:
                 # physics but contributes no recorded frame — the next segment's
                 # first frame will be one env.step past the reset, with a
                 # refreshed camera buffer.
-                if self.args.record_video:
+                if self._record_train_video:
                     self.save_video_segment(iteration=self.iteration, segment_id=segment_id)
 
                 # phase="end": the full pose state BEFORE the HSR/LSR reset of
@@ -1605,11 +1645,13 @@ class CronosRunner:
 
             in_domain_results = _run_eval_start(self.args.obj_set, "in_domain", "in_domain")
             eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
-            ood_results = _run_eval_start("rand_ood", "out_of_domain", "out_of_domain")
-            eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
+            if self.args.eval_ood:
+                ood_results = _run_eval_start("rand_ood", "out_of_domain", "out_of_domain")
+                eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
             wandb.log(eval_log, step=total_steps_0)
             self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
-            self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
+            if self.args.eval_ood:
+                self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
             print("Eval-at-start complete.\n")
 
         for iteration in range(start_episode, end_episode):
@@ -1742,13 +1784,15 @@ class CronosRunner:
                 in_domain_results = _run_eval_pass(self.args.obj_set, "in_domain", "in_domain")
                 eval_log.update(self.recorder.build_wandb_eval_panel("in_domain"))
 
-                # Out-of-domain eval
-                ood_results = _run_eval_pass("rand_ood", "out_of_domain", "out_of_domain")
-                eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
+                # Out-of-domain eval (skipped with --no-eval-ood)
+                if self.args.eval_ood:
+                    ood_results = _run_eval_pass("rand_ood", "out_of_domain", "out_of_domain")
+                    eval_log.update(self.recorder.build_wandb_eval_panel("out_of_domain"))
 
                 wandb.log(eval_log, step=total_steps)
                 self._write_eval_report(report_header + "\nIn-Domain Evaluation:\n", in_domain_results)
-                self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
+                if self.args.eval_ood:
+                    self._write_eval_report("Out-of-Domain Evaluation:\n", ood_results)
 
                 # Trends dashboard refresh (per-eval): regenerate the
                 # 4-panel `trends.png` in the run's glob dir after each eval
@@ -1951,6 +1995,25 @@ class CronosRunner:
         _render_trends_per_task(self.glob_dir, max_eps, out_path_pt,
                                 entity=wandb_entity, project=wandb_project, run_id=run_id,
                                 extra_run_ids=extra_run_ids, extra_eval_csvs=extra_eval_csvs)
+
+    def _video_env_ids(self, kind):
+        """Env indices to record. `video_subset="all"` -> every env.
+        `"per_task"` -> one env per (group, task): training fan-out gives each
+        task a contiguous block of group_size/n_tasks envs, so take the first
+        env of each block; eval rotation gives env `local_i` task
+        `(local_i + ep) % n_tasks`, so take the first n_tasks envs of each group."""
+        n = self.args.num_envs
+        if self.args.video_subset == "all":
+            return list(range(n))
+        if self.args.video_subset != "per_task":
+            raise ValueError(f"video_subset must be 'all' or 'per_task', got {self.args.video_subset!r}")
+        ids, start = [], 0
+        for gs in self.scheduler.group_states:
+            n_tasks = max(1, len(gs.task_pool))
+            step = max(1, gs.num_envs // n_tasks) if kind == "train" else 1
+            ids.extend(start + k * step for k in range(n_tasks) if k * step < gs.num_envs)
+            start += gs.num_envs
+        return [i for i in ids if i < n]
 
     def save_video_segment(self, iteration, segment_id):
         """Saves current video buffer to glob/train_videos/ (first env per group)."""
